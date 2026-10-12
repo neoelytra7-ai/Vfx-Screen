@@ -1,0 +1,1864 @@
+name: Build CineShade 3
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - name: Write sources
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "CineShade"
+          include(":app")
+          EOF
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.cineshade.studio"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.cineshade.studio"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="CineShade" android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/cineshade/studio/Model.kt)
+          cat > app/src/main/java/com/cineshade/studio/Model.kt <<'EOF'
+          package com.cineshade.studio
+
+          import android.content.Context
+          import android.content.SharedPreferences
+          import java.util.Locale
+
+          sealed class S(val key: String, val title: String, val def: Int)
+          class Sl(key: String, title: String, def: Int, val min: Int, val max: Int, val unit: String = "", val div: Float = 100f) : S(key, title, def) {
+              fun show(v: Int): String = when {
+                  div == 10f -> String.format(Locale.US, "%.1f%s", v / 10f, unit)
+                  unit == " EV" -> String.format(Locale.US, "%.2f%s", v / 100f, unit)
+                  else -> "$v$unit"
+              }
+          }
+          class Tg(key: String, title: String, def: Boolean) : S(key, title, if (def) 1 else 0)
+          class Ch(key: String, title: String, def: Int, val options: List<String>) : S(key, title, def)
+          class Ac(key: String, title: String) : S(key, title, 0)
+          class Sec(val title: String, val badge: String, val items: List<S>)
+
+          object Fx {
+              val sections: List<Sec> = listOf(
+                  Sec("General", "", listOf(
+                      Tg("enabled", "Effects enabled", true),
+                      Tg("hdr", "HDR bloom buffers", true),
+                      Sl("bloom_levels", "Bloom levels", 5, 2, 6, "", 1f)
+                  )),
+                  Sec("Bloom", "", listOf(
+                      Sl("bloom", "Bloom intensity", 60, 0, 300, "%"),
+                      Sl("bloom_thr", "Threshold", 70, 0, 100, "%"),
+                      Sl("bloom_knee", "Soft knee", 50, 0, 100, "%"),
+                      Sl("bloom_radius", "Radius", 60, 0, 100, "%"),
+                      Sl("bloom_warm", "Warmth", 10, -100, 100),
+                      Sl("halation", "Halation", 15, 0, 200, "%")
+                  )),
+                  Sec("Streaks & rays", "", listOf(
+                      Sl("streak", "Anamorphic streak", 25, 0, 200, "%"),
+                      Sl("streak_len", "Streak length", 100, 20, 400, "%"),
+                      Sl("rays", "God rays", 0, 0, 200, "%"),
+                      Sl("rays_x", "Ray source X", 50, 0, 100, "%"),
+                      Sl("rays_y", "Ray source Y", 20, 0, 100, "%"),
+                      Sl("rays_decay", "Ray decay", 95, 80, 99, "%"),
+                      Sl("rays_density", "Ray length", 90, 20, 150, "%")
+                  )),
+                  Sec("Lens", "", listOf(
+                      Sl("ca", "Chromatic aberration", 25, 0, 200, "%"),
+                      Sl("ca_fall", "Aberration falloff", 150, 50, 400, "%"),
+                      Sl("lens", "Lens distortion", 0, -100, 100),
+                      Sl("sharpen", "Sharpen", 30, 0, 200, "%"),
+                      Sl("clarity", "Clarity", 20, 0, 200, "%"),
+                      Tg("fxaa", "Edge smoothing", false)
+                  )),
+                  Sec("Color", "", listOf(
+                      Ch("tm_mode", "Tonemapper", 0, listOf("None", "Reinhard", "ACES", "Filmic")),
+                      Sl("exposure", "Exposure", 0, -200, 200, " EV"),
+                      Sl("gamma", "Gamma", 100, 50, 200, "%"),
+                      Sl("contrast", "Contrast", 100, 50, 200, "%"),
+                      Sl("saturation", "Saturation", 105, 0, 250, "%"),
+                      Sl("vibrance", "Vibrance", 0, -100, 100),
+                      Sl("temp", "Temperature", 0, -100, 100),
+                      Sl("tint", "Tint", 0, -100, 100),
+                      Sl("brightness", "Brightness", 0, -50, 50),
+                      Sl("hue", "Hue shift", 0, -180, 180, "°", 1f),
+                      Sl("lift", "Lift (shadows)", 0, -30, 30),
+                      Sl("gain", "Gain (highlights)", 100, 50, 150, "%"),
+                      Sl("split", "Split toning", 0, 0, 100, "%"),
+                      Sl("split_sh_hue", "Shadow tone hue", 220, 0, 360, "°", 1f),
+                      Sl("split_hi_hue", "Highlight tone hue", 35, 0, 360, "°", 1f)
+                  )),
+                  Sec("Film", "", listOf(
+                      Sl("vig", "Vignette", 35, 0, 100, "%"),
+                      Sl("vig_size", "Vignette size", 85, 30, 120, "%"),
+                      Sl("vig_soft", "Vignette softness", 50, 5, 100, "%"),
+                      Sl("vig_round", "Vignette roundness", 100, 0, 100, "%"),
+                      Sl("grain", "Film grain", 20, 0, 100, "%"),
+                      Sl("grain_size", "Grain size", 15, 5, 40, " px", 10f),
+                      Sl("letter", "Letterbox", 0, 0, 30, "%"),
+                      Tg("dither", "Anti-banding dither", true)
+                  )),
+                  Sec("Blur", "", listOf(
+                      Sl("dof", "Tilt-shift blur", 0, 0, 100, "%"),
+                      Sl("dof_y", "Focus line", 50, 0, 100, "%"),
+                      Sl("dof_w", "Focus width", 20, 0, 50, "%"),
+                      Sl("mblur", "Motion blur", 0, 0, 90, "%")
+                  )),
+                  Sec("Stylize", "", listOf(
+                      Sl("outline", "Outlines", 0, 0, 100, "%"),
+                      Sl("outline_thr", "Outline threshold", 15, 1, 60, "%"),
+                      Sl("scan", "CRT scanlines", 0, 0, 100, "%"),
+                      Sl("pixel", "Pixelate", 0, 0, 16, " px", 1f),
+                      Sl("poster", "Posterize levels", 0, 0, 32, "", 1f),
+                      Sl("nv", "Night vision", 0, 0, 100, "%"),
+                      Sl("vhs", "VHS wobble", 0, 0, 100, "%")
+                  ))
+              )
+
+              val presets: LinkedHashMap<String, Map<String, Int>> = linkedMapOf(
+                  "Default" to emptyMap<String, Int>(),
+                  "Vanilla+" to mapOf("bloom" to 30, "bloom_thr" to 75, "sharpen" to 45, "clarity" to 25, "ca" to 0, "vig" to 20, "grain" to 0, "saturation" to 110, "halation" to 0, "streak" to 0),
+                  "Cinematic" to mapOf("bloom" to 70, "streak" to 40, "ca" to 35, "tm_mode" to 2, "contrast" to 110, "vig" to 45, "grain" to 25, "halation" to 30, "split" to 40, "saturation" to 95, "letter" to 8),
+                  "Dreamy" to mapOf("bloom" to 150, "bloom_radius" to 90, "bloom_thr" to 55, "halation" to 70, "saturation" to 120, "clarity" to 0, "sharpen" to 10, "mblur" to 15, "temp" to 15, "vig" to 25, "streak" to 30),
+                  "Crisp HDR" to mapOf("bloom" to 45, "sharpen" to 90, "clarity" to 70, "vibrance" to 35, "tm_mode" to 2, "exposure" to 15, "contrast" to 108, "ca" to 0, "vig" to 15, "grain" to 0),
+                  "Sunny rays" to mapOf("rays" to 90, "bloom" to 80, "bloom_warm" to 40, "temp" to 20, "halation" to 25, "saturation" to 115, "rays_y" to 10, "vig" to 25),
+                  "Retro CRT" to mapOf("scan" to 70, "lens" to 40, "ca" to 60, "vig" to 55, "vhs" to 25, "saturation" to 120, "bloom" to 40, "sharpen" to 0, "clarity" to 0, "grain" to 40),
+                  "Night vision" to mapOf("nv" to 100, "grain" to 50, "vig" to 60, "bloom" to 30, "sharpen" to 20),
+                  "Toon" to mapOf("outline" to 85, "poster" to 6, "saturation" to 135, "sharpen" to 20, "clarity" to 0, "bloom" to 20),
+                  "Off" to mapOf("enabled" to 0)
+              )
+
+              private val all: List<S> = sections.flatMap { it.items }
+              private val defs: Map<String, Int> = all.associate { it.key to it.def }
+              private val map = HashMap<String, Int>()
+              private var prefs: SharedPreferences? = null
+
+              fun init(c: Context) {
+                  if (prefs != null) return
+                  val p = c.applicationContext.getSharedPreferences("cs1", Context.MODE_PRIVATE)
+                  prefs = p
+                  for (k in defs.keys) if (p.contains(k)) map[k] = p.getInt(k, 0)
+              }
+
+              fun i(k: String): Int = map[k] ?: defs[k] ?: 0
+              fun isDefault(k: String): Boolean = i(k) == (defs[k] ?: 0)
+
+              fun set(k: String, v: Int) { map[k] = v; prefs?.edit()?.putInt(k, v)?.apply() }
+
+              fun resetKeys(keys: List<String>) {
+                  val e = prefs?.edit()
+                  for (k in keys) { map.remove(k); e?.remove(k) }
+                  e?.apply()
+              }
+
+              fun resetKey(k: String) = resetKeys(listOf(k))
+
+              fun applyPreset(name: String) {
+                  map.clear()
+                  val e = prefs?.edit()
+                  e?.clear()
+                  presets[name]?.forEach { (k, v) -> map[k] = v; e?.putInt(k, v) }
+                  e?.apply()
+              }
+
+              fun toIni(): String {
+                  val sb = StringBuilder()
+                  for (s in all) {
+                      when (s) {
+                          is Sl -> sb.append(String.format(Locale.US, "%s=%.4f\n", s.key, i(s.key) / s.div))
+                          is Tg -> sb.append(s.key).append('=').append(i(s.key)).append('\n')
+                          is Ch -> sb.append(s.key).append('=').append(i(s.key)).append('\n')
+                          is Ac -> {}
+                      }
+                  }
+                  return sb.toString()
+              }
+          }
+
+          class Tgt(val pkg: String, val name: String, val custom: Boolean)
+
+          object Targets {
+              private val known = listOf(
+                  Tgt("com.mojang.minecraftpe", "Minecraft Bedrock", false),
+                  Tgt("net.kdt.pojavlaunch", "PojavLauncher", false),
+                  Tgt("com.movtery.zalithlauncher", "Zalith Launcher", false),
+                  Tgt("com.tungsten.fcl", "Fold Craft Launcher", false)
+              )
+              private var prefs: SharedPreferences? = null
+
+              fun init(c: Context) { if (prefs == null) prefs = c.applicationContext.getSharedPreferences("cs_targets", Context.MODE_PRIVATE) }
+
+              fun customs(): List<Tgt> =
+                  (prefs?.getString("custom", "") ?: "").split(",").filter { it.isNotBlank() }.map { Tgt(it, it, true) }
+
+              fun all(): List<Tgt> = known + customs()
+
+              fun isOn(pkg: String): Boolean = prefs?.getStringSet("on", emptySet())?.contains(pkg) ?: false
+
+              fun setOn(pkg: String, on: Boolean) {
+                  val s = HashSet<String>(prefs?.getStringSet("on", emptySet()) ?: emptySet())
+                  if (on) s.add(pkg) else s.remove(pkg)
+                  prefs?.edit()?.putStringSet("on", s)?.apply()
+              }
+
+              fun addCustom(pkg: String) {
+                  val l = customs().map { it.pkg }.toMutableList()
+                  if (!l.contains(pkg) && known.none { it.pkg == pkg }) l.add(pkg)
+                  prefs?.edit()?.putString("custom", l.joinToString(","))?.apply()
+              }
+
+              fun removeCustom(pkg: String) {
+                  val l = customs().map { it.pkg }.filter { it != pkg }
+                  prefs?.edit()?.putString("custom", l.joinToString(","))?.apply()
+              }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/cineshade/studio/Root.kt)
+          cat > app/src/main/java/com/cineshade/studio/Root.kt <<'EOF'
+          package com.cineshade.studio
+
+          import android.content.Context
+          import java.io.File
+          import java.io.OutputStream
+
+          object RootShell {
+              private var proc: Process? = null
+              private var out: OutputStream? = null
+
+              @Synchronized fun exec(cmd: String): Boolean = try {
+                  if (proc == null) { val p = Runtime.getRuntime().exec("su"); proc = p; out = p.outputStream }
+                  out!!.write(("($cmd) >/dev/null 2>&1\n").toByteArray())
+                  out!!.flush()
+                  true
+              } catch (e: Exception) { proc = null; out = null; false }
+
+              fun run(cmd: String): String = try {
+                  val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "($cmd) 2>&1"))
+                  val s = p.inputStream.bufferedReader().readText()
+                  p.waitFor()
+                  s
+              } catch (e: Exception) { "error: ${e.message}" }
+          }
+
+          class Status(val root: Boolean, val module: Int, val zygisk: String, val manager: String, val installed: Set<String>)
+
+          object Sys {
+              private const val CFG = "cineshade.ini"
+
+              fun status(pkgs: List<String>): Status {
+                  val loop = pkgs.joinToString(" ")
+                  val out = RootShell.run(
+                      "echo uid=\$(id -u); " +
+                      "echo mod=\$([ -d /data/adb/modules/cineshade ] && echo 1 || echo 0); " +
+                      "echo pend=\$([ -d /data/adb/modules_update/cineshade ] && echo 1 || echo 0); " +
+                      "echo zyg=\$(magisk --sqlite \"SELECT value FROM settings WHERE key='zygisk'\" 2>/dev/null); " +
+                      "echo mv=\$(magisk -V 2>/dev/null); echo ksu=\$(ksud --version 2>/dev/null); " +
+                      "for p in $loop; do [ -d /data/data/\$p ] && echo inst:\$p; done")
+                  val kv = HashMap<String, String>()
+                  val inst = HashSet<String>()
+                  for (line in out.lines()) {
+                      val l = line.trim()
+                      if (l.startsWith("inst:")) inst.add(l.substring(5))
+                      else if (l.contains("=")) kv[l.substringBefore("=")] = l.substringAfter("=")
+                  }
+                  val root = kv["uid"] == "0"
+                  val module = if (kv["mod"] == "1") 1 else if (kv["pend"] == "1") 2 else 0
+                  val zyg = if ((kv["zyg"] ?: "").contains("value=1")) "On" else if ((kv["mv"] ?: "").isNotBlank()) "Off" else "Unknown"
+                  val mgr = if (!kv["mv"].isNullOrBlank()) "Magisk ${kv["mv"]}" else if (!kv["ksu"].isNullOrBlank()) "KernelSU ${kv["ksu"]}" else "-"
+                  return Status(root, module, zyg, mgr, inst)
+              }
+
+              fun install(ctx: Context): String {
+                  val dest = File(ctx.filesDir, "cineshade-module.zip")
+                  ctx.assets.open("cineshade-module.zip").use { i -> dest.outputStream().use { o -> i.copyTo(o) } }
+                  val out = RootShell.run(
+                      "cp ${dest.absolutePath} /data/local/tmp/cineshade-module.zip; chmod 644 /data/local/tmp/cineshade-module.zip; " +
+                      "cp /data/local/tmp/cineshade-module.zip /sdcard/Download/CineShade-module.zip; " +
+                      "(magisk --install-module /data/local/tmp/cineshade-module.zip) || " +
+                      "(ksud module install /data/local/tmp/cineshade-module.zip) || " +
+                      "(apd module install /data/local/tmp/cineshade-module.zip)")
+                  return out + "\n\nA copy was saved to Download/CineShade-module.zip for manual flashing."
+              }
+
+              fun push(ctx: Context) {
+                  val f = File(ctx.cacheDir, CFG)
+                  f.writeText(Fx.toIni())
+                  for (t in Targets.all()) {
+                      if (!Targets.isOn(t.pkg)) continue
+                      val d = "/data/data/${t.pkg}"
+                      val dst = "$d/$CFG"
+                      RootShell.exec("if [ -d $d ]; then cp ${f.absolutePath} $dst; chown \$(stat -c %u:%g $d) $dst; chmod 660 $dst; restorecon $dst; fi")
+                  }
+              }
+
+              fun remove(pkg: String) { RootShell.exec("rm -f /data/data/$pkg/$CFG") }
+
+              fun restart(pkg: String) {
+                  RootShell.exec("am force-stop $pkg; monkey -p $pkg -c android.intent.category.LAUNCHER 1")
+              }
+
+              fun diagnostics(): String {
+                  val sb = StringBuilder()
+                  sb.append("== config files ==\n")
+                  for (t in Targets.all()) sb.append(RootShell.run("ls -lZ /data/data/${t.pkg}/$CFG 2>/dev/null || echo '${t.pkg}: none'")).append('\n')
+                  sb.append("== module ==\n")
+                  sb.append(RootShell.run("ls -lR /data/adb/modules/cineshade 2>/dev/null | head -n 20 || echo missing")).append('\n')
+                  sb.append("== log (CineShade) ==\n")
+                  sb.append(RootShell.run("logcat -d -s CineShade:V | tail -n 60"))
+                  return sb.toString()
+              }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/cineshade/studio/MainActivity.kt)
+          cat > app/src/main/java/com/cineshade/studio/MainActivity.kt <<'EOF'
+          package com.cineshade.studio
+
+          import android.animation.Animator
+          import android.animation.AnimatorListenerAdapter
+          import android.animation.ValueAnimator
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.graphics.drawable.RippleDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.HapticFeedbackConstants
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.animation.DecelerateInterpolator
+          import android.view.animation.OvershootInterpolator
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              private val cBg = 0xFF0A0E14.toInt()
+              private val cCard = 0xFF121923.toInt()
+              private val cStroke = 0xFF1E2835.toInt()
+              private val cText = 0xFFE8EEF5.toInt()
+              private val cMuted = 0xFF8896A8.toInt()
+              private val cAccent = 0xFF8B7BFF.toInt()
+              private val cAccent2 = 0xFF22D3EE.toInt()
+              private val cTrack = 0xFF26313F.toInt()
+              private val cOk = 0xFF34D399.toInt()
+              private val cWarn = 0xFFF87171.toInt()
+              private val MP = ViewGroup.LayoutParams.MATCH_PARENT
+              private val WC = ViewGroup.LayoutParams.WRAP_CONTENT
+
+              private lateinit var snackTv: TextView
+              private val refreshers = ArrayList<() -> Unit>()
+              private val secChecks = ArrayList<() -> Unit>()
+              private val chips = LinkedHashMap<String, TextView>()
+              private val openSecs = hashSetOf("Setup", "Games")
+              private var selPreset: String? = null
+              private var lastTick = 0L
+              private val handler = Handler(Looper.getMainLooper())
+              private val pushTask = Runnable { Sys.push(this) }
+
+              private var stRoot: TextView? = null
+              private var stModule: TextView? = null
+              private var stZygisk: TextView? = null
+              private var stMgr: TextView? = null
+              private var targetsHost: LinearLayout? = null
+              private var installed: Set<String> = emptySet()
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  Fx.init(this)
+                  Targets.init(this)
+                  window.statusBarColor = cBg
+                  window.navigationBarColor = cBg
+                  build()
+              }
+
+              override fun onResume() { super.onResume(); refreshStatus() }
+
+              // ---------- helpers ----------
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun lp(w: Int, h: Int, wt: Float = 0f) = LinearLayout.LayoutParams(w, h, wt)
+
+              private fun rr(color: Int, r: Int, stroke: Int = 0): GradientDrawable = GradientDrawable().apply {
+                  setColor(color); cornerRadius = dp(r).toFloat()
+                  if (stroke != 0) setStroke(dp(1), stroke)
+              }
+
+              private fun ripple(bg: Drawable?, r: Int): RippleDrawable =
+                  RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), bg, rr(Color.WHITE, r))
+
+              private fun tv(t: String, size: Float, color: Int = cText, bold: Boolean = false): TextView = TextView(this).apply {
+                  text = t; textSize = size; setTextColor(color)
+                  if (bold) typeface = Typeface.DEFAULT_BOLD
+              }
+
+              @Suppress("ClickableViewAccessibility")
+              private fun press(v: View) {
+                  v.setOnTouchListener { view, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> view.animate().scaleX(0.95f).scaleY(0.95f).setDuration(90).start()
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                              view.animate().scaleX(1f).scaleY(1f).setDuration(240).setInterpolator(OvershootInterpolator(2.2f)).start()
+                      }
+                      false
+                  }
+              }
+
+              private fun pop(v: View) {
+                  v.animate().cancel()
+                  v.scaleX = 1.14f; v.scaleY = 1.14f
+                  v.animate().scaleX(1f).scaleY(1f).setDuration(150).start()
+              }
+
+              private fun snack(m: String) {
+                  snackTv.animate().cancel()
+                  snackTv.text = m
+                  snackTv.visibility = View.VISIBLE
+                  snackTv.alpha = 0f
+                  snackTv.translationY = dp(20).toFloat()
+                  snackTv.animate().alpha(1f).translationY(0f).setDuration(220).setStartDelay(0).withEndAction {
+                      snackTv.animate().alpha(0f).setStartDelay(1600).setDuration(300).withEndAction {
+                          snackTv.visibility = View.GONE
+                      }.start()
+                  }.start()
+              }
+
+              private fun schedulePush() {
+                  handler.removeCallbacks(pushTask)
+                  handler.postDelayed(pushTask, 250)
+              }
+
+              private fun showText(title: String, text: String) {
+                  val t = TextView(this)
+                  t.text = text; t.textSize = 11f; t.typeface = Typeface.MONOSPACE
+                  t.setTextIsSelectable(true); t.setPadding(dp(18), dp(10), dp(18), dp(10))
+                  val sv = ScrollView(this)
+                  sv.addView(t)
+                  AlertDialog.Builder(this).setTitle(title).setView(sv).setPositiveButton("Close", null).show()
+              }
+
+              private fun styledSwitch(): Switch {
+                  val sw = Switch(this)
+                  val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+                  sw.thumbTintList = ColorStateList(states, intArrayOf(cAccent2, 0xFFB0BAC8.toInt()))
+                  sw.trackTintList = ColorStateList(states, intArrayOf(0x6622D3EE, 0xFF2A3544.toInt()))
+                  return sw
+              }
+
+              // ---------- main UI ----------
+              private fun build() {
+                  refreshers.clear(); secChecks.clear(); chips.clear()
+                  val frame = FrameLayout(this)
+                  frame.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(cBg, 0xFF0E141C.toInt()))
+                  val sv = ScrollView(this)
+                  sv.overScrollMode = View.OVER_SCROLL_NEVER
+                  sv.isVerticalScrollBarEnabled = false
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(dp(16), dp(36), dp(16), dp(44))
+
+                  col.addView(tv("CineShade", 32f, Color.WHITE, true))
+                  col.addView(tv("R E A L T I M E   G A M E   S H A D E R S", 11f, cAccent2, true).apply { setPadding(0, 0, 0, dp(14)) })
+
+                  // setup + games
+                  val setup = Sec("Setup", "ROOT", listOf(
+                      Ac("act_install", "Install / update module"),
+                      Ac("act_reboot", "Reboot device"),
+                      Ac("act_diag", "Diagnostics")
+                  ))
+                  col.addView(section(setup) { body ->
+                      stRoot = statusRow(body, "Root")
+                      stMgr = statusRow(body, "Manager")
+                      stModule = statusRow(body, "Module")
+                      stZygisk = statusRow(body, "Zygisk")
+                  }, lp(MP, WC).apply { topMargin = dp(4) })
+
+                  val games = Sec("Games", "", listOf(
+                      Ac("act_restart", "Restart enabled games"),
+                      Ac("act_addpkg", "Add package"),
+                      Ac("act_disable", "Disable injection everywhere")
+                  ))
+                  col.addView(section(games) { body ->
+                      val host = LinearLayout(this)
+                      host.orientation = LinearLayout.VERTICAL
+                      targetsHost = host
+                      body.addView(host, lp(MP, WC))
+                      rebuildTargets()
+                  }, lp(MP, WC).apply { topMargin = dp(14) })
+
+                  // presets
+                  col.addView(tv("Presets", 15f, cMuted, true).apply { setPadding(dp(4), dp(22), 0, dp(8)) })
+                  val hs = HorizontalScrollView(this)
+                  hs.isHorizontalScrollBarEnabled = false
+                  hs.overScrollMode = View.OVER_SCROLL_NEVER
+                  val row = LinearLayout(this)
+                  for (name in Fx.presets.keys) {
+                      val chip = tv(name, 13f, cText).apply { setPadding(dp(16), dp(9), dp(16), dp(9)); background = rr(0x14FFFFFF, 18, 0x22FFFFFF) }
+                      press(chip)
+                      chip.setOnClickListener {
+                          it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                          Fx.applyPreset(name)
+                          selPreset = name; updateChips()
+                          schedulePush()
+                          refreshers.forEach { r -> r() }
+                          secChecks.forEach { r -> r() }
+                          snack("Preset: $name")
+                      }
+                      chips[name] = chip
+                      row.addView(chip, lp(WC, WC).apply { rightMargin = dp(8) })
+                  }
+                  hs.addView(row)
+                  col.addView(hs)
+
+                  for (sec in Fx.sections) col.addView(section(sec, null), lp(MP, WC).apply { topMargin = dp(14) })
+
+                  val ra = tv("↺   Reset all effects", 14f, cWarn, true).apply {
+                      gravity = Gravity.CENTER; setPadding(0, dp(15), 0, dp(15))
+                      background = ripple(rr(0x14F87171, 16, 0x33F87171), 16)
+                  }
+                  press(ra)
+                  ra.setOnClickListener {
+                      it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                      Fx.applyPreset("Default")
+                      selPreset = null; updateChips()
+                      schedulePush()
+                      refreshers.forEach { r -> r() }
+                      secChecks.forEach { r -> r() }
+                      snack("All effects reset")
+                  }
+                  col.addView(ra, lp(MP, WC).apply { topMargin = dp(22) })
+                  col.addView(tv("Changes apply to running games within a second", 11f, cMuted).apply { gravity = Gravity.CENTER; setPadding(0, dp(14), 0, 0) }, lp(MP, WC))
+
+                  sv.addView(col)
+                  frame.addView(sv, FrameLayout.LayoutParams(MP, MP))
+                  snackTv = tv("", 13f, Color.WHITE).apply {
+                      setPadding(dp(18), dp(12), dp(18), dp(12)); background = rr(0xEE1B2430.toInt(), 24, 0x33FFFFFF)
+                      visibility = View.GONE
+                  }
+                  val slp = FrameLayout.LayoutParams(WC, WC, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+                  slp.bottomMargin = dp(28)
+                  frame.addView(snackTv, slp)
+                  setContentView(frame)
+
+                  updateChips()
+                  for (i in 0 until col.childCount) {
+                      val v = col.getChildAt(i)
+                      v.alpha = 0f; v.translationY = dp(22).toFloat()
+                      v.animate().alpha(1f).translationY(0f).setStartDelay(i * 45L).setDuration(380)
+                          .setInterpolator(DecelerateInterpolator()).start()
+                  }
+              }
+
+              private fun updateChips() {
+                  for ((n, c) in chips) {
+                      val sel = n == selPreset
+                      c.background = rr(if (sel) cAccent else 0x14FFFFFF, 18, if (sel) cAccent else 0x22FFFFFF)
+                      c.setTextColor(if (sel) Color.WHITE else cText)
+                  }
+              }
+
+              // ---------- status + targets ----------
+              private fun statusRow(parent: LinearLayout, label: String): TextView {
+                  val row = LinearLayout(this)
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  row.setPadding(0, dp(9), 0, dp(3))
+                  row.addView(tv(label, 14f, cMuted), lp(0, WC, 1f))
+                  val v = tv("…", 14f, cMuted, true)
+                  row.addView(v)
+                  parent.addView(row, lp(MP, WC))
+                  return v
+              }
+
+              private fun setStatus(v: TextView?, text: String, color: Int) {
+                  v?.text = text
+                  v?.setTextColor(color)
+              }
+
+              private fun refreshStatus() {
+                  if (stRoot == null) return
+                  Thread {
+                      val st = Sys.status(Targets.all().map { it.pkg })
+                      runOnUiThread {
+                          installed = st.installed
+                          setStatus(stRoot, if (st.root) "Granted" else "Not available", if (st.root) cOk else cWarn)
+                          setStatus(stMgr, st.manager, cText)
+                          when (st.module) {
+                              1 -> setStatus(stModule, "Installed", cOk)
+                              2 -> setStatus(stModule, "Reboot to activate", cAccent2)
+                              else -> setStatus(stModule, "Not installed", cWarn)
+                          }
+                          setStatus(stZygisk, st.zygisk, if (st.zygisk == "On") cOk else if (st.zygisk == "Off") cWarn else cMuted)
+                          rebuildTargets()
+                      }
+                  }.start()
+              }
+
+              private fun rebuildTargets() {
+                  val host = targetsHost ?: return
+                  host.removeAllViews()
+                  for (t in Targets.all()) {
+                      val row = LinearLayout(this)
+                      row.gravity = Gravity.CENTER_VERTICAL
+                      row.setPadding(0, dp(10), 0, dp(6))
+                      val txt = LinearLayout(this)
+                      txt.orientation = LinearLayout.VERTICAL
+                      txt.addView(tv(t.name, 14f))
+                      val inst = installed.contains(t.pkg)
+                      val sub = t.pkg + (if (installed.isEmpty()) "" else if (inst) "  •  installed" else "  •  not found")
+                      txt.addView(tv(sub, 11f, if (inst) cOk else cMuted))
+                      row.addView(txt, lp(0, WC, 1f))
+                      if (t.custom) {
+                          val x = tv("✕", 16f, cMuted).apply { setPadding(dp(10), 0, dp(14), 0) }
+                          x.setOnClickListener {
+                              Targets.setOn(t.pkg, false); Sys.remove(t.pkg); Targets.removeCustom(t.pkg)
+                              rebuildTargets()
+                          }
+                          row.addView(x)
+                      }
+                      val sw = styledSwitch()
+                      sw.isChecked = Targets.isOn(t.pkg)
+                      sw.setOnCheckedChangeListener { v, on ->
+                          v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                          Targets.setOn(t.pkg, on)
+                          if (on) { Sys.push(this@MainActivity); snack("${t.name} enabled. Restart the game") }
+                          else { Sys.remove(t.pkg); snack("${t.name} disabled") }
+                      }
+                      row.addView(sw)
+                      host.addView(row, lp(MP, WC))
+                  }
+              }
+
+              private fun handleAction(k: String) {
+                  when (k) {
+                      "act_install" -> {
+                          snack("Installing module…")
+                          Thread {
+                              val out = Sys.install(this@MainActivity)
+                              runOnUiThread { showText("Install result", out); refreshStatus() }
+                          }.start()
+                      }
+                      "act_reboot" -> {
+                          AlertDialog.Builder(this).setTitle("Reboot now?")
+                              .setPositiveButton("Reboot") { _, _ -> RootShell.exec("reboot") }
+                              .setNegativeButton("Cancel", null).show()
+                      }
+                      "act_diag" -> {
+                          snack("Collecting diagnostics…")
+                          Thread {
+                              val out = Sys.diagnostics()
+                              runOnUiThread { showText("Diagnostics", out) }
+                          }.start()
+                      }
+                      "act_restart" -> {
+                          val on = Targets.all().filter { Targets.isOn(it.pkg) }
+                          if (on.isEmpty()) snack("Enable a game first")
+                          else { Sys.push(this); on.forEach { Sys.restart(it.pkg) }; snack("Restarting ${on.size} game(s)") }
+                      }
+                      "act_addpkg" -> {
+                          val et = EditText(this)
+                          et.hint = "com.example.game"
+                          et.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                          AlertDialog.Builder(this).setTitle("Add package").setView(et)
+                              .setPositiveButton("Add") { _, _ ->
+                                  val p = et.text.toString().trim()
+                                  if (p.contains(".")) { Targets.addCustom(p); rebuildTargets(); refreshStatus() } else snack("Invalid package")
+                              }
+                              .setNegativeButton("Cancel", null).show()
+                      }
+                      "act_disable" -> {
+                          for (t in Targets.all()) { Targets.setOn(t.pkg, false); Sys.remove(t.pkg) }
+                          rebuildTargets()
+                          snack("Injection disabled everywhere")
+                      }
+                  }
+              }
+
+              // ---------- sections ----------
+              private fun section(sec: Sec, extra: ((LinearLayout) -> Unit)?): View {
+                  val card = LinearLayout(this)
+                  card.orientation = LinearLayout.VERTICAL
+                  card.background = rr(cCard, 22, cStroke)
+
+                  val head = LinearLayout(this)
+                  head.gravity = Gravity.CENTER_VERTICAL
+                  head.setPadding(dp(18), dp(16), dp(10), dp(16))
+                  head.background = RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null, rr(Color.WHITE, 22))
+                  head.addView(tv(sec.title, 16f, cText, true))
+                  if (sec.badge.isNotEmpty()) {
+                      head.addView(tv(sec.badge, 9.5f, cAccent, true).apply {
+                          setPadding(dp(7), dp(2), dp(7), dp(2)); background = rr(0x228B7BFF, 8)
+                      }, lp(WC, WC).apply { leftMargin = dp(9) })
+                  }
+                  head.addView(View(this), lp(0, 1, 1f))
+                  val secReset = tv("↺", 19f, cMuted).apply { setPadding(dp(10), dp(2), dp(12), dp(2)) }
+                  val chev = tv("⌄", 20f, cMuted).apply { setPadding(dp(4), 0, dp(8), 0) }
+                  head.addView(secReset)
+                  head.addView(chev)
+                  card.addView(head, lp(MP, WC))
+
+                  val body = LinearLayout(this)
+                  body.orientation = LinearLayout.VERTICAL
+                  body.setPadding(dp(18), 0, dp(18), dp(10))
+                  if (extra != null) extra(body)
+                  for (s in sec.items) when (s) {
+                      is Sl -> slider(body, s)
+                      is Tg -> toggle(body, s)
+                      is Ch -> choice(body, s)
+                      is Ac -> action(body, s)
+                  }
+                  card.addView(body, lp(MP, WC))
+
+                  val open0 = openSecs.contains(sec.title)
+                  body.visibility = if (open0) View.VISIBLE else View.GONE
+                  chev.rotation = if (open0) 180f else 0f
+                  head.setOnClickListener {
+                      it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                      val open = !openSecs.contains(sec.title)
+                      if (open) openSecs.add(sec.title) else openSecs.remove(sec.title)
+                      setOpen(body, chev, open)
+                  }
+
+                  val keys = sec.items.filter { it !is Ac }.map { it.key }
+                  if (keys.isEmpty()) {
+                      secReset.visibility = View.GONE
+                  } else {
+                      val sc: () -> Unit = {
+                          val show = keys.any { !Fx.isDefault(it) }
+                          secReset.animate().alpha(if (show) 1f else 0.15f).setDuration(160).start()
+                          secReset.isClickable = show
+                      }
+                      secReset.alpha = if (keys.any { !Fx.isDefault(it) }) 1f else 0.15f
+                      secReset.isClickable = keys.any { !Fx.isDefault(it) }
+                      secChecks.add(sc)
+                      secReset.setOnClickListener {
+                          it.animate().rotationBy(-360f).setDuration(420).setInterpolator(DecelerateInterpolator()).start()
+                          it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                          Fx.resetKeys(keys)
+                          selPreset = null; updateChips()
+                          schedulePush()
+                          refreshers.forEach { r -> r() }
+                          secChecks.forEach { r -> r() }
+                          snack("${sec.title} reset")
+                      }
+                  }
+                  return card
+              }
+
+              private fun setOpen(body: View, chev: TextView, open: Boolean) {
+                  chev.animate().rotation(if (open) 180f else 0f).setDuration(240).start()
+                  val lpb = body.layoutParams
+                  if (open) {
+                      body.visibility = View.VISIBLE
+                      val ws = View.MeasureSpec.makeMeasureSpec(resources.displayMetrics.widthPixels - dp(32), View.MeasureSpec.EXACTLY)
+                      body.measure(ws, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                      val target = body.measuredHeight
+                      lpb.height = 0
+                      body.requestLayout()
+                      val a = ValueAnimator.ofInt(0, target)
+                      a.duration = 280
+                      a.interpolator = DecelerateInterpolator()
+                      a.addUpdateListener { lpb.height = it.animatedValue as Int; body.requestLayout() }
+                      a.addListener(object : AnimatorListenerAdapter() {
+                          override fun onAnimationEnd(an: Animator) { lpb.height = WC; body.requestLayout() }
+                      })
+                      a.start()
+                  } else {
+                      val start = body.height
+                      val a = ValueAnimator.ofInt(start, 0)
+                      a.duration = 240
+                      a.interpolator = DecelerateInterpolator()
+                      a.addUpdateListener { lpb.height = it.animatedValue as Int; body.requestLayout() }
+                      a.addListener(object : AnimatorListenerAdapter() {
+                          override fun onAnimationEnd(an: Animator) { body.visibility = View.GONE; lpb.height = WC; body.requestLayout() }
+                      })
+                      a.start()
+                  }
+              }
+
+              private fun changedKey() {
+                  if (selPreset != null) { selPreset = null; updateChips() }
+                  secChecks.forEach { it() }
+                  schedulePush()
+              }
+
+              private fun spinReset(v: View) {
+                  v.animate().rotationBy(-360f).setDuration(380).setInterpolator(DecelerateInterpolator()).start()
+                  v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+              }
+
+              // ---------- rows ----------
+              private fun slider(parent: LinearLayout, s: Sl) {
+                  val wrap = LinearLayout(this)
+                  wrap.orientation = LinearLayout.VERTICAL
+                  wrap.setPadding(0, dp(12), 0, dp(4))
+                  val top = LinearLayout(this)
+                  top.gravity = Gravity.CENTER_VERTICAL
+                  val pill = tv("", 12f, cAccent2, true).apply { setPadding(dp(9), dp(3), dp(9), dp(3)); background = rr(0x2222D3EE, 10) }
+                  val reset = tv("↺", 19f, cMuted).apply { setPadding(dp(12), 0, dp(2), 0) }
+                  top.addView(tv(s.title, 14f), lp(0, WC, 1f))
+                  top.addView(pill); top.addView(reset)
+                  val sb = SeekBar(this)
+                  sb.max = s.max - s.min
+                  sb.progress = Fx.i(s.key) - s.min
+                  sb.progressTintList = ColorStateList.valueOf(cAccent)
+                  sb.progressBackgroundTintList = ColorStateList.valueOf(cTrack)
+                  sb.thumbTintList = ColorStateList.valueOf(Color.WHITE)
+
+                  fun upd() {
+                      pill.text = s.show(Fx.i(s.key))
+                      val show = !Fx.isDefault(s.key)
+                      reset.animate().alpha(if (show) 1f else 0f).setDuration(160).start()
+                      reset.isClickable = show
+                  }
+                  pill.text = s.show(Fx.i(s.key))
+                  reset.alpha = if (Fx.isDefault(s.key)) 0f else 1f
+                  reset.isClickable = !Fx.isDefault(s.key)
+
+                  sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(bar: SeekBar?, p: Int, fromUser: Boolean) {
+                          if (!fromUser) return
+                          Fx.set(s.key, p + s.min)
+                          pop(pill)
+                          val now = SystemClock.uptimeMillis()
+                          if (now - lastTick > 40) { lastTick = now; bar?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
+                          upd(); changedKey()
+                      }
+                      override fun onStartTrackingTouch(bar: SeekBar?) {}
+                      override fun onStopTrackingTouch(bar: SeekBar?) {}
+                  })
+
+                  val refreshRow: () -> Unit = {
+                      val a = ValueAnimator.ofInt(sb.progress, Fx.i(s.key) - s.min)
+                      a.duration = 320
+                      a.interpolator = DecelerateInterpolator()
+                      a.addUpdateListener { sb.progress = it.animatedValue as Int }
+                      a.start()
+                      upd()
+                  }
+                  refreshers.add(refreshRow)
+                  reset.setOnClickListener {
+                      spinReset(it)
+                      Fx.resetKey(s.key)
+                      changedKey()
+                      refreshRow()
+                  }
+                  wrap.addView(top, lp(MP, WC))
+                  wrap.addView(sb, lp(MP, WC))
+                  parent.addView(wrap, lp(MP, WC))
+              }
+
+              private fun toggle(parent: LinearLayout, s: Tg) {
+                  val row = LinearLayout(this)
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  row.setPadding(0, dp(10), 0, dp(6))
+                  val reset = tv("↺", 19f, cMuted).apply { setPadding(dp(4), 0, dp(14), 0) }
+                  val sw = styledSwitch()
+                  row.addView(tv(s.title, 14f), lp(0, WC, 1f))
+                  row.addView(reset); row.addView(sw)
+                  var busy = false
+                  sw.isChecked = Fx.i(s.key) == 1
+                  reset.alpha = if (Fx.isDefault(s.key)) 0f else 1f
+                  reset.isClickable = !Fx.isDefault(s.key)
+                  fun upd() {
+                      val show = !Fx.isDefault(s.key)
+                      reset.animate().alpha(if (show) 1f else 0f).setDuration(160).start()
+                      reset.isClickable = show
+                  }
+                  sw.setOnCheckedChangeListener { v, on ->
+                      if (!busy) {
+                          Fx.set(s.key, if (on) 1 else 0)
+                          v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                          upd(); changedKey()
+                      }
+                  }
+                  val refreshRow: () -> Unit = {
+                      busy = true; sw.isChecked = Fx.i(s.key) == 1; busy = false
+                      upd()
+                  }
+                  refreshers.add(refreshRow)
+                  reset.setOnClickListener {
+                      spinReset(it)
+                      Fx.resetKey(s.key)
+                      changedKey()
+                      refreshRow()
+                  }
+                  parent.addView(row, lp(MP, WC))
+              }
+
+              private fun choice(parent: LinearLayout, s: Ch) {
+                  val wrap = LinearLayout(this)
+                  wrap.orientation = LinearLayout.VERTICAL
+                  wrap.setPadding(0, dp(12), 0, dp(6))
+                  val top = LinearLayout(this)
+                  top.gravity = Gravity.CENTER_VERTICAL
+                  val reset = tv("↺", 19f, cMuted).apply { setPadding(dp(12), 0, dp(2), 0) }
+                  top.addView(tv(s.title, 14f), lp(0, WC, 1f))
+                  top.addView(reset)
+                  val hs = HorizontalScrollView(this)
+                  hs.isHorizontalScrollBarEnabled = false
+                  hs.overScrollMode = View.OVER_SCROLL_NEVER
+                  val row = LinearLayout(this)
+                  val items = ArrayList<TextView>()
+
+                  fun paintChips(sel: Int, animate: Boolean) {
+                      for ((k, c) in items.withIndex()) {
+                          val on = k == sel
+                          c.background = rr(if (on) cAccent else 0x14FFFFFF, 16)
+                          c.setTextColor(if (on) Color.WHITE else cMuted)
+                      }
+                      if (animate && sel in items.indices) {
+                          val c = items[sel]
+                          c.scaleX = 0.88f; c.scaleY = 0.88f
+                          c.animate().scaleX(1f).scaleY(1f).setDuration(280).setInterpolator(OvershootInterpolator(3f)).start()
+                      }
+                  }
+                  fun upd() {
+                      val show = !Fx.isDefault(s.key)
+                      reset.animate().alpha(if (show) 1f else 0f).setDuration(160).start()
+                      reset.isClickable = show
+                  }
+                  s.options.forEachIndexed { i, name ->
+                      val c = tv(name, 13f, cMuted).apply { setPadding(dp(14), dp(8), dp(14), dp(8)) }
+                      c.setOnClickListener {
+                          Fx.set(s.key, i)
+                          it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                          paintChips(i, true); upd(); changedKey()
+                      }
+                      items.add(c)
+                      row.addView(c, lp(WC, WC).apply { rightMargin = dp(8) })
+                  }
+                  paintChips(Fx.i(s.key), false)
+                  reset.alpha = if (Fx.isDefault(s.key)) 0f else 1f
+                  reset.isClickable = !Fx.isDefault(s.key)
+                  val refreshRow: () -> Unit = { paintChips(Fx.i(s.key), true); upd() }
+                  refreshers.add(refreshRow)
+                  reset.setOnClickListener {
+                      spinReset(it)
+                      Fx.resetKey(s.key)
+                      changedKey()
+                      refreshRow()
+                  }
+                  hs.addView(row)
+                  wrap.addView(top, lp(MP, WC))
+                  wrap.addView(hs, lp(MP, WC).apply { topMargin = dp(8) })
+                  parent.addView(wrap, lp(MP, WC))
+              }
+
+              private fun action(parent: LinearLayout, s: Ac) {
+                  val b = tv(s.title, 14f, cAccent2, true).apply {
+                      gravity = Gravity.CENTER; setPadding(0, dp(13), 0, dp(13))
+                      background = ripple(rr(0x1422D3EE, 14, 0x3322D3EE), 14)
+                  }
+                  press(b)
+                  b.setOnClickListener {
+                      it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                      handleAction(s.key)
+                  }
+                  parent.addView(b, lp(MP, WC).apply { topMargin = dp(12); bottomMargin = dp(4) })
+              }
+          }
+          EOF
+          mkdir -p $(dirname native/cineshade.cpp)
+          cat > native/cineshade.cpp <<'EOF'
+          // CineShade: ReShade-style post-processing injected into GLES games via Zygisk + PLT hook on eglSwapBuffers.
+          #include <jni.h>
+          #include <EGL/egl.h>
+          #include <GLES3/gl3.h>
+          #include <android/log.h>
+          #include <dlfcn.h>
+          #include <pthread.h>
+          #include <unistd.h>
+          #include <sys/stat.h>
+          #include <time.h>
+          #include <cstdio>
+          #include <cstdlib>
+          #include <cstring>
+          #include <string>
+          #include <vector>
+          #include "zygisk.hpp"
+          extern "C" {
+          #include "xhook.h"
+          }
+
+          #define TAG "CineShade"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+          // ---------------------------------------------------------------- parameters
+          #define PARAMS(X) \
+              X(enabled, 1.0f) \
+              X(bloom, 0.6f) X(bloom_thr, 0.7f) X(bloom_knee, 0.5f) X(bloom_radius, 0.6f) X(bloom_warm, 0.1f) X(bloom_levels, 5.0f) X(halation, 0.15f) \
+              X(streak, 0.25f) X(streak_len, 1.0f) \
+              X(rays, 0.0f) X(rays_x, 0.5f) X(rays_y, 0.2f) X(rays_decay, 0.95f) X(rays_density, 0.9f) \
+              X(ca, 0.25f) X(ca_fall, 1.5f) X(lens, 0.0f) X(sharpen, 0.3f) X(clarity, 0.2f) X(fxaa, 0.0f) \
+              X(dof, 0.0f) X(dof_y, 0.5f) X(dof_w, 0.2f) X(mblur, 0.0f) \
+              X(tm_mode, 0.0f) X(exposure, 0.0f) X(gamma, 1.0f) X(contrast, 1.0f) X(saturation, 1.05f) X(vibrance, 0.0f) \
+              X(temp, 0.0f) X(tint, 0.0f) X(brightness, 0.0f) X(hue, 0.0f) X(lift, 0.0f) X(gain, 1.0f) \
+              X(split, 0.0f) X(split_sh_hue, 220.0f) X(split_hi_hue, 35.0f) \
+              X(vig, 0.35f) X(vig_size, 0.85f) X(vig_soft, 0.5f) X(vig_round, 1.0f) \
+              X(grain, 0.2f) X(grain_size, 1.5f) X(letter, 0.0f) X(dither, 1.0f) \
+              X(outline, 0.0f) X(outline_thr, 0.15f) X(scan, 0.0f) X(pixel, 0.0f) X(poster, 0.0f) X(nv, 0.0f) X(vhs, 0.0f) \
+              X(hdr, 1.0f)
+
+          #define P_ENUM(n, d) I_##n,
+          enum { PARAMS(P_ENUM) NP };
+          #undef P_ENUM
+          struct Prm { const char* key; float def; };
+          #define P_TAB(n, d) { #n, d },
+          static const Prm PR[NP] = { PARAMS(P_TAB) };
+          #undef P_TAB
+          static float PV[NP + 4];
+
+          static std::string g_cfgPath;
+          static time_t g_cfgMtime = 0;
+
+          static void loadDefaults() { for (int i = 0; i < NP; i++) PV[i] = PR[i].def; }
+
+          static void parseConfig() {
+              FILE* f = fopen(g_cfgPath.c_str(), "r");
+              if (!f) return;
+              loadDefaults();
+              char line[256];
+              while (fgets(line, sizeof line, f)) {
+                  char* eq = strchr(line, '=');
+                  if (!eq) continue;
+                  *eq = 0;
+                  float v = strtof(eq + 1, nullptr);
+                  for (int i = 0; i < NP; i++) if (strcmp(line, PR[i].key) == 0) { PV[i] = v; break; }
+              }
+              fclose(f);
+          }
+
+          static void pollConfig(bool force) {
+              struct stat st;
+              if (stat(g_cfgPath.c_str(), &st) != 0) return;
+              if (force || st.st_mtime != g_cfgMtime) { g_cfgMtime = st.st_mtime; parseConfig(); }
+          }
+
+          // ---------------------------------------------------------------- GL / EGL loading
+          #define GL_FUNCS(X) \
+              X(glGetString) X(glGetIntegerv) X(glGetBooleanv) X(glEnable) X(glDisable) X(glIsEnabled) \
+              X(glBindFramebuffer) X(glGenFramebuffers) X(glDeleteFramebuffers) X(glFramebufferTexture2D) \
+              X(glCheckFramebufferStatus) X(glBlitFramebuffer) \
+              X(glGenTextures) X(glDeleteTextures) X(glBindTexture) X(glTexStorage2D) X(glTexParameteri) X(glActiveTexture) \
+              X(glCreateShader) X(glShaderSource) X(glCompileShader) X(glGetShaderiv) X(glGetShaderInfoLog) X(glDeleteShader) \
+              X(glCreateProgram) X(glAttachShader) X(glLinkProgram) X(glGetProgramiv) X(glGetProgramInfoLog) X(glDeleteProgram) \
+              X(glUseProgram) X(glGetUniformLocation) X(glUniform1i) X(glUniform1f) X(glUniform2f) X(glUniform4fv) \
+              X(glViewport) X(glDrawArrays) X(glGenVertexArrays) X(glBindVertexArray) X(glDeleteVertexArrays) \
+              X(glBindSampler) X(glColorMask) X(glDepthMask)
+
+          #define GL_DECL(n) static decltype(&n) p_##n = nullptr;
+          GL_FUNCS(GL_DECL)
+          #undef GL_DECL
+          #define glGetString p_glGetString
+          #define glGetIntegerv p_glGetIntegerv
+          #define glGetBooleanv p_glGetBooleanv
+          #define glEnable p_glEnable
+          #define glDisable p_glDisable
+          #define glIsEnabled p_glIsEnabled
+          #define glBindFramebuffer p_glBindFramebuffer
+          #define glGenFramebuffers p_glGenFramebuffers
+          #define glDeleteFramebuffers p_glDeleteFramebuffers
+          #define glFramebufferTexture2D p_glFramebufferTexture2D
+          #define glCheckFramebufferStatus p_glCheckFramebufferStatus
+          #define glBlitFramebuffer p_glBlitFramebuffer
+          #define glGenTextures p_glGenTextures
+          #define glDeleteTextures p_glDeleteTextures
+          #define glBindTexture p_glBindTexture
+          #define glTexStorage2D p_glTexStorage2D
+          #define glTexParameteri p_glTexParameteri
+          #define glActiveTexture p_glActiveTexture
+          #define glCreateShader p_glCreateShader
+          #define glShaderSource p_glShaderSource
+          #define glCompileShader p_glCompileShader
+          #define glGetShaderiv p_glGetShaderiv
+          #define glGetShaderInfoLog p_glGetShaderInfoLog
+          #define glDeleteShader p_glDeleteShader
+          #define glCreateProgram p_glCreateProgram
+          #define glAttachShader p_glAttachShader
+          #define glLinkProgram p_glLinkProgram
+          #define glGetProgramiv p_glGetProgramiv
+          #define glGetProgramInfoLog p_glGetProgramInfoLog
+          #define glDeleteProgram p_glDeleteProgram
+          #define glUseProgram p_glUseProgram
+          #define glGetUniformLocation p_glGetUniformLocation
+          #define glUniform1i p_glUniform1i
+          #define glUniform1f p_glUniform1f
+          #define glUniform2f p_glUniform2f
+          #define glUniform4fv p_glUniform4fv
+          #define glViewport p_glViewport
+          #define glDrawArrays p_glDrawArrays
+          #define glGenVertexArrays p_glGenVertexArrays
+          #define glBindVertexArray p_glBindVertexArray
+          #define glDeleteVertexArrays p_glDeleteVertexArrays
+          #define glBindSampler p_glBindSampler
+          #define glColorMask p_glColorMask
+          #define glDepthMask p_glDepthMask
+
+          static EGLContext (*p_eglGetCurrentContext)(void) = nullptr;
+          static EGLSurface (*p_eglGetCurrentSurface)(EGLint) = nullptr;
+          static EGLBoolean (*p_eglQuerySurface)(EGLDisplay, EGLSurface, EGLint, EGLint*) = nullptr;
+          static void* (*p_eglGetProcAddress)(const char*) = nullptr;
+
+          static bool g_glLoaded = false;
+
+          static bool loadGL() {
+              void* gles = dlopen("libGLESv3.so", RTLD_NOW);
+              void* egl = dlopen("libEGL.so", RTLD_NOW);
+              if (!egl) { LOGE("libEGL not found"); return false; }
+              p_eglGetCurrentContext = (decltype(p_eglGetCurrentContext))dlsym(egl, "eglGetCurrentContext");
+              p_eglGetCurrentSurface = (decltype(p_eglGetCurrentSurface))dlsym(egl, "eglGetCurrentSurface");
+              p_eglQuerySurface = (decltype(p_eglQuerySurface))dlsym(egl, "eglQuerySurface");
+              p_eglGetProcAddress = (decltype(p_eglGetProcAddress))dlsym(egl, "eglGetProcAddress");
+              if (!p_eglGetCurrentContext || !p_eglGetCurrentSurface || !p_eglQuerySurface) { LOGE("EGL symbols missing"); return false; }
+              bool ok = true;
+          #define GL_LOAD(n) \
+              p_##n = (decltype(p_##n))(gles ? dlsym(gles, #n) : nullptr); \
+              if (!p_##n && p_eglGetProcAddress) p_##n = (decltype(p_##n))p_eglGetProcAddress(#n); \
+              if (!p_##n) { LOGE("missing GL fn %s", #n); ok = false; }
+              GL_FUNCS(GL_LOAD)
+          #undef GL_LOAD
+              return ok;
+          }
+
+          // ---------------------------------------------------------------- shaders
+          static const char* VS = R"GLSL(
+          out vec2 vUV;
+          void main() {
+              vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+              vUV = p;
+              gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+          }
+          )GLSL";
+
+          static const char* FS_BRIGHT = R"GLSL(
+          in vec2 vUV; out vec4 fragColor;
+          uniform sampler2D uTex; uniform vec2 uTexel; uniform vec2 uThr;
+          void main() {
+              vec3 c = (texture(uTex, vUV + uTexel * vec2(-1.0, -1.0)).rgb + texture(uTex, vUV + uTexel * vec2(1.0, -1.0)).rgb +
+                        texture(uTex, vUV + uTexel * vec2(-1.0, 1.0)).rgb + texture(uTex, vUV + uTexel * vec2(1.0, 1.0)).rgb) * 0.25;
+              float br = max(c.r, max(c.g, c.b));
+              float knee = uThr.x * uThr.y + 1e-4;
+              float soft = clamp(br - uThr.x + knee, 0.0, 2.0 * knee);
+              soft = soft * soft / (4.0 * knee + 1e-4);
+              float w = max(soft, br - uThr.x) / max(br, 1e-4);
+              fragColor = vec4(c * max(w, 0.0), 1.0);
+          }
+          )GLSL";
+
+          static const char* FS_DOWN = R"GLSL(
+          in vec2 vUV; out vec4 fragColor;
+          uniform sampler2D uTex; uniform vec2 uTexel;
+          void main() {
+              vec3 c = texture(uTex, vUV).rgb * 4.0;
+              c += texture(uTex, vUV + uTexel * vec2(-1.0, -1.0)).rgb;
+              c += texture(uTex, vUV + uTexel * vec2(1.0, -1.0)).rgb;
+              c += texture(uTex, vUV + uTexel * vec2(-1.0, 1.0)).rgb;
+              c += texture(uTex, vUV + uTexel * vec2(1.0, 1.0)).rgb;
+              fragColor = vec4(c * 0.125, 1.0);
+          }
+          )GLSL";
+
+          static const char* FS_UP = R"GLSL(
+          in vec2 vUV; out vec4 fragColor;
+          uniform sampler2D uTex; uniform sampler2D uAdd; uniform vec2 uTexel; uniform vec2 uW;
+          void main() {
+              vec3 s = texture(uTex, vUV + vec2(-uTexel.x * 2.0, 0.0)).rgb;
+              s += texture(uTex, vUV + vec2(-uTexel.x, uTexel.y)).rgb * 2.0;
+              s += texture(uTex, vUV + vec2(0.0, uTexel.y * 2.0)).rgb;
+              s += texture(uTex, vUV + vec2(uTexel.x, uTexel.y)).rgb * 2.0;
+              s += texture(uTex, vUV + vec2(uTexel.x * 2.0, 0.0)).rgb;
+              s += texture(uTex, vUV + vec2(uTexel.x, -uTexel.y)).rgb * 2.0;
+              s += texture(uTex, vUV + vec2(0.0, -uTexel.y * 2.0)).rgb;
+              s += texture(uTex, vUV + vec2(-uTexel.x, -uTexel.y)).rgb * 2.0;
+              fragColor = vec4(s / 12.0 * uW.x + texture(uAdd, vUV).rgb * uW.y, 1.0);
+          }
+          )GLSL";
+
+          static const char* FS_STREAK = R"GLSL(
+          in vec2 vUV; out vec4 fragColor;
+          uniform sampler2D uTex; uniform vec2 uStep;
+          void main() {
+              vec3 acc = vec3(0.0); float ws = 0.0;
+              for (int i = -12; i <= 12; i++) {
+                  float w = exp(-float(i * i) / 72.0);
+                  acc += texture(uTex, vUV + vec2(float(i) * uStep.x, 0.0)).rgb * w;
+                  ws += w;
+              }
+              fragColor = vec4(acc / ws * 2.0, 1.0);
+          }
+          )GLSL";
+
+          static const char* FS_COMP = R"GLSL(
+          in vec2 vUV; out vec4 fragColor;
+          uniform sampler2D uScene; uniform sampler2D uBloom; uniform sampler2D uStreak; uniform sampler2D uPrev;
+          uniform vec2 uRes; uniform float uTime; uniform float uHasPrev;
+
+          float hash(vec2 p) { p = fract(p * vec2(443.897, 441.423)); p += dot(p, p.yx + 19.19); return fract((p.x + p.y) * p.x); }
+          float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+          vec3 hue2rgb(float h) {
+              h = fract(h / 360.0);
+              vec3 k = abs(fract(vec3(h) + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+              return clamp(k - 1.0, 0.0, 1.0);
+          }
+          vec3 hueRot(vec3 c, float deg) {
+              float a = radians(deg); float s = sin(a); float co = cos(a);
+              mat3 m = mat3(0.299 + 0.701 * co + 0.168 * s, 0.587 - 0.587 * co + 0.330 * s, 0.114 - 0.114 * co - 0.497 * s,
+                            0.299 - 0.299 * co - 0.328 * s, 0.587 + 0.413 * co + 0.035 * s, 0.114 - 0.114 * co + 0.292 * s,
+                            0.299 - 0.300 * co + 1.250 * s, 0.587 - 0.588 * co - 1.050 * s, 0.114 + 0.886 * co - 0.203 * s);
+              return clamp(c * m, 0.0, 1.0);
+          }
+          vec3 aces(vec3 x) { return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+          vec3 hable(vec3 x) { return ((x * (0.15 * x + 0.05) + 0.004) / (x * (0.15 * x + 0.5) + 0.06)) - 0.02 / 0.3; }
+          vec3 filmic(vec3 c) { return clamp(hable(c * 2.0) / hable(vec3(11.2)), 0.0, 1.0); }
+
+          vec3 fetch(vec2 uv, vec2 ca) {
+              if (P_ca <= 0.0) return texture(uScene, uv).rgb;
+              return vec3(texture(uScene, uv + ca).r, texture(uScene, uv).g, texture(uScene, uv - ca).b);
+          }
+
+          void main() {
+              vec2 uv = vUV;
+              float asp = uRes.x / uRes.y;
+              if (P_pixel > 0.5) { vec2 g = uRes / P_pixel; uv = (floor(uv * g) + 0.5) / g; }
+              if (P_vhs > 0.0) {
+                  float row = floor(uv.y * uRes.y * 0.5); float tt = floor(uTime * 24.0);
+                  float j = hash(vec2(row, tt));
+                  uv.x += (j - 0.5) * 0.03 * P_vhs * step(0.985, hash(vec2(row * 0.37, tt))) + 0.0015 * P_vhs * sin(uv.y * 40.0 + uTime * 3.0);
+              }
+              vec2 d = uv - 0.5;
+              if (abs(P_lens) > 0.001) {
+                  vec2 q = d * vec2(asp, 1.0);
+                  float r2 = dot(q, q);
+                  d *= (1.0 + P_lens * r2) / (1.0 + P_lens * 0.35);
+                  uv = 0.5 + d;
+              }
+              float oob = (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) ? 1.0 : 0.0;
+              vec2 cuv = clamp(uv, vec2(0.0), vec2(1.0));
+              vec2 dd = cuv - 0.5;
+              vec2 ca = dd * (P_ca * 0.02) * pow(clamp(length(dd * vec2(asp, 1.0)) * 2.0, 0.0, 2.0), P_ca_fall);
+
+              vec3 c;
+              float rad = 0.0;
+              if (P_dof > 0.0) rad = P_dof * 8.0 * smoothstep(0.0, 0.35, max(abs(cuv.y - (1.0 - P_dof_y)) - P_dof_w, 0.0));
+              if (rad > 0.5) {
+                  vec3 acc = fetch(cuv, ca);
+                  for (int i = 0; i < 12; i++) {
+                      float fi = float(i); float a = fi * 2.39996; float r = sqrt((fi + 0.5) / 12.0) * rad;
+                      acc += fetch(cuv + vec2(cos(a), sin(a)) * r / uRes, ca);
+                  }
+                  c = acc / 13.0;
+              } else {
+                  c = fetch(cuv, ca);
+              }
+
+              vec2 px = 1.0 / uRes;
+              if (P_fxaa > 0.5) {
+                  vec3 nN = texture(uScene, cuv + vec2(0.0, px.y)).rgb; vec3 nS = texture(uScene, cuv - vec2(0.0, px.y)).rgb;
+                  vec3 nE = texture(uScene, cuv + vec2(px.x, 0.0)).rgb; vec3 nW = texture(uScene, cuv - vec2(px.x, 0.0)).rgb;
+                  float lc = lum(c); float ln = lum(nN); float ls = lum(nS); float le = lum(nE); float lw = lum(nW);
+                  float range = max(max(max(ln, ls), max(le, lw)), lc) - min(min(min(ln, ls), min(le, lw)), lc);
+                  float k = smoothstep(0.04, 0.2, range);
+                  c = mix(c, (c * 2.0 + nN + nS + nE + nW) / 6.0, k * 0.85);
+              }
+              if (P_sharpen > 0.0) {
+                  vec3 n = texture(uScene, cuv + vec2(0.0, px.y)).rgb + texture(uScene, cuv - vec2(0.0, px.y)).rgb +
+                           texture(uScene, cuv + vec2(px.x, 0.0)).rgb + texture(uScene, cuv - vec2(px.x, 0.0)).rgb;
+                  c += (c - n * 0.25) * P_sharpen;
+              }
+              if (P_clarity > 0.0) {
+                  vec2 o = px * 3.0;
+                  vec3 b = texture(uScene, cuv + vec2(o.x, 0.0)).rgb + texture(uScene, cuv - vec2(o.x, 0.0)).rgb +
+                           texture(uScene, cuv + vec2(0.0, o.y)).rgb + texture(uScene, cuv - vec2(0.0, o.y)).rgb +
+                           texture(uScene, cuv + o).rgb + texture(uScene, cuv - o).rgb +
+                           texture(uScene, cuv + vec2(o.x, -o.y)).rgb + texture(uScene, cuv + vec2(-o.x, o.y)).rgb;
+                  b *= 0.125;
+                  float m = 1.0 - abs(lum(c) * 2.0 - 1.0) * 0.5;
+                  c += (c - b) * P_clarity * m;
+              }
+              if (P_outline > 0.0) {
+                  float l1 = lum(texture(uScene, cuv + vec2(px.x, 0.0)).rgb); float l2 = lum(texture(uScene, cuv - vec2(px.x, 0.0)).rgb);
+                  float l3 = lum(texture(uScene, cuv + vec2(0.0, px.y)).rgb); float l4 = lum(texture(uScene, cuv - vec2(0.0, px.y)).rgb);
+                  float e = smoothstep(P_outline_thr, P_outline_thr + 0.1, abs(l1 - l2) + abs(l3 - l4));
+                  c = mix(c, vec3(0.0), e * P_outline);
+              }
+
+              if (P_bloom > 0.0 || P_halation > 0.0) {
+                  vec3 bl = texture(uBloom, cuv).rgb;
+                  vec3 tint = vec3(1.0 + 0.3 * P_bloom_warm, 1.0, 1.0 - 0.3 * P_bloom_warm);
+                  c += bl * tint * P_bloom;
+                  c += bl * vec3(1.0, 0.25, 0.08) * P_halation * 0.6;
+              }
+              if (P_streak > 0.0) c += texture(uStreak, cuv).rgb * vec3(0.45, 0.65, 1.0) * P_streak;
+              if (P_rays > 0.0) {
+                  vec2 L = vec2(P_rays_x, 1.0 - P_rays_y);
+                  vec2 st = (L - cuv) * P_rays_density / 24.0;
+                  vec2 p = cuv; vec3 acc = vec3(0.0); float w = 1.0;
+                  for (int i = 0; i < 24; i++) { p += st; acc += texture(uBloom, p).rgb * w; w *= P_rays_decay; }
+                  c += acc * (P_rays / 24.0) * vec3(1.0, 0.9, 0.75);
+              }
+
+              c *= exp2(P_exposure);
+              int tm = int(P_tm_mode + 0.5);
+              if (tm == 1) c = c / (1.0 + c) * 1.15;
+              else if (tm == 2) c = aces(c);
+              else if (tm == 3) c = filmic(c);
+
+              c += P_brightness;
+              c.r += P_temp * 0.1; c.b -= P_temp * 0.1;
+              c.g += P_tint * 0.06; c.r -= P_tint * 0.03; c.b -= P_tint * 0.03;
+              c = (c - 0.5) * P_contrast + 0.5;
+              c = mix(vec3(lum(c)), c, P_saturation);
+              float mx = max(c.r, max(c.g, c.b)); float mn = min(c.r, min(c.g, c.b));
+              c = mix(vec3(lum(c)), c, 1.0 + P_vibrance * (1.0 - (mx - mn)));
+              if (abs(P_hue) > 0.5) c = hueRot(clamp(c, 0.0, 1.0), P_hue);
+              c = pow(max(c * P_gain + P_lift, 0.0), vec3(1.0 / max(P_gamma, 0.1)));
+              if (P_split > 0.0) {
+                  float l = lum(c);
+                  float sh = 1.0 - smoothstep(0.0, 0.6, l); float hi = smoothstep(0.4, 1.0, l);
+                  c = mix(c, c * (0.5 + hue2rgb(P_split_sh_hue)), sh * P_split * 0.6);
+                  c = mix(c, c * (0.5 + hue2rgb(P_split_hi_hue)), hi * P_split * 0.6);
+              }
+              if (P_vig > 0.0) {
+                  vec2 q = (cuv - 0.5) * vec2(mix(1.0, asp, P_vig_round), 1.0);
+                  float dst = length(q) / length(vec2(0.5 * mix(1.0, asp, P_vig_round), 0.5));
+                  float v = smoothstep(P_vig_size * (1.0 - 0.9 * P_vig_soft), P_vig_size, dst);
+                  c *= 1.0 - v * P_vig;
+              }
+              if (P_scan > 0.0) c *= 1.0 - P_scan * 0.35 * (0.5 + 0.5 * sin(cuv.y * uRes.y * 3.14159));
+              if (P_nv > 0.0) {
+                  float l = lum(c);
+                  vec3 g = vec3(0.1, 1.0, 0.25) * l * 1.8 + (hash(cuv * uRes + uTime) - 0.5) * 0.12;
+                  c = mix(c, g, P_nv);
+              }
+              if (P_poster > 1.5) c = floor(c * P_poster + 0.5) / P_poster;
+              if (P_grain > 0.0) {
+                  vec2 gp = floor(cuv * uRes / max(P_grain_size, 0.5));
+                  float n = hash(gp + fract(uTime) * 100.0) - 0.5;
+                  c += n * P_grain * 0.15 * (1.0 - 0.5 * lum(c));
+              }
+              if (abs(cuv.y - 0.5) > 0.5 - P_letter) c = vec3(0.0);
+              c *= 1.0 - oob;
+              if (P_dither > 0.5) c += (hash(cuv * uRes + uTime * 7.0) - 0.5) / 255.0;
+              if (uHasPrev > 0.5 && P_mblur > 0.0) c = mix(c, texture(uPrev, vUV).rgb, P_mblur);
+              fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+          }
+          )GLSL";
+
+          // ---------------------------------------------------------------- GL helpers
+          struct Prog { GLuint id = 0; GLint tex = -1, add = -1, texel = -1, thr = -1, w = -1, step = -1;
+                        GLint scene = -1, bloom = -1, streak = -1, prev = -1, res = -1, time = -1, hasPrev = -1, par = -1; };
+          struct Tgt { GLuint tex = 0, fbo = 0; int w = 0, h = 0; };
+
+          static bool g_failed = false;
+          static Prog pBright, pDown, pUp, pStreak, pComp;
+          static Tgt scene, dn[6], up[6], streakT, outA, outB;
+          static GLuint g_vao = 0;
+          static int g_w = 0, g_h = 0, g_L = 0;
+          static bool g_hdr = false, g_pyr = false, g_mb = false, g_hdrOk = true, g_havePrev = false, g_useA = true;
+          static EGLContext g_ctx = EGL_NO_CONTEXT;
+          static EGLSurface g_surf = EGL_NO_SURFACE;
+          static bool g_progsOk = false;
+          static long long g_lastMs = 0;
+          static unsigned g_frame = 0;
+          static double g_t0 = 0;
+
+          static std::string paramHeader() {
+              std::string h = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n";
+              for (int i = 0; i < NP; i++)
+                  h += std::string("#define P_") + PR[i].key + " P[" + std::to_string(i / 4) + "]." + "xyzw"[i % 4] + "\n";
+              h += "uniform vec4 P[" + std::to_string((NP + 3) / 4) + "];\n";
+              return h;
+          }
+
+          static GLuint compile(GLenum type, const std::string& src, const char* name) {
+              GLuint s = glCreateShader(type);
+              const char* p = src.c_str();
+              glShaderSource(s, 1, &p, nullptr);
+              glCompileShader(s);
+              GLint ok = 0;
+              glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+              if (!ok) {
+                  char log[1024]; GLsizei n = 0;
+                  glGetShaderInfoLog(s, sizeof log - 1, &n, log); log[n] = 0;
+                  LOGE("shader %s compile error: %s", name, log);
+                  glDeleteShader(s);
+                  return 0;
+              }
+              return s;
+          }
+
+          static bool makeProg(Prog& pr, const char* fs, const char* name) {
+              std::string hdr = paramHeader();
+              GLuint v = compile(GL_VERTEX_SHADER, hdr + VS, name);
+              GLuint f = compile(GL_FRAGMENT_SHADER, hdr + fs, name);
+              if (!v || !f) return false;
+              GLuint id = glCreateProgram();
+              glAttachShader(id, v); glAttachShader(id, f);
+              glLinkProgram(id);
+              glDeleteShader(v); glDeleteShader(f);
+              GLint ok = 0;
+              glGetProgramiv(id, GL_LINK_STATUS, &ok);
+              if (!ok) {
+                  char log[1024]; GLsizei n = 0;
+                  glGetProgramInfoLog(id, sizeof log - 1, &n, log); log[n] = 0;
+                  LOGE("program %s link error: %s", name, log);
+                  return false;
+              }
+              pr.id = id;
+              pr.tex = glGetUniformLocation(id, "uTex"); pr.add = glGetUniformLocation(id, "uAdd");
+              pr.texel = glGetUniformLocation(id, "uTexel"); pr.thr = glGetUniformLocation(id, "uThr");
+              pr.w = glGetUniformLocation(id, "uW"); pr.step = glGetUniformLocation(id, "uStep");
+              pr.scene = glGetUniformLocation(id, "uScene"); pr.bloom = glGetUniformLocation(id, "uBloom");
+              pr.streak = glGetUniformLocation(id, "uStreak"); pr.prev = glGetUniformLocation(id, "uPrev");
+              pr.res = glGetUniformLocation(id, "uRes"); pr.time = glGetUniformLocation(id, "uTime");
+              pr.hasPrev = glGetUniformLocation(id, "uHasPrev"); pr.par = glGetUniformLocation(id, "P");
+              return true;
+          }
+
+          static bool buildProgs() {
+              bool ok = makeProg(pBright, FS_BRIGHT, "bright") && makeProg(pDown, FS_DOWN, "down") &&
+                        makeProg(pUp, FS_UP, "up") && makeProg(pStreak, FS_STREAK, "streak") && makeProg(pComp, FS_COMP, "composite");
+              if (ok) glGenVertexArrays(1, &g_vao);
+              return ok;
+          }
+
+          static bool mkTarget(Tgt& t, int w, int h, GLenum fmt) {
+              t.w = w; t.h = h;
+              glGenTextures(1, &t.tex);
+              glBindTexture(GL_TEXTURE_2D, t.tex);
+              glTexStorage2D(GL_TEXTURE_2D, 1, fmt, w, h);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+              glGenFramebuffers(1, &t.fbo);
+              glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+              glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
+              return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+          }
+
+          static void freeTarget(Tgt& t) {
+              if (t.fbo) glDeleteFramebuffers(1, &t.fbo);
+              if (t.tex) glDeleteTextures(1, &t.tex);
+              t = Tgt();
+          }
+
+          static void freeAll() {
+              freeTarget(scene); freeTarget(streakT); freeTarget(outA); freeTarget(outB);
+              for (int i = 0; i < 6; i++) { freeTarget(dn[i]); freeTarget(up[i]); }
+              g_w = g_h = g_L = 0; g_havePrev = false;
+          }
+
+          static bool ensure(int w, int h, int L, bool hdr, bool pyr, bool mb) {
+              if (w == g_w && h == g_h && L == g_L && hdr == g_hdr && pyr == g_pyr && mb == g_mb) return true;
+              freeAll();
+              GLenum f = (hdr && g_hdrOk) ? GL_RGBA16F : GL_RGBA8;
+              bool ok = mkTarget(scene, w, h, GL_RGBA8);
+              if (pyr && ok) {
+                  for (int i = 0; i < L && ok; i++) {
+                      int tw = w >> (i + 1); int th = h >> (i + 1);
+                      if (tw < 1) tw = 1;
+                      if (th < 1) th = 1;
+                      ok = mkTarget(dn[i], tw, th, f);
+                      if (ok && i < L - 1) ok = mkTarget(up[i], tw, th, f);
+                  }
+                  if (ok) ok = mkTarget(streakT, dn[1].w, dn[1].h, f);
+              }
+              if (mb && ok) ok = mkTarget(outA, w, h, GL_RGBA8) && mkTarget(outB, w, h, GL_RGBA8);
+              if (!ok) {
+                  freeAll();
+                  if (f == GL_RGBA16F) { g_hdrOk = false; LOGI("fp16 targets unavailable, using RGBA8"); return ensure(w, h, L, hdr, pyr, mb); }
+                  LOGE("framebuffer allocation failed");
+                  return false;
+              }
+              g_w = w; g_h = h; g_L = L; g_hdr = hdr; g_pyr = pyr; g_mb = mb;
+              return true;
+          }
+
+          static void bindTex(int unit, GLuint t) {
+              glActiveTexture(GL_TEXTURE0 + unit);
+              glBindTexture(GL_TEXTURE_2D, t);
+              glBindSampler(unit, 0);
+          }
+
+          static void drawTo(const Tgt& t) {
+              glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+              glViewport(0, 0, t.w, t.h);
+              glDrawArrays(GL_TRIANGLES, 0, 3);
+          }
+
+          static float PV4[(NP + 3) / 4 * 4 + 4];
+
+          static void runPipeline(int w, int h) {
+              float bl = PV[I_bloom], ha = PV[I_halation], ra = PV[I_rays], st = PV[I_streak];
+              bool needBloom = bl > 0.001f || ha > 0.001f || ra > 0.001f;
+              bool needStreak = st > 0.001f;
+              bool pyr = needBloom || needStreak;
+              bool mb = PV[I_mblur] > 0.001f;
+              int L = (int)(PV[I_bloom_levels] + 0.5f);
+              if (L < 2) L = 2;
+              if (L > 6) L = 6;
+              if (!ensure(w, h, L, PV[I_hdr] > 0.5f, pyr, mb)) { g_failed = true; return; }
+
+              glActiveTexture(GL_TEXTURE0);
+              glBindVertexArray(g_vao);
+              glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+              glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+              glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene.fbo);
+              glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+              if (pyr) {
+                  glUseProgram(pBright.id);
+                  bindTex(0, scene.tex);
+                  glUniform1i(pBright.tex, 0);
+                  glUniform2f(pBright.texel, 1.0f / w, 1.0f / h);
+                  glUniform2f(pBright.thr, PV[I_bloom_thr], PV[I_bloom_knee]);
+                  drawTo(dn[0]);
+
+                  glUseProgram(pDown.id);
+                  glUniform1i(pDown.tex, 0);
+                  for (int i = 1; i < L; i++) {
+                      bindTex(0, dn[i - 1].tex);
+                      glUniform2f(pDown.texel, 1.0f / dn[i - 1].w, 1.0f / dn[i - 1].h);
+                      drawTo(dn[i]);
+                  }
+
+                  glUseProgram(pUp.id);
+                  glUniform1i(pUp.tex, 0);
+                  glUniform1i(pUp.add, 1);
+                  float rad = PV[I_bloom_radius];
+                  for (int i = L - 2; i >= 0; i--) {
+                      const Tgt& src = (i == L - 2) ? dn[L - 1] : up[i + 1];
+                      bindTex(0, src.tex);
+                      bindTex(1, dn[i].tex);
+                      glUniform2f(pUp.texel, 1.0f / src.w, 1.0f / src.h);
+                      glUniform2f(pUp.w, 0.45f + 0.55f * rad, 1.0f);
+                      drawTo(up[i]);
+                  }
+
+                  if (needStreak) {
+                      glUseProgram(pStreak.id);
+                      bindTex(0, dn[1].tex);
+                      glUniform1i(pStreak.tex, 0);
+                      glUniform2f(pStreak.step, 2.0f * PV[I_streak_len] / dn[1].w, 0.0f);
+                      drawTo(streakT);
+                  }
+              }
+
+              glUseProgram(pComp.id);
+              GLuint bloomTex = pyr ? up[0].tex : scene.tex;
+              GLuint streakTex = needStreak ? streakT.tex : scene.tex;
+              GLuint prevTex = scene.tex;
+              Tgt* cur = nullptr;
+              if (mb) { cur = g_useA ? &outA : &outB; prevTex = g_useA ? outB.tex : outA.tex; }
+              bindTex(0, scene.tex); bindTex(1, bloomTex); bindTex(2, streakTex); bindTex(3, prevTex);
+              glUniform1i(pComp.scene, 0); glUniform1i(pComp.bloom, 1); glUniform1i(pComp.streak, 2); glUniform1i(pComp.prev, 3);
+              glUniform2f(pComp.res, (float)w, (float)h);
+              struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+              double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+              if (g_t0 == 0) g_t0 = now;
+              glUniform1f(pComp.time, (float)(now - g_t0));
+              glUniform1f(pComp.hasPrev, (mb && g_havePrev) ? 1.0f : 0.0f);
+              for (int i = 0; i < NP; i++) PV4[i] = PV[i];
+              glUniform4fv(pComp.par, (NP + 3) / 4, PV4);
+
+              if (mb) {
+                  drawTo(*cur);
+                  glBindFramebuffer(GL_READ_FRAMEBUFFER, cur->fbo);
+                  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+                  glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                  g_useA = !g_useA; g_havePrev = true;
+              } else {
+                  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                  glViewport(0, 0, w, h);
+                  glDrawArrays(GL_TRIANGLES, 0, 3);
+                  g_havePrev = false;
+              }
+          }
+
+          struct GLState {
+              GLint prog = 0, vao = 0, fbDraw = 0, fbRead = 0, vp[4] = {0, 0, 0, 0}, act = 0, tex[4] = {0, 0, 0, 0}, smp[4] = {0, 0, 0, 0};
+              GLboolean en[9] = {0}; GLboolean cm[4] = {1, 1, 1, 1}; GLboolean dm = 1;
+          };
+          static const GLenum CAPS[9] = { GL_BLEND, GL_DEPTH_TEST, GL_STENCIL_TEST, GL_SCISSOR_TEST, GL_CULL_FACE, GL_DITHER,
+                                          GL_POLYGON_OFFSET_FILL, GL_SAMPLE_ALPHA_TO_COVERAGE, GL_RASTERIZER_DISCARD };
+
+          static void saveState(GLState& s) {
+              glGetIntegerv(GL_CURRENT_PROGRAM, &s.prog);
+              glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &s.vao);
+              glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &s.fbDraw);
+              glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &s.fbRead);
+              glGetIntegerv(GL_VIEWPORT, s.vp);
+              glGetIntegerv(GL_ACTIVE_TEXTURE, &s.act);
+              for (int u = 0; u < 4; u++) {
+                  glActiveTexture(GL_TEXTURE0 + u);
+                  glGetIntegerv(GL_TEXTURE_BINDING_2D, &s.tex[u]);
+                  glGetIntegerv(GL_SAMPLER_BINDING, &s.smp[u]);
+              }
+              for (int i = 0; i < 9; i++) s.en[i] = glIsEnabled(CAPS[i]);
+              glGetBooleanv(GL_COLOR_WRITEMASK, s.cm);
+              glGetBooleanv(GL_DEPTH_WRITEMASK, &s.dm);
+              for (int i = 0; i < 9; i++) glDisable(CAPS[i]);
+              glDepthMask(GL_FALSE);
+          }
+
+          static void restoreState(const GLState& s) {
+              for (int u = 0; u < 4; u++) {
+                  glActiveTexture(GL_TEXTURE0 + u);
+                  glBindTexture(GL_TEXTURE_2D, (GLuint)s.tex[u]);
+                  glBindSampler(u, (GLuint)s.smp[u]);
+              }
+              glActiveTexture((GLenum)s.act);
+              glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)s.fbRead);
+              glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)s.fbDraw);
+              glBindVertexArray((GLuint)s.vao);
+              glUseProgram((GLuint)s.prog);
+              glViewport(s.vp[0], s.vp[1], s.vp[2], s.vp[3]);
+              glColorMask(s.cm[0], s.cm[1], s.cm[2], s.cm[3]);
+              glDepthMask(s.dm);
+              for (int i = 0; i < 9; i++) { if (s.en[i]) glEnable(CAPS[i]); else glDisable(CAPS[i]); }
+          }
+
+          static long long nowMs() {
+              struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+              return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+          }
+
+          static void process(EGLDisplay dpy, EGLSurface surf) {
+              if (g_failed) return;
+              if (!g_glLoaded) {
+                  if (!loadGL()) { g_failed = true; return; }
+                  g_glLoaded = true;
+              }
+              EGLContext c = p_eglGetCurrentContext();
+              if (c == EGL_NO_CONTEXT || p_eglGetCurrentSurface(EGL_DRAW) != surf) return;
+              EGLint w = 0, h = 0;
+              p_eglQuerySurface(dpy, surf, EGL_WIDTH, &w);
+              p_eglQuerySurface(dpy, surf, EGL_HEIGHT, &h);
+              if (w < 480 || h < 270) return;
+
+              long long t = nowMs();
+              if (surf != g_surf) { if (g_surf != EGL_NO_SURFACE && t - g_lastMs < 1500) return; g_surf = surf; }
+              g_lastMs = t;
+
+              if ((++g_frame % 30) == 0) pollConfig(false);
+              if (PV[I_enabled] < 0.5f) return;
+
+              if (c != g_ctx) {
+                  g_ctx = c; g_progsOk = false; g_w = g_h = g_L = 0;
+                  for (Tgt* tg : {&scene, &streakT, &outA, &outB}) *tg = Tgt();
+                  for (int i = 0; i < 6; i++) { dn[i] = Tgt(); up[i] = Tgt(); }
+                  g_vao = 0; g_havePrev = false;
+                  const char* v = (const char*)glGetString(GL_VERSION);
+                  LOGI("context %p version %s", c, v ? v : "?");
+              }
+              const char* ver = (const char*)glGetString(GL_VERSION);
+              if (!ver || !strstr(ver, "OpenGL ES 3")) return;
+
+              GLState st;
+              saveState(st);
+              if (!g_progsOk) {
+                  if (!buildProgs()) { g_failed = true; restoreState(st); return; }
+                  g_progsOk = true;
+                  LOGI("shaders ready %dx%d", w, h);
+              }
+              runPipeline(w, h);
+              restoreState(st);
+          }
+
+          // ---------------------------------------------------------------- hooks
+          static EGLBoolean (*orig_swap)(EGLDisplay, EGLSurface) = nullptr;
+          static EGLBoolean (*orig_swapDmg)(EGLDisplay, EGLSurface, EGLint*, EGLint) = nullptr;
+          static void* (*orig_getProc)(const char*) = nullptr;
+
+          static EGLBoolean my_swap(EGLDisplay d, EGLSurface s) {
+              process(d, s);
+              return orig_swap ? orig_swap(d, s) : EGL_FALSE;
+          }
+
+          static EGLBoolean my_swapDmg(EGLDisplay d, EGLSurface s, EGLint* r, EGLint n) {
+              process(d, s);
+              return orig_swapDmg ? orig_swapDmg(d, s, r, n) : EGL_FALSE;
+          }
+
+          static void* my_getProc(const char* name) {
+              void* p = orig_getProc ? orig_getProc(name) : nullptr;
+              if (name && p) {
+                  if (strcmp(name, "eglSwapBuffersWithDamageKHR") == 0 || strcmp(name, "eglSwapBuffersWithDamageEXT") == 0) {
+                      orig_swapDmg = (decltype(orig_swapDmg))p;
+                      return (void*)my_swapDmg;
+                  }
+                  if (strcmp(name, "eglSwapBuffers") == 0) { orig_swap = (decltype(orig_swap))p; return (void*)my_swap; }
+              }
+              return p;
+          }
+
+          static void* hookThread(void*) {
+              xhook_enable_debug(0);
+              xhook_register(".*\\.so$", "eglSwapBuffers", (void*)my_swap, (void**)&orig_swap);
+              xhook_register(".*\\.so$", "eglSwapBuffersWithDamageKHR", (void*)my_swapDmg, (void**)&orig_swapDmg);
+              xhook_register(".*\\.so$", "eglSwapBuffersWithDamageEXT", (void*)my_swapDmg, (void**)&orig_swapDmg);
+              xhook_register(".*\\.so$", "eglGetProcAddress", (void*)my_getProc, (void**)&orig_getProc);
+              xhook_ignore(".*/libEGL\\.so$", nullptr);
+              xhook_ignore(".*/arm64-v8a\\.so$", nullptr);
+              for (int i = 0;; i++) {
+                  sleep(i < 20 ? 1 : 10);
+                  xhook_refresh(0);
+              }
+              return nullptr;
+          }
+
+          static void startHooks(const std::string& cfg) {
+              g_cfgPath = cfg;
+              loadDefaults();
+              pollConfig(true);
+              pthread_t th;
+              if (pthread_create(&th, nullptr, hookThread, nullptr) == 0) pthread_detach(th);
+          }
+
+          // ---------------------------------------------------------------- Zygisk module
+          class CineModule : public zygisk::ModuleBase {
+          public:
+              void onLoad(zygisk::Api* api, JNIEnv* env) override { api_ = api; env_ = env; }
+
+              void preAppSpecialize(zygisk::AppSpecializeArgs* args) override {
+                  if (args->app_data_dir) {
+                      const char* d = env_->GetStringUTFChars(args->app_data_dir, nullptr);
+                      if (d) { dataDir_ = d; env_->ReleaseStringUTFChars(args->app_data_dir, d); }
+                  }
+              }
+
+              void postAppSpecialize(const zygisk::AppSpecializeArgs*) override {
+                  std::string cfg = dataDir_ + "/cineshade.ini";
+                  if (dataDir_.empty() || access(cfg.c_str(), R_OK) != 0) {
+                      api_->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
+                      return;
+                  }
+                  LOGI("injecting into %s", dataDir_.c_str());
+                  startHooks(cfg);
+              }
+
+          private:
+              zygisk::Api* api_ = nullptr;
+              JNIEnv* env_ = nullptr;
+              std::string dataDir_;
+          };
+
+          REGISTER_ZYGISK_MODULE(CineModule)
+          EOF
+          mkdir -p $(dirname mod/module.prop)
+          cat > mod/module.prop <<'EOF'
+          id=cineshade
+          name=CineShade
+          version=v1.0
+          versionCode=1
+          author=CineShade
+          description=ReShade-style post-processing for Android games. Zygisk module, configured by the CineShade app.
+          EOF
+          mkdir -p $(dirname mod/uninstall.sh)
+          cat > mod/uninstall.sh <<'EOF'
+          #!/system/bin/sh
+          rm -f /data/data/*/cineshade.ini
+          EOF
+          mkdir -p $(dirname mod/META-INF/com/google/android/updater-script)
+          cat > mod/META-INF/com/google/android/updater-script <<'EOF'
+          #MAGISK
+          EOF
+          mkdir -p $(dirname mod/META-INF/com/google/android/update-binary)
+          cat > mod/META-INF/com/google/android/update-binary <<'EOF'
+          #!/sbin/sh
+
+          umask 022
+
+          ui_print() { echo "$1"; }
+
+          require_new_magisk() {
+            ui_print "*******************************"
+            ui_print " Please install Magisk v20.4+! "
+            ui_print "*******************************"
+            exit 1
+          }
+
+          OUTFD=$2
+          ZIPFILE=$3
+
+          mount /data 2>/dev/null
+
+          [ -f /data/adb/magisk/util_functions.sh ] || require_new_magisk
+          . /data/adb/magisk/util_functions.sh
+          [ $MAGISK_VER_CODE -lt 20400 ] && require_new_magisk
+
+          install_module
+          exit 0
+          EOF
+      - name: Build native module
+        run: |
+          set -e
+          NDK="${ANDROID_NDK_LATEST_HOME:-}"
+          [ -d "$NDK" ] || NDK="${ANDROID_NDK_HOME:-}"
+          [ -d "$NDK" ] || NDK=$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -n1)
+          echo "NDK=$NDK"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample zs
+          git clone --depth 1 https://github.com/iqiyi/xHook xh
+          ZF=$(find zs -name zygisk.hpp | head -n1)
+          XF=$(find xh -name xhook.h | head -n1)
+          [ -n "$ZF" ] && [ -n "$XF" ] || { echo "dependency headers not found"; exit 1; }
+          ZH=$(dirname "$ZF"); XH=$(dirname "$XF")
+          echo "zygisk: $ZH  xhook: $XH"
+          mkdir -p build mod/zygisk
+          for f in xhook xh_core xh_elf xh_log xh_util xh_version; do
+            "$TC/aarch64-linux-android26-clang" -O2 -fPIC -fvisibility=hidden -include stdint.h -include stddef.h -include unistd.h '-DPAGE_SIZE=((uintptr_t)sysconf(_SC_PAGESIZE))' '-DPAGE_MASK=(~((uintptr_t)sysconf(_SC_PAGESIZE)-1))' -I"$XH" -c "$XH/$f.c" -o "build/$f.o"
+          done
+          "$TC/aarch64-linux-android26-clang++" -std=c++17 -O2 -fPIC -fvisibility=hidden -I"$ZH" -I"$XH" -shared native/cineshade.cpp build/*.o -llog -ldl -static-libstdc++ -Wl,-z,max-page-size=16384 -o mod/zygisk/arm64-v8a.so
+          ls -l mod/zygisk
+      - name: Package module
+        run: |
+          set -e
+          chmod +x mod/META-INF/com/google/android/update-binary
+          (cd mod && zip -r ../cineshade-module.zip .)
+          mkdir -p app/src/main/assets
+          cp cineshade-module.zip app/src/main/assets/cineshade-module.zip
+      - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with: { name: CineShade-apk, path: app/build/outputs/apk/debug/*.apk }
+      - uses: actions/upload-artifact@v4
+        with: { name: CineShade-module, path: cineshade-module.zip }
