@@ -1,0 +1,810 @@
+name: Build HexNPU APK
+on: [push, workflow_dispatch]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: 17 }
+      - uses: actions/checkout@v4
+      - name: Signing key (created once, committed, reused so updates install over the old app)
+        run: |
+          if [ ! -f hexnpu.keystore ]; then
+            keytool -genkeypair -keystore hexnpu.keystore -storepass hexnpu123 -keypass hexnpu123 -alias hexnpu -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=HexNPU"
+            git config user.name github-actions; git config user.email actions@github.com
+            git add hexnpu.keystore; git commit -m "Add signing key [skip ci]"; git push
+          fi
+      - name: Accept Android SDK licenses (preinstalled SDK)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - name: Write project
+        run: |
+          P=app/src/main/java/com/example/hexnpu
+          mkdir -p $P
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "HexNPU"
+          include(":app")
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+              signingConfigs { create("rel") { storeFile = rootProject.file("hexnpu.keystore"); storePassword = "hexnpu123"; keyAlias = "hexnpu"; keyPassword = "hexnpu123" } }
+              buildTypes { getByName("debug") { signingConfig = signingConfigs.getByName("rel") } }
+              namespace = "com.example.hexnpu"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.hexnpu"; minSdk = 29; targetSdk = 34; versionCode = (System.getenv("VC") ?: "1").toInt(); versionName = "1." + (System.getenv("VC") ?: "0")
+                  ndk { abiFilters += "arm64-v8a" }
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+              // DSP must read the Skel .so files from disk, so they have to be extracted
+              packaging { jniLibs { useLegacyPackaging = true; pickFirsts += "**/libc++_shared.so" } }
+          }
+          dependencies {
+              implementation("com.microsoft.onnxruntime:onnxruntime-android-qnn:1.23.2")
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.animation:animation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("io.coil-kt:coil-compose:2.7.0")
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+              <application android:label="HexNPU"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <uses-native-library android:name="libcdsprpc.so" android:required="false"/>
+                  <uses-native-library android:name="libadsprpc.so" android:required="false"/>
+                  <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > $P/Sh.kt <<'EOF'
+          package com.example.hexnpu
+
+          object Sh {
+              fun su(cmd: String): String = try {
+                  val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+                  val o = p.inputStream.bufferedReader().readText(); p.waitFor(); o.trim()
+              } catch (e: Exception) { "su failed: ${e.message}" }
+
+              val PROBE = """
+              echo "SoC: $(getprop ro.soc.model) / platform $(getprop ro.board.platform) (SD8G1 = taro / SM8450)"
+              echo "Magisk: $(magisk -v 2>&1) ($(magisk -V 2>&1))"
+              echo "SELinux: $(getenforce)"
+              echo "-- FastRPC nodes"; ls -l /dev | grep -i rpc
+              echo "-- remoteproc"; for f in /sys/class/remoteproc/*; do echo "${'$'}(cat ${'$'}f/name): ${'$'}(cat ${'$'}f/state)"; done
+              echo "-- vendor libcdsprpc"; ls /vendor/lib64/libcdsprpc.so 2>&1
+              echo "-- DSP lib dirs"; ls /vendor/lib/rfsa/adsp /vendor/dsp/cdsp 2>&1 | head -25
+              """.trimIndent()
+          }
+          EOF
+          cat > $P/Npu.kt <<'EOF'
+          package com.example.hexnpu
+
+          import ai.onnxruntime.*
+          import android.content.Context
+          import android.system.Os
+          import java.io.File
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+
+          object Npu {
+              /** SM8450 (SD8 Gen 1) = Hexagon v69, soc_model 36 */
+              private val HTP = mapOf(
+                  "backend_path" to "libQnnHtp.so", "htp_arch" to "69", "soc_model" to "36",
+                  "htp_performance_mode" to "burst", "enable_htp_fp16_precision" to "1")
+
+              fun prepEnv(ctx: Context) {
+                  val n = ctx.applicationInfo.nativeLibraryDir
+                  Os.setenv("ADSP_LIBRARY_PATH", "$n;/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/system/lib/rfsa/adsp", true)
+              }
+
+              /** Fixed shapes let ORT constant-fold the shape math before QNN partitions the graph. */
+              fun fix(o: OrtSession.SessionOptions) {
+                  // Only public API is used: if this ORT build exposes a free-dimension override, apply it; otherwise do nothing.
+                  val m = o.javaClass.methods.firstOrNull { it.name.startsWith("addFreeDimensionOverride") && it.parameterTypes.size == 2 && it.parameterTypes[0] == String::class.java } ?: return
+                  for ((k, v) in mapOf("batch_size" to 1L, "num_channels" to 3L, "height" to 224L, "width" to 224L, "sequence_length" to 77L))
+                      try { m.invoke(o, k, v) } catch (_: Throwable) {}
+              }
+              fun cpu(env: OrtEnvironment, path: String): OrtSession {
+                  val o = OrtSession.SessionOptions(); fix(o); return env.createSession(path, o)
+              }
+
+              /** Opens a model on the HTP NPU (caches the compiled graph), falls back to CPU if every attempt fails. */
+              fun open(env: OrtEnvironment, path: String, log: (String) -> Unit): OrtSession {
+                  val ctx = "$path.v2.ctx.onnx"; File("$path.ctx.onnx").delete()
+                  val tries = if (File(ctx).exists()) listOf(ctx to false) else listOf(path to true, path to false)
+                  for ((p, dump) in tries) try {
+                      val o = OrtSession.SessionOptions(); fix(o); o.addQnn(HTP)
+                      if (dump) { o.addConfigEntry("ep.context_enable", "1"); o.addConfigEntry("ep.context_file_path", ctx) }
+                      val s = env.createSession(p, o)
+                      log("HTP session ok: ${File(p).name}${if (dump) " (compiled graph cached)" else ""}"); return s
+                  } catch (e: Throwable) {
+                      log("HTP attempt failed: ${e.message?.take(150)}"); if (p == ctx) File(ctx).delete()
+                  }
+                  log("-> CPU fallback for ${File(path).name}")
+                  return cpu(env, path)
+              }
+
+              fun bench(ctx: Context, model: String, log: (String) -> Unit) {
+                  prepEnv(ctx)
+                  val env = OrtEnvironment.getEnvironment()
+                  val cpu = run(env, model, null, 5, log)
+                  log("CPU: ${"%.2f".format(cpu)} ms/run")
+                  // strict = fail instead of silently falling back to CPU, so a pass proves 100% NPU
+                  for (strict in listOf(true, false)) {
+                      try {
+                          val t = run(env, model, strict, 20, log)
+                          log("HTP (${if (strict) "strict, all nodes on NPU" else "partial, CPU fallback allowed"}): ${"%.2f".format(t)} ms/run  -> ${"%.1f".format(cpu / t)}x")
+                          return
+                      } catch (e: Throwable) { log("HTP ${if (strict) "strict" else "partial"} failed: ${e.message?.take(300)}") }
+                  }
+              }
+
+              private fun run(env: OrtEnvironment, model: String, strict: Boolean?, n: Int, log: (String) -> Unit): Double {
+                  val o = OrtSession.SessionOptions()
+                  if (strict != null) {
+                      if (strict) o.addConfigEntry("session.disable_cpu_ep_fallback", "1")
+                      o.addQnn(HTP)
+                  }
+                  env.createSession(model, o).use { s ->
+                      val ins = HashMap<String, OnnxTensor>()
+                      for ((name, ni) in s.inputInfo) {
+                          val ti = ni.info as TensorInfo
+                          val shape = ti.shape.map { if (it <= 0) 1L else it }.toLongArray()
+                          val cnt = shape.fold(1L) { a, b -> a * b }.toInt()
+                          val sz = when (ti.type) { OnnxJavaType.INT64, OnnxJavaType.DOUBLE -> 8
+                              OnnxJavaType.UINT8, OnnxJavaType.INT8, OnnxJavaType.BOOL -> 1
+                              OnnxJavaType.FLOAT16 -> 2; else -> 4 }
+                          val b = ByteBuffer.allocateDirect(cnt * sz).order(ByteOrder.nativeOrder())
+                          ins[name] = OnnxTensor.createTensor(env, b, shape, ti.type)
+                      }
+                      repeat(3) { s.run(ins).close() }
+                      val t0 = System.nanoTime()
+                      repeat(n) { s.run(ins).close() }
+                      ins.values.forEach { it.close() }
+                      return (System.nanoTime() - t0) / 1e6 / n
+                  }
+              }
+          }
+          EOF
+          cat > $P/Clip.kt <<'EOF'
+          package com.example.hexnpu
+
+          import ai.onnxruntime.*
+          import android.content.ContentUris
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.provider.MediaStore
+          import android.util.Size
+          import org.json.JSONObject
+          import java.io.*
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+
+          /** CLIP ViT-B/32: image + text encoders on the NPU, cosine search over a local index. */
+          object Clip {
+              private const val BASE = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/"
+              private val FILES = listOf("onnx/vision_model.onnx" to "vision.onnx", "onnx/text_model.onnx" to "text.onnx",
+                  "vocab.json" to "vocab.json", "merges.txt" to "merges.txt")
+              private val MEAN = floatArrayOf(0.48145466f, 0.4578275f, 0.40821073f)
+              private val STD = floatArrayOf(0.26862954f, 0.26130258f, 0.27577711f)
+              private lateinit var dir: File
+              private lateinit var tok: Tok
+              private lateinit var vis: OrtSession
+              private lateinit var txt: OrtSession
+              private val env: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
+              private val ids = ArrayList<Long>()
+              private val vecs = ArrayList<FloatArray>()
+              @Volatile var ready = false
+
+              fun download(ctx: Context, log: (String) -> Unit) {
+                  dir = File(ctx.filesDir, "clip").apply { mkdirs() }
+                  for ((remote, local) in FILES) {
+                      val f = File(dir, local)
+                      if (f.length() > 0) { log("have $local"); continue }
+                      val c = URL(BASE + remote).openConnection() as HttpURLConnection
+                      c.connectTimeout = 20000; c.readTimeout = 30000
+                      val total = c.contentLengthLong; val tmp = File(dir, "$local.part"); var last = -1
+                      c.inputStream.use { i -> tmp.outputStream().use { o ->
+                          val buf = ByteArray(1 shl 16); var n = 0L
+                          while (true) {
+                              val r = i.read(buf); if (r < 0) break
+                              o.write(buf, 0, r); n += r
+                              val pct = if (total > 0) (n * 10 / total).toInt() * 10 else 0
+                              if (pct != last) { last = pct; log("$local $pct%") }
+                          }
+                      } }
+                      tmp.renameTo(f)
+                  }
+                  log("download done")
+              }
+
+              fun open(ctx: Context, log: (String) -> Unit) {
+                  Npu.prepEnv(ctx); logger = log
+                  dir = File(ctx.filesDir, "clip")
+                  tok = Tok(File(dir, "vocab.json").readText(), File(dir, "merges.txt").readText())
+                  log("loading vision model (first NPU compile can take minutes, cached after)...")
+                  vis = Npu.open(env, File(dir, "vision.onnx").path, log)
+                  log("loading text model...")
+                  txt = Npu.open(env, File(dir, "text.onnx").path, log)
+                  ids.clear(); vecs.clear()
+                  val f = File(dir, "index.bin")
+                  if (f.exists()) DataInputStream(BufferedInputStream(f.inputStream())).use { d ->
+                      try { while (true) { val id = d.readLong(); val v = FloatArray(512) { d.readFloat() }; ids.add(id); vecs.add(v) } }
+                      catch (_: EOFException) {}
+                  }
+                  ready = true
+                  log("ready, ${ids.size} photos indexed")
+              }
+
+              private fun vec(r: OrtSession.Result): FloatArray {
+                  val e = r.firstOrNull { it.key.contains("embeds") } ?: r.first()
+                  val fb = (e.value as OnnxTensor).floatBuffer
+                  val a = FloatArray(fb.remaining()); fb.get(a)
+                  val n = Math.sqrt(a.sumOf { (it * it).toDouble() }).toFloat().coerceAtLeast(1e-9f)
+                  return FloatArray(a.size) { a[it] / n }
+              }
+
+              private fun textVec(q: String): FloatArray {
+                  val t = tok.encode(q)
+                  val ins = HashMap<String, OnnxTensor>()
+                  try {
+                      for (n in txt.inputNames) {
+                          val b = ByteBuffer.allocateDirect(77 * 8).order(ByteOrder.nativeOrder()).asLongBuffer()
+                          for (i in 0 until 77) b.put(if (n.contains("mask")) 1L else t[i])
+                          b.rewind()
+                          ins[n] = OnnxTensor.createTensor(env, b, longArrayOf(1, 77))
+                      }
+                      return txt.run(ins).use { vec(it) }
+                  } finally { ins.values.forEach { it.close() } }
+              }
+
+              private fun imgVec(ctx: Context, id: Long): FloatArray? {
+                  val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                  val bmp = try { ctx.contentResolver.loadThumbnail(uri, Size(224, 224), null) } catch (e: Exception) { return null }
+                  val s = minOf(bmp.width, bmp.height)
+                  val sq = Bitmap.createBitmap(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s)
+                  val r = Bitmap.createScaledBitmap(sq, 224, 224, true).copy(Bitmap.Config.ARGB_8888, false)
+                  val px = IntArray(224 * 224); r.getPixels(px, 0, 224, 0, 0, 224, 224)
+                  val fb = ByteBuffer.allocateDirect(3 * 224 * 224 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+                  for (ch in 0..2) for (p in px) fb.put((((p shr (16 - 8 * ch)) and 255) / 255f - MEAN[ch]) / STD[ch])
+                  fb.rewind()
+                  val t = OnnxTensor.createTensor(env, fb, longArrayOf(1, 3, 224, 224))
+                  try { return vis.run(mapOf(vis.inputNames.first() to t)).use { vec(it) } } finally { t.close() }
+              }
+
+              @Volatile private var logger: (String) -> Unit = {}
+              private fun imgVecSafe(ctx: Context, id: Long): FloatArray? = try { imgVec(ctx, id) } catch (e: OrtException) {
+                  logger("NPU image run failed (${e.message?.take(120)}), vision model -> CPU")
+                  vis = Npu.cpu(env, File(dir, "vision.onnx").path); imgVec(ctx, id)
+              }
+              private fun textVecSafe(q: String): FloatArray = try { textVec(q) } catch (e: OrtException) {
+                  logger("NPU text run failed (${e.message?.take(120)}), text model -> CPU")
+                  txt = Npu.cpu(env, File(dir, "text.onnx").path); textVec(q)
+              }
+
+              fun index(ctx: Context, log: (String) -> Unit) {
+                  val have = synchronized(this) { ids.toHashSet() }
+                  val all = ArrayList<Long>()
+                  ctx.contentResolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media._ID),
+                      null, null, MediaStore.Images.Media.DATE_ADDED + " DESC")?.use { while (it.moveToNext()) all.add(it.getLong(0)) }
+                  val todo = all.filter { it !in have }
+                  log("${all.size} photos, ${todo.size} new")
+                  val o = DataOutputStream(BufferedOutputStream(FileOutputStream(File(dir, "index.bin"), true)))
+                  val t0 = System.nanoTime()
+                  todo.forEachIndexed { i, id ->
+                      val v = imgVecSafe(ctx, id) ?: return@forEachIndexed
+                      if (v.size != 512) { log("unexpected embedding size ${v.size}, stopping"); o.close(); return }
+                      o.writeLong(id); v.forEach { o.writeFloat(it) }
+                      synchronized(this) { ids.add(id); vecs.add(v) }
+                      if (i % 25 == 24) { o.flush(); log("indexed ${i + 1}/${todo.size} (${"%.1f".format((i + 1) / ((System.nanoTime() - t0) / 1e9))} img/s)") }
+                  }
+                  o.close(); log("index complete")
+              }
+
+              fun search(q: String, k: Int = 30): List<Pair<Long, Float>> {
+                  val t = textVecSafe(q)
+                  return synchronized(this) {
+                      ids.indices.map { i -> ids[i] to vecs[i].indices.sumOf { (vecs[i][it] * t[it]).toDouble() }.toFloat() }
+                          .sortedByDescending { it.second }.take(k)
+                  }
+              }
+          }
+
+          /** CLIP byte-level BPE tokenizer. */
+          class Tok(vocab: String, merges: String) {
+              private val enc = HashMap<String, Int>()
+              private val rank = HashMap<String, Int>()
+              private val b2u = HashMap<Int, Char>()
+              private val pat = Regex("""'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+""")
+              init {
+                  val j = JSONObject(vocab); for (k in j.keys()) enc[k] = j.getInt(k)
+                  merges.lines().drop(1).filter { it.isNotBlank() }.take(48894).forEachIndexed { i, l -> rank[l] = i }
+                  val bs = ArrayList<Int>(); (33..126).forEach { bs.add(it) }; (161..172).forEach { bs.add(it) }; (174..255).forEach { bs.add(it) }
+                  val cs = ArrayList<Int>(bs); var n = 0
+                  for (b in 0..255) if (b !in bs) { bs.add(b); cs.add(256 + n); n++ }
+                  for (i in bs.indices) b2u[bs[i]] = cs[i].toChar()
+              }
+              private fun bpe(s: String): List<String> {
+                  val w = s.map { it.toString() }.toMutableList(); w[w.size - 1] = w.last() + "</w>"
+                  while (w.size > 1) {
+                      var best = Int.MAX_VALUE; var bi = -1
+                      for (i in 0 until w.size - 1) { val r = rank[w[i] + " " + w[i + 1]]; if (r != null && r < best) { best = r; bi = i } }
+                      if (bi < 0) break
+                      w[bi] = w[bi] + w[bi + 1]; w.removeAt(bi + 1)
+                  }
+                  return w
+              }
+              fun encode(text: String): LongArray {
+                  val out = LongArray(77) { 49407L }; out[0] = 49406; var n = 1
+                  val t = text.trim().replace(Regex("\\s+"), " ").lowercase()
+                  for (m in pat.findAll(t)) {
+                      val s = m.value.toByteArray().joinToString("") { b2u[it.toInt() and 255].toString() }
+                      for (p in bpe(s)) { if (n >= 76) break; out[n++] = (enc[p] ?: 0).toLong() }
+                  }
+                  return out
+              }
+          }
+          EOF
+          cat > $P/MainActivity.kt <<'EOF'
+          @file:OptIn(ExperimentalSharedTransitionApi::class, ExperimentalFoundationApi::class)
+          package com.example.hexnpu
+
+          import android.Manifest
+          import android.content.ContentUris
+          import android.content.Context
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.MediaStore
+          import androidx.activity.ComponentActivity
+          import androidx.activity.SystemBarStyle
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.animation.*
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.gestures.detectVerticalDragGestures
+          import androidx.compose.foundation.interaction.MutableInteractionSource
+          import androidx.compose.foundation.interaction.collectIsPressedAsState
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.grid.*
+          import androidx.compose.foundation.pager.HorizontalPager
+          import androidx.compose.foundation.pager.rememberPagerState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.BasicTextField
+          import androidx.compose.foundation.text.KeyboardActions
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.*
+          import androidx.compose.ui.draw.*
+          import androidx.compose.ui.geometry.*
+          import androidx.compose.ui.graphics.*
+          import androidx.compose.ui.graphics.drawscope.DrawScope
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalFocusManager
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.ImeAction
+          import androidx.compose.ui.unit.*
+          import coil.compose.AsyncImage
+          import coil.request.ImageRequest
+          import kotlinx.coroutines.*
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.*
+          import kotlin.math.abs
+
+          private val BG = Color(0xFF09090E); private val CARD = Color(0xFF15151E); private val EDGE = Color(0x1FFFFFFF)
+          private val A1 = Color(0xFF8E7CFF); private val A2 = Color(0xFF38E1D0); private val DIM = Color(0xFF8B8B9C)
+          private val GRAD = Brush.linearGradient(listOf(A1, A2))
+          private val SUGGEST = listOf("sunset", "my dog", "food", "beach", "people smiling", "night city", "document", "car", "mountains", "screenshot")
+
+          data class Photo(val id: Long, val ts: Long)
+          class Viewing(val ids: List<Long>, val start: Int)
+          class Sc(val st: SharedTransitionScope, val av: AnimatedVisibilityScope)
+          fun uriOf(id: Long) = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+
+          fun loadPhotos(ctx: Context): List<Photo> {
+              val out = ArrayList<Photo>()
+              ctx.contentResolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                  arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DATE_TAKEN, MediaStore.Images.Media.DATE_ADDED),
+                  null, null, null)?.use { c ->
+                  while (c.moveToNext()) { val t = c.getLong(1); out.add(Photo(c.getLong(0), if (t > 0) t else c.getLong(2) * 1000)) }
+              }
+              return out.sortedByDescending { it.ts }
+          }
+
+          fun dayLabel(ts: Long): String {
+              fun d(c: Calendar) = c.get(Calendar.YEAR) * 1000 + c.get(Calendar.DAY_OF_YEAR)
+              val today = d(Calendar.getInstance()); val v = d(Calendar.getInstance().apply { timeInMillis = ts })
+              return when (v) { today -> "Today"; today - 1 -> "Yesterday"
+                  else -> SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(Date(ts)) }
+          }
+
+          /** Observable state for the NPU pipeline (download -> compile on Hexagon -> index). */
+          class NpuState {
+              var ready by mutableStateOf(false)
+              var busy by mutableStateOf(false)
+              var phase by mutableStateOf("Idle")
+              var done by mutableIntStateOf(0)
+              var total by mutableIntStateOf(0)
+              var speed by mutableFloatStateOf(0f)
+              val logs = mutableStateListOf<String>()
+              private val prog = Regex("(\\d+)/(\\d+) \\(([0-9.]+) img/s")
+
+              fun log(s: String) {
+                  prog.find(s)?.let { done = it.groupValues[1].toInt(); total = it.groupValues[2].toInt(); speed = it.groupValues[3].toFloat() }
+                  logs.add(s); if (logs.size > 80) logs.removeAt(0)
+              }
+              fun enable(ctx: Context) {
+                  if (busy) return; busy = true
+                  Thread {
+                      try {
+                          phase = "Downloading models"; Clip.download(ctx, this::log)
+                          phase = "Compiling for Hexagon NPU"; Clip.open(ctx, this::log); ready = true
+                          phase = "Indexing photos"; Clip.index(ctx, this::log); phase = "Ready"
+                      } catch (e: Throwable) { log("ERR: $e"); phase = "Error, see console" } finally { busy = false }
+                  }.start()
+              }
+              fun autoBoot(ctx: Context) {
+                  val d = File(ctx.filesDir, "clip")
+                  if (listOf("vision.onnx", "text.onnx", "vocab.json", "merges.txt").all { File(d, it).length() > 0 }) enable(ctx)
+              }
+              fun sh(cmd: String) { Thread { log(Sh.su(cmd)) }.start() }
+              fun module(ctx: Context) {
+                  Thread {
+                      val nat = ctx.applicationInfo.nativeLibraryDir; val d = "/data/adb/modules/hexnpu"; val a = "$d/system/vendor/lib/rfsa/adsp"
+                      log(Sh.su("""
+                      mkdir -p $a
+                      printf 'id=hexnpu\nname=HexNPU DSP libs\nversion=1\nversionCode=1\nauthor=me\ndescription=Hexagon v69 skel libs and FastRPC perms\n' > $d/module.prop
+                      cp $nat/libQnnHtpV69Skel.so $a/ 2>&1
+                      chmod 644 $a/*
+                      printf '#!/system/bin/sh\nchmod 666 /dev/fastrpc-cdsp /dev/adsprpc-smd 2>/dev/null\n' > $d/service.sh
+                      chmod 755 $d/service.sh
+                      ls -l $a
+                      """.trimIndent()))
+                      log("Reboot to activate the module.")
+                  }.start()
+              }
+          }
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  enableEdgeToEdge(SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
+                  setContent { App() }
+              }
+          }
+
+          @Composable fun Modifier.pressable(scale: Float = 0.94f, onClick: () -> Unit): Modifier {
+              val src = remember { MutableInteractionSource() }; val p by src.collectIsPressedAsState()
+              val s by animateFloatAsState(if (p) scale else 1f, spring(0.5f, 600f), label = "press")
+              return this.graphicsLayer { scaleX = s; scaleY = s }.clickable(src, null, onClick = onClick)
+          }
+
+          @Composable fun App() {
+              val ctx = LocalContext.current
+              var photos by remember { mutableStateOf<List<Photo>>(emptyList()) }
+              var perm by remember { mutableStateOf(false) }
+              val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { perm = it }
+              val npu = remember { NpuState() }
+              var tab by remember { mutableIntStateOf(0) }
+              var viewing by remember { mutableStateOf<Viewing?>(null) }
+              LaunchedEffect(Unit) {
+                  launcher.launch(if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE)
+              }
+              LaunchedEffect(perm) { if (perm) { photos = withContext(Dispatchers.IO) { loadPhotos(ctx) }; withContext(Dispatchers.IO) { npu.autoBoot(ctx) } } }
+              Box(Modifier.fillMaxSize().background(BG)) {
+                  SharedTransitionLayout {
+                      val st = this
+                      AnimatedContent(viewing, transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(300)) }, label = "view") { v ->
+                          val sc = Sc(st, this)
+                          if (v == null) {
+                              Box(Modifier.fillMaxSize()) {
+                                  AnimatedContent(tab, transitionSpec = {
+                                      (fadeIn(tween(320)) + slideInVertically(tween(320)) { it / 24 }) togetherWith fadeOut(tween(140))
+                                  }, label = "tab") { t ->
+                                      when (t) {
+                                          0 -> PhotosTab(photos, npu, sc) { ids, i -> viewing = Viewing(ids, i) }
+                                          1 -> SearchTab(npu, sc, { ids, i -> viewing = Viewing(ids, i) }) { tab = 2 }
+                                          else -> NpuTab(npu)
+                                      }
+                                  }
+                                  NavBar(tab, { tab = it }, Modifier.align(Alignment.BottomCenter))
+                              }
+                          } else Viewer(v, sc) { viewing = null }
+                      }
+                  }
+              }
+          }
+
+          @Composable fun NavBar(tab: Int, onTab: (Int) -> Unit, m: Modifier) {
+              val shape = RoundedCornerShape(32.dp)
+              Row(m.navigationBarsPadding().padding(bottom = 14.dp).clip(shape).background(Color(0xEB181822)).border(1.dp, EDGE, shape).padding(6.dp)) {
+                  listOf("Photos", "Ask AI", "NPU").forEachIndexed { i, l ->
+                      val sel = tab == i
+                      val bounce by animateFloatAsState(if (sel) 1.18f else 1f, spring(0.35f, 500f), label = "b")
+                      val bg by animateFloatAsState(if (sel) 1f else 0f, tween(300), label = "bg")
+                      Row(Modifier.pressable(0.9f) { onTab(i) }.clip(CircleShape)
+                          .background(GRAD, alpha = bg * 0.9f).animateContentSize(spring(0.8f, 350f)).padding(horizontal = 18.dp, vertical = 12.dp),
+                          verticalAlignment = Alignment.CenterVertically) {
+                          val c = if (sel) Color(0xFF0A0A0F) else DIM
+                          Canvas(Modifier.size(22.dp).graphicsLayer { scaleX = bounce; scaleY = bounce }) { icon(i, c) }
+                          AnimatedVisibility(sel, enter = fadeIn(tween(250)) + expandHorizontally(), exit = fadeOut(tween(100)) + shrinkHorizontally()) {
+                              Text(l, color = c, fontWeight = FontWeight.Bold, fontSize = 14.sp, modifier = Modifier.padding(start = 8.dp))
+                          }
+                      }
+                  }
+              }
+          }
+
+          fun DrawScope.icon(i: Int, c: Color) {
+              val s = size.minDimension; val w = s * 0.1f
+              when (i) {
+                  0 -> { val g = s * 0.4f; for (x in 0..1) for (y in 0..1) drawRoundRect(c, Offset(s * 0.05f + x * (g + s * 0.1f), s * 0.05f + y * (g + s * 0.1f)), Size(g, g), CornerRadius(s * 0.1f)) }
+                  1 -> { drawCircle(c, s * 0.3f, Offset(s * 0.42f, s * 0.42f), style = Stroke(w, cap = StrokeCap.Round)); drawLine(c, Offset(s * 0.65f, s * 0.65f), Offset(s * 0.92f, s * 0.92f), w, StrokeCap.Round) }
+                  else -> {
+                      drawRoundRect(c, Offset(s * 0.22f, s * 0.22f), Size(s * 0.56f, s * 0.56f), CornerRadius(s * 0.12f), style = Stroke(w))
+                      for (k in 0..2) { val p = s * (0.34f + k * 0.16f); drawLine(c, Offset(p, 0f), Offset(p, s * 0.16f), w); drawLine(c, Offset(p, s * 0.84f), Offset(p, s), w) }
+                  }
+              }
+          }
+
+          @Composable fun Thumb(m: Modifier, id: Long, i: Int, sc: Sc, onClick: () -> Unit) {
+              var shown by remember { mutableStateOf(false) }
+              LaunchedEffect(Unit) { delay((i % 4) * 30L); shown = true }
+              val a by animateFloatAsState(if (shown) 1f else 0f, spring(0.8f, 180f), label = "in")
+              with(sc.st) {
+                  AsyncImage(
+                      model = ImageRequest.Builder(LocalContext.current).data(uriOf(id)).size(400).crossfade(350).build(),
+                      contentDescription = null, contentScale = ContentScale.Crop,
+                      modifier = m.aspectRatio(1f)
+                          .graphicsLayer { val s = 0.8f + 0.2f * a; scaleX = s; scaleY = s; alpha = a }
+                          .sharedElement(rememberSharedContentState("img$id"), sc.av)
+                          .pressable(0.93f, onClick).clip(RoundedCornerShape(6.dp)).background(CARD))
+              }
+          }
+
+          @Composable fun NpuPill(npu: NpuState) {
+              val t = rememberInfiniteTransition(label = "pulse")
+              val a by t.animateFloat(initialValue = 0.3f, targetValue = 1f, animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "a")
+              Row(Modifier.clip(CircleShape).background(CARD).border(1.dp, EDGE, CircleShape).padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                  Box(Modifier.size(8.dp).graphicsLayer { alpha = if (npu.ready) a else 1f }.background(if (npu.ready) A2 else DIM, CircleShape))
+                  Text(if (npu.busy && npu.total > 0) "${npu.done}/${npu.total}" else if (npu.ready) "NPU" else "NPU off",
+                      color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(start = 7.dp))
+              }
+          }
+
+          @Composable fun PhotosTab(photos: List<Photo>, npu: NpuState, sc: Sc, open: (List<Long>, Int) -> Unit) {
+              val ids = remember(photos) { photos.map { it.id } }
+              val pos = remember(photos) { photos.withIndex().associate { it.value.id to it.index } }
+              val groups = remember(photos) { photos.groupBy { dayLabel(it.ts) } }
+              val st = rememberLazyGridState()
+              val collapsed by remember { derivedStateOf { st.firstVisibleItemIndex > 0 || st.firstVisibleItemScrollOffset > 120 } }
+              val tsz by animateFloatAsState(if (collapsed) 20f else 38f, spring(0.8f, 300f), label = "t")
+              val sub by animateFloatAsState(if (collapsed) 0f else 1f, tween(250), label = "s")
+              val pr by animateFloatAsState(if (npu.busy && npu.total > 0) npu.done / npu.total.toFloat() else 0f, tween(400), label = "pr")
+              Box(Modifier.fillMaxSize()) {
+                  LazyVerticalGrid(columns = GridCells.Fixed(3), state = st, modifier = Modifier.fillMaxSize(),
+                      contentPadding = PaddingValues(2.dp, 130.dp, 2.dp, 130.dp),
+                      verticalArrangement = Arrangement.spacedBy(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                      groups.forEach { (label, list) ->
+                          item(key = "h$label", span = { GridItemSpan(maxLineSpan) }) {
+                              Text(label, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(14.dp, 22.dp, 14.dp, 8.dp))
+                          }
+                          items(list, key = { it.id }) { p -> val i = pos[p.id] ?: 0; Thumb(Modifier.animateItem(), p.id, i, sc) { open(ids, i) } }
+                      }
+                  }
+                  if (photos.isEmpty()) Text("No photos found yet.\nGrant photo access to begin.", color = DIM, modifier = Modifier.align(Alignment.Center))
+                  Box(Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(BG, BG.copy(alpha = 0.92f), Color.Transparent)))
+                      .statusBarsPadding().padding(20.dp, 10.dp, 20.dp, 30.dp)) {
+                      Column {
+                          Text("Photos", color = Color.White, fontSize = tsz.sp, fontWeight = FontWeight.Bold)
+                          Text("${photos.size} memories", color = DIM, fontSize = 13.sp, modifier = Modifier.graphicsLayer { alpha = sub }.height((18 * sub).dp))
+                      }
+                      Box(Modifier.align(Alignment.CenterEnd)) { NpuPill(npu) }
+                  }
+                  Box(Modifier.fillMaxWidth(pr).statusBarsPadding().height(2.dp).background(GRAD))
+              }
+          }
+
+          @Composable fun SearchField(q: String, onChange: (String) -> Unit, onGo: () -> Unit) {
+              val t = rememberInfiniteTransition(label = "g")
+              val sh by t.animateFloat(initialValue = 0f, targetValue = 900f, animationSpec = infiniteRepeatable(tween(3200, easing = LinearEasing), RepeatMode.Reverse), label = "sh")
+              val shape = RoundedCornerShape(28.dp)
+              Box(Modifier.fillMaxWidth().clip(shape).background(CARD)
+                  .border(1.5.dp, Brush.linearGradient(listOf(A1, A2, A1), Offset(sh, 0f), Offset(sh + 700f, 500f)), shape)
+                  .padding(horizontal = 20.dp, vertical = 16.dp)) {
+                  BasicTextField(q, onChange, singleLine = true, textStyle = TextStyle(color = Color.White, fontSize = 17.sp), cursorBrush = SolidColor(A2),
+                      keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { onGo() }),
+                      modifier = Modifier.fillMaxWidth(),
+                      decorationBox = { inner -> if (q.isEmpty()) Text("beach, my dog, receipt, sunset...", color = DIM, fontSize = 17.sp); inner() })
+              }
+          }
+
+          @Composable fun Chip(text: String, i: Int, onClick: () -> Unit) {
+              var shown by remember { mutableStateOf(false) }
+              LaunchedEffect(Unit) { delay(80L + i * 45L); shown = true }
+              val a by animateFloatAsState(if (shown) 1f else 0f, spring(0.6f, 250f), label = "c")
+              Text(text, color = Color.White, fontSize = 14.sp,
+                  modifier = Modifier.graphicsLayer { alpha = a; scaleX = 0.7f + 0.3f * a; scaleY = 0.7f + 0.3f * a; translationY = (1 - a) * 24f }
+                      .pressable(0.92f, onClick).clip(CircleShape).background(CARD).border(1.dp, EDGE, CircleShape).padding(16.dp, 9.dp))
+          }
+
+          @Composable fun GradButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+              Box(Modifier.fillMaxWidth().pressable(0.96f) { if (enabled) onClick() }.clip(RoundedCornerShape(18.dp))
+                  .background(if (enabled) GRAD else Brush.linearGradient(listOf(CARD, CARD))).padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                  Text(text, color = if (enabled) Color(0xFF0A0A0F) else DIM, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+              }
+          }
+
+          @Composable fun SearchTab(npu: NpuState, sc: Sc, open: (List<Long>, Int) -> Unit, goSetup: () -> Unit) {
+              val ctx = LocalContext.current; val focus = LocalFocusManager.current; val scope = rememberCoroutineScope()
+              var q by remember { mutableStateOf("") }
+              var res by remember { mutableStateOf<List<Long>?>(null) }
+              var busy by remember { mutableStateOf(false) }
+              fun go(t: String) {
+                  if (t.isBlank() || !npu.ready) return
+                  q = t; busy = true; focus.clearFocus()
+                  scope.launch {
+                      res = withContext(Dispatchers.Default) { try { Clip.search(t, 60).map { it.first } } catch (e: Throwable) { npu.log("search error: $e"); emptyList() } }
+                      busy = false
+                  }
+              }
+              val r = res
+              val x by rememberInfiniteTransition(label = "sk").animateFloat(initialValue = -400f, targetValue = 1200f, animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "x")
+              Column(Modifier.fillMaxSize().statusBarsPadding().imePadding().padding(horizontal = 20.dp)) {
+                  Spacer(Modifier.height(14.dp))
+                  Text("Ask your photos", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                  Text("CLIP running on the Hexagon NPU", color = DIM, fontSize = 13.sp)
+                  Spacer(Modifier.height(18.dp))
+                  SearchField(q, { q = it }) { go(q) }
+                  Spacer(Modifier.height(12.dp))
+                  LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(SUGGEST.size) { i -> Chip(SUGGEST[i], i) { go(SUGGEST[i]) } } }
+                  Spacer(Modifier.height(16.dp))
+                  when {
+                      !npu.ready -> Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(CARD).border(1.dp, EDGE, RoundedCornerShape(24.dp)).padding(20.dp),
+                          verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                          Text("Turn on AI search", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                          Text("Downloads CLIP (~600 MB), compiles it for Hexagon v69 and indexes your photos. Everything stays on this phone.", color = DIM, fontSize = 14.sp)
+                          GradButton(if (npu.busy) npu.phase + "..." else "Enable on NPU", !npu.busy) { npu.enable(ctx) }
+                          Text("Details in the NPU tab", color = A2, fontSize = 13.sp, modifier = Modifier.pressable(0.95f) { goSetup() })
+                      }
+                      busy -> LazyVerticalGrid(GridCells.Fixed(2), userScrollEnabled = false, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          items(6) { Box(Modifier.aspectRatio(1f).clip(RoundedCornerShape(18.dp)).background(Brush.linearGradient(listOf(CARD, Color(0xFF262633), CARD), Offset(x, 0f), Offset(x + 400f, 200f)))) }
+                      }
+                      r == null -> Text("Describe what you remember, not a filename.", color = DIM, fontSize = 14.sp)
+                      r.isEmpty() -> Text("Nothing matched. Index may still be running.", color = DIM, fontSize = 14.sp)
+                      else -> LazyVerticalGrid(GridCells.Fixed(2), contentPadding = PaddingValues(bottom = 120.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                          items(r.size, key = { r[it] }) { i -> Thumb(Modifier.animateItem(), r[i], i, sc) { open(r, i) } }
+                      }
+                  }
+              }
+          }
+
+          @Composable fun NpuTab(npu: NpuState) {
+              val ctx = LocalContext.current
+              var showLog by remember { mutableStateOf(true) }
+              val hasModels = remember(npu.phase) { File(ctx.filesDir, "clip/vision.onnx").length() > 0 && File(ctx.filesDir, "clip/text.onnx").length() > 0 }
+              val prog by animateFloatAsState(if (npu.total > 0) npu.done / npu.total.toFloat() else if (npu.ready) 1f else 0f, tween(500), label = "ring")
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).statusBarsPadding().padding(20.dp, 14.dp, 20.dp, 130.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                  Text("Hexagon NPU", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                  Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).background(CARD).border(1.dp, EDGE, RoundedCornerShape(26.dp)).padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Box(contentAlignment = Alignment.Center) {
+                          Canvas(Modifier.size(110.dp)) {
+                              val sw = 12.dp.toPx(); val tl = Offset(sw / 2, sw / 2); val sz = Size(size.width - sw, size.height - sw)
+                              drawArc(EDGE, 0f, 360f, false, tl, sz, style = Stroke(sw))
+                              drawArc(GRAD, -90f, 360f * prog, false, tl, sz, style = Stroke(sw, cap = StrokeCap.Round))
+                          }
+                          Text("${(prog * 100).toInt()}%", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                      }
+                      Column(Modifier.padding(start = 20.dp)) {
+                          Text(npu.phase, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                          Text("SM8450 / HTP v69", color = DIM, fontSize = 13.sp)
+                          if (npu.speed > 0) Text("${npu.speed} img/s", color = A2, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                          if (npu.total > 0) Text("${npu.done} of ${npu.total} indexed", color = DIM, fontSize = 13.sp)
+                      }
+                  }
+                  listOf("CLIP models on device" to hasModels, "Graph compiled on Hexagon" to npu.ready, "Gallery indexed" to (npu.total > 0 && npu.done >= npu.total - 1 || npu.phase == "Ready")).forEach { (t, ok) ->
+                      val a by animateFloatAsState(if (ok) 1f else 0f, spring(0.5f, 300f), label = "ck")
+                      Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(CARD).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                          Box(Modifier.size(22.dp).graphicsLayer { scaleX = 0.8f + 0.2f * a; scaleY = 0.8f + 0.2f * a }.background(if (ok) GRAD else Brush.linearGradient(listOf(EDGE, EDGE)), CircleShape))
+                          Text(t, color = if (ok) Color.White else DIM, fontSize = 15.sp, modifier = Modifier.padding(start = 14.dp))
+                      }
+                  }
+                  GradButton(if (npu.busy) npu.phase + "..." else "Run full pipeline", !npu.busy) { npu.enable(ctx) }
+                  Text("ROOT TOOLS", color = DIM, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Chip("Probe", 0) { npu.sh(Sh.PROBE) }
+                      Chip("Unlock + permissive", 1) { npu.sh("chmod 666 /dev/fastrpc-cdsp /dev/adsprpc-smd 2>&1; setenforce 0; getenforce") }
+                      Chip("Magisk module", 2) { npu.module(ctx) }
+                  }
+                  Text(if (showLog) "CONSOLE  (tap to hide)" else "CONSOLE  (tap to show)", color = DIM, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.pressable(0.97f) { showLog = !showLog })
+                  AnimatedVisibility(showLog, enter = fadeIn() + expandVertically(spring(0.8f, 300f)), exit = fadeOut() + shrinkVertically()) {
+                      Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Color(0xFF0E0E15)).padding(14.dp)) {
+                          npu.logs.takeLast(18).forEach { Text(it, color = Color(0xFF9FA3B5), fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                      }
+                  }
+              }
+          }
+
+          @Composable fun Viewer(v: Viewing, sc: Sc, close: () -> Unit) {
+              BackHandler(onBack = close)
+              val pager = rememberPagerState(v.start) { v.ids.size }
+              val off = remember { Animatable(0f) }; val scope = rememberCoroutineScope()
+              val bgA = 1f - (abs(off.value) / 900f).coerceIn(0f, 0.7f)
+              Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = bgA)).pointerInput(Unit) {
+                  detectVerticalDragGestures(
+                      onDragEnd = { if (abs(off.value) > 280f) close() else scope.launch { off.animateTo(0f, spring(0.6f, 300f)) } },
+                      onVerticalDrag = { c, dy -> c.consume(); scope.launch { off.snapTo(off.value + dy) } })
+              }) {
+                  HorizontalPager(pager, Modifier.fillMaxSize().graphicsLayer { translationY = off.value; val s = 1f - abs(off.value) / 2600f; scaleX = s; scaleY = s },
+                      pageSpacing = 14.dp, beyondViewportPageCount = 1) { page ->
+                      var zoomed by remember { mutableStateOf(false) }
+                      var origin by remember { mutableStateOf(TransformOrigin.Center) }
+                      val z by animateFloatAsState(if (zoomed) 2.6f else 1f, spring(0.75f, 300f), label = "z")
+                      with(sc.st) {
+                          AsyncImage(
+                              model = ImageRequest.Builder(LocalContext.current).data(uriOf(v.ids[page])).size(1800).crossfade(250).build(),
+                              contentDescription = null, contentScale = ContentScale.Fit,
+                              modifier = Modifier.fillMaxSize().sharedElement(rememberSharedContentState("img${v.ids[page]}"), sc.av)
+                                  .graphicsLayer { scaleX = z; scaleY = z; transformOrigin = origin }
+                                  .pointerInput(Unit) { detectTapGestures(onDoubleTap = { o -> origin = TransformOrigin(o.x / size.width, o.y / size.height); zoomed = !zoomed }) })
+                      }
+                  }
+                  Text("${pager.currentPage + 1} / ${v.ids.size}", color = Color.White, fontSize = 13.sp,
+                      modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 12.dp).graphicsLayer { alpha = bgA }
+                          .clip(CircleShape).background(Color(0x66000000)).padding(horizontal = 14.dp, vertical = 6.dp))
+              }
+          }
+          EOF
+      - run: gradle assembleDebug --no-daemon --stacktrace
+        env:
+          VC: ${{ github.run_number }}
+      - uses: actions/upload-artifact@v4
+        with: { name: HexNPU-debug, path: app/build/outputs/apk/debug/*.apk }
