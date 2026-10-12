@@ -1,0 +1,433 @@
+name: Build HexNPU APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: 17 }
+      - name: Accept Android SDK licenses (preinstalled SDK)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - name: Write project
+        run: |
+          P=app/src/main/java/com/example/hexnpu
+          mkdir -p $P
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "HexNPU"
+          include(":app")
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.example.hexnpu"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.hexnpu"; minSdk = 29; targetSdk = 34; versionCode = 1; versionName = "1.0"
+                  ndk { abiFilters += "arm64-v8a" }
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+              // DSP must read the Skel .so files from disk, so they have to be extracted
+              packaging { jniLibs { useLegacyPackaging = true; pickFirsts += "**/libc++_shared.so" } }
+          }
+          dependencies { implementation("com.microsoft.onnxruntime:onnxruntime-android-qnn:1.23.2") }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+              <application android:label="HexNPU" android:extractNativeLibs="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <uses-native-library android:name="libcdsprpc.so" android:required="false"/>
+                  <uses-native-library android:name="libadsprpc.so" android:required="false"/>
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > $P/Sh.kt <<'EOF'
+          package com.example.hexnpu
+
+          object Sh {
+              fun su(cmd: String): String = try {
+                  val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+                  val o = p.inputStream.bufferedReader().readText(); p.waitFor(); o.trim()
+              } catch (e: Exception) { "su failed: ${e.message}" }
+
+              val PROBE = """
+              echo "SoC: $(getprop ro.soc.model) / platform $(getprop ro.board.platform) (SD8G1 = taro / SM8450)"
+              echo "Magisk: $(magisk -v 2>&1) ($(magisk -V 2>&1))"
+              echo "SELinux: $(getenforce)"
+              echo "-- FastRPC nodes"; ls -l /dev | grep -i rpc
+              echo "-- remoteproc"; for f in /sys/class/remoteproc/*; do echo "${'$'}(cat ${'$'}f/name): ${'$'}(cat ${'$'}f/state)"; done
+              echo "-- vendor libcdsprpc"; ls /vendor/lib64/libcdsprpc.so 2>&1
+              echo "-- DSP lib dirs"; ls /vendor/lib/rfsa/adsp /vendor/dsp/cdsp 2>&1 | head -25
+              """.trimIndent()
+          }
+          EOF
+          cat > $P/Npu.kt <<'EOF'
+          package com.example.hexnpu
+
+          import ai.onnxruntime.*
+          import android.content.Context
+          import android.system.Os
+          import java.io.File
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+
+          object Npu {
+              /** SM8450 (SD8 Gen 1) = Hexagon v69, soc_model 36 */
+              private val HTP = mapOf(
+                  "backend_path" to "libQnnHtp.so", "htp_arch" to "69", "soc_model" to "36",
+                  "htp_performance_mode" to "burst", "enable_htp_fp16_precision" to "1")
+
+              fun prepEnv(ctx: Context) {
+                  val n = ctx.applicationInfo.nativeLibraryDir
+                  Os.setenv("ADSP_LIBRARY_PATH", "$n;/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/system/lib/rfsa/adsp", true)
+              }
+
+              /** Opens a model on the HTP NPU (caches the compiled graph), falls back to CPU if every attempt fails. */
+              fun open(env: OrtEnvironment, path: String, log: (String) -> Unit): OrtSession {
+                  val ctx = "$path.ctx.onnx"
+                  val tries = if (File(ctx).exists()) listOf(ctx to false) else listOf(path to true, path to false)
+                  for ((p, dump) in tries) try {
+                      val o = OrtSession.SessionOptions(); o.addQnn(HTP)
+                      if (dump) { o.addConfigEntry("ep.context_enable", "1"); o.addConfigEntry("ep.context_file_path", ctx) }
+                      val s = env.createSession(p, o)
+                      log("HTP session ok: ${File(p).name}${if (dump) " (compiled graph cached)" else ""}"); return s
+                  } catch (e: Throwable) {
+                      log("HTP attempt failed: ${e.message?.take(150)}"); if (p == ctx) File(ctx).delete()
+                  }
+                  log("-> CPU fallback for ${File(path).name}")
+                  return env.createSession(path, OrtSession.SessionOptions())
+              }
+
+              fun bench(ctx: Context, model: String, log: (String) -> Unit) {
+                  prepEnv(ctx)
+                  val env = OrtEnvironment.getEnvironment()
+                  val cpu = run(env, model, null, 5, log)
+                  log("CPU: ${"%.2f".format(cpu)} ms/run")
+                  // strict = fail instead of silently falling back to CPU, so a pass proves 100% NPU
+                  for (strict in listOf(true, false)) {
+                      try {
+                          val t = run(env, model, strict, 20, log)
+                          log("HTP (${if (strict) "strict, all nodes on NPU" else "partial, CPU fallback allowed"}): ${"%.2f".format(t)} ms/run  -> ${"%.1f".format(cpu / t)}x")
+                          return
+                      } catch (e: Throwable) { log("HTP ${if (strict) "strict" else "partial"} failed: ${e.message?.take(300)}") }
+                  }
+              }
+
+              private fun run(env: OrtEnvironment, model: String, strict: Boolean?, n: Int, log: (String) -> Unit): Double {
+                  val o = OrtSession.SessionOptions()
+                  if (strict != null) {
+                      if (strict) o.addConfigEntry("session.disable_cpu_ep_fallback", "1")
+                      o.addQnn(HTP)
+                  }
+                  env.createSession(model, o).use { s ->
+                      val ins = HashMap<String, OnnxTensor>()
+                      for ((name, ni) in s.inputInfo) {
+                          val ti = ni.info as TensorInfo
+                          val shape = ti.shape.map { if (it <= 0) 1L else it }.toLongArray()
+                          val cnt = shape.fold(1L) { a, b -> a * b }.toInt()
+                          val sz = when (ti.type) { OnnxJavaType.INT64, OnnxJavaType.DOUBLE -> 8
+                              OnnxJavaType.UINT8, OnnxJavaType.INT8, OnnxJavaType.BOOL -> 1
+                              OnnxJavaType.FLOAT16 -> 2; else -> 4 }
+                          val b = ByteBuffer.allocateDirect(cnt * sz).order(ByteOrder.nativeOrder())
+                          ins[name] = OnnxTensor.createTensor(env, b, shape, ti.type)
+                      }
+                      repeat(3) { s.run(ins).close() }
+                      val t0 = System.nanoTime()
+                      repeat(n) { s.run(ins).close() }
+                      ins.values.forEach { it.close() }
+                      return (System.nanoTime() - t0) / 1e6 / n
+                  }
+              }
+          }
+          EOF
+          cat > $P/Clip.kt <<'EOF'
+          package com.example.hexnpu
+
+          import ai.onnxruntime.*
+          import android.content.ContentUris
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.provider.MediaStore
+          import android.util.Size
+          import org.json.JSONObject
+          import java.io.*
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+
+          /** CLIP ViT-B/32: image + text encoders on the NPU, cosine search over a local index. */
+          object Clip {
+              private const val BASE = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/"
+              private val FILES = listOf("onnx/vision_model.onnx" to "vision.onnx", "onnx/text_model.onnx" to "text.onnx",
+                  "vocab.json" to "vocab.json", "merges.txt" to "merges.txt")
+              private val MEAN = floatArrayOf(0.48145466f, 0.4578275f, 0.40821073f)
+              private val STD = floatArrayOf(0.26862954f, 0.26130258f, 0.27577711f)
+              private lateinit var dir: File
+              private lateinit var tok: Tok
+              private lateinit var vis: OrtSession
+              private lateinit var txt: OrtSession
+              private val env: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
+              private val ids = ArrayList<Long>()
+              private val vecs = ArrayList<FloatArray>()
+              @Volatile var ready = false
+
+              fun download(ctx: Context, log: (String) -> Unit) {
+                  dir = File(ctx.filesDir, "clip").apply { mkdirs() }
+                  for ((remote, local) in FILES) {
+                      val f = File(dir, local)
+                      if (f.length() > 0) { log("have $local"); continue }
+                      val c = URL(BASE + remote).openConnection() as HttpURLConnection
+                      c.connectTimeout = 20000; c.readTimeout = 30000
+                      val total = c.contentLengthLong; val tmp = File(dir, "$local.part"); var last = -1
+                      c.inputStream.use { i -> tmp.outputStream().use { o ->
+                          val buf = ByteArray(1 shl 16); var n = 0L
+                          while (true) {
+                              val r = i.read(buf); if (r < 0) break
+                              o.write(buf, 0, r); n += r
+                              val pct = if (total > 0) (n * 10 / total).toInt() * 10 else 0
+                              if (pct != last) { last = pct; log("$local $pct%") }
+                          }
+                      } }
+                      tmp.renameTo(f)
+                  }
+                  log("download done")
+              }
+
+              fun open(ctx: Context, log: (String) -> Unit) {
+                  Npu.prepEnv(ctx)
+                  dir = File(ctx.filesDir, "clip")
+                  tok = Tok(File(dir, "vocab.json").readText(), File(dir, "merges.txt").readText())
+                  log("loading vision model (first NPU compile can take minutes, cached after)...")
+                  vis = Npu.open(env, File(dir, "vision.onnx").path, log)
+                  log("loading text model...")
+                  txt = Npu.open(env, File(dir, "text.onnx").path, log)
+                  ids.clear(); vecs.clear()
+                  val f = File(dir, "index.bin")
+                  if (f.exists()) DataInputStream(BufferedInputStream(f.inputStream())).use { d ->
+                      try { while (true) { val id = d.readLong(); val v = FloatArray(512) { d.readFloat() }; ids.add(id); vecs.add(v) } }
+                      catch (_: EOFException) {}
+                  }
+                  ready = true
+                  log("ready, ${ids.size} photos indexed")
+              }
+
+              private fun vec(r: OrtSession.Result): FloatArray {
+                  val e = r.firstOrNull { it.key.contains("embeds") } ?: r.first()
+                  val fb = (e.value as OnnxTensor).floatBuffer
+                  val a = FloatArray(fb.remaining()); fb.get(a)
+                  val n = Math.sqrt(a.sumOf { (it * it).toDouble() }).toFloat().coerceAtLeast(1e-9f)
+                  return FloatArray(a.size) { a[it] / n }
+              }
+
+              private fun textVec(q: String): FloatArray {
+                  val t = tok.encode(q)
+                  val ins = HashMap<String, OnnxTensor>()
+                  try {
+                      for (n in txt.inputNames) {
+                          val b = ByteBuffer.allocateDirect(77 * 8).order(ByteOrder.nativeOrder()).asLongBuffer()
+                          for (i in 0 until 77) b.put(if (n.contains("mask")) 1L else t[i])
+                          b.rewind()
+                          ins[n] = OnnxTensor.createTensor(env, b, longArrayOf(1, 77))
+                      }
+                      return txt.run(ins).use { vec(it) }
+                  } finally { ins.values.forEach { it.close() } }
+              }
+
+              private fun imgVec(ctx: Context, id: Long): FloatArray? {
+                  val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                  val bmp = try { ctx.contentResolver.loadThumbnail(uri, Size(224, 224), null) } catch (e: Exception) { return null }
+                  val s = minOf(bmp.width, bmp.height)
+                  val sq = Bitmap.createBitmap(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s)
+                  val r = Bitmap.createScaledBitmap(sq, 224, 224, true).copy(Bitmap.Config.ARGB_8888, false)
+                  val px = IntArray(224 * 224); r.getPixels(px, 0, 224, 0, 0, 224, 224)
+                  val fb = ByteBuffer.allocateDirect(3 * 224 * 224 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+                  for (ch in 0..2) for (p in px) fb.put((((p shr (16 - 8 * ch)) and 255) / 255f - MEAN[ch]) / STD[ch])
+                  fb.rewind()
+                  val t = OnnxTensor.createTensor(env, fb, longArrayOf(1, 3, 224, 224))
+                  try { return vis.run(mapOf(vis.inputNames.first() to t)).use { vec(it) } } finally { t.close() }
+              }
+
+              fun index(ctx: Context, log: (String) -> Unit) {
+                  val have = synchronized(this) { ids.toHashSet() }
+                  val all = ArrayList<Long>()
+                  ctx.contentResolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media._ID),
+                      null, null, MediaStore.Images.Media.DATE_ADDED + " DESC")?.use { while (it.moveToNext()) all.add(it.getLong(0)) }
+                  val todo = all.filter { it !in have }
+                  log("${all.size} photos, ${todo.size} new")
+                  val o = DataOutputStream(BufferedOutputStream(FileOutputStream(File(dir, "index.bin"), true)))
+                  val t0 = System.nanoTime()
+                  todo.forEachIndexed { i, id ->
+                      val v = imgVec(ctx, id) ?: return@forEachIndexed
+                      if (v.size != 512) { log("unexpected embedding size ${v.size}, stopping"); o.close(); return }
+                      o.writeLong(id); v.forEach { o.writeFloat(it) }
+                      synchronized(this) { ids.add(id); vecs.add(v) }
+                      if (i % 25 == 24) { o.flush(); log("indexed ${i + 1}/${todo.size} (${"%.1f".format((i + 1) / ((System.nanoTime() - t0) / 1e9))} img/s)") }
+                  }
+                  o.close(); log("index complete")
+              }
+
+              fun search(q: String, k: Int = 30): List<Pair<Long, Float>> {
+                  val t = textVec(q)
+                  return synchronized(this) {
+                      ids.indices.map { i -> ids[i] to vecs[i].indices.sumOf { (vecs[i][it] * t[it]).toDouble() }.toFloat() }
+                          .sortedByDescending { it.second }.take(k)
+                  }
+              }
+          }
+
+          /** CLIP byte-level BPE tokenizer. */
+          class Tok(vocab: String, merges: String) {
+              private val enc = HashMap<String, Int>()
+              private val rank = HashMap<String, Int>()
+              private val b2u = HashMap<Int, Char>()
+              private val pat = Regex("""'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+""")
+              init {
+                  val j = JSONObject(vocab); for (k in j.keys()) enc[k] = j.getInt(k)
+                  merges.lines().drop(1).filter { it.isNotBlank() }.take(48894).forEachIndexed { i, l -> rank[l] = i }
+                  val bs = ArrayList<Int>(); (33..126).forEach { bs.add(it) }; (161..172).forEach { bs.add(it) }; (174..255).forEach { bs.add(it) }
+                  val cs = ArrayList<Int>(bs); var n = 0
+                  for (b in 0..255) if (b !in bs) { bs.add(b); cs.add(256 + n); n++ }
+                  for (i in bs.indices) b2u[bs[i]] = cs[i].toChar()
+              }
+              private fun bpe(s: String): List<String> {
+                  val w = s.map { it.toString() }.toMutableList(); w[w.size - 1] = w.last() + "</w>"
+                  while (w.size > 1) {
+                      var best = Int.MAX_VALUE; var bi = -1
+                      for (i in 0 until w.size - 1) { val r = rank[w[i] + " " + w[i + 1]]; if (r != null && r < best) { best = r; bi = i } }
+                      if (bi < 0) break
+                      w[bi] = w[bi] + w[bi + 1]; w.removeAt(bi + 1)
+                  }
+                  return w
+              }
+              fun encode(text: String): LongArray {
+                  val out = LongArray(77) { 49407L }; out[0] = 49406; var n = 1
+                  val t = text.trim().replace(Regex("\\s+"), " ").lowercase()
+                  for (m in pat.findAll(t)) {
+                      val s = m.value.toByteArray().joinToString("") { b2u[it.toInt() and 255].toString() }
+                      for (p in bpe(s)) { if (n >= 76) break; out[n++] = (enc[p] ?: 0).toLong() }
+                  }
+                  return out
+              }
+          }
+          EOF
+          cat > $P/MainActivity.kt <<'EOF'
+          package com.example.hexnpu
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.ContentUris
+          import android.content.Intent
+          import android.graphics.Typeface
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.MediaStore
+          import android.util.Size
+          import android.view.WindowManager
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              private lateinit var out: TextView
+              private lateinit var grid: GridLayout
+              private fun log(s: String) = runOnUiThread { out.append(s + "\n") }
+              private fun bg(f: () -> Unit) = Thread { try { f() } catch (e: Throwable) { log("ERR: $e") } }.start()
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  requestPermissions(arrayOf(if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES
+                      else Manifest.permission.READ_EXTERNAL_STORAGE), 1)
+                  val nat = applicationInfo.nativeLibraryDir
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 80, 32, 32) }
+                  fun btn(t: String, f: () -> Unit) = root.addView(Button(this).apply { text = t; setOnClickListener { f() } })
+                  out = TextView(this).apply { typeface = Typeface.MONOSPACE; textSize = 11f; setTextIsSelectable(true) }
+                  grid = GridLayout(this).apply { columnCount = 3 }
+
+                  root.addView(TextView(this).apply { text = "NPU PHOTO SEARCH"; textSize = 16f })
+                  btn("A. Download CLIP models (~600 MB)") { bg { Clip.download(this, ::log) } }
+                  btn("B. Load on NPU") { bg { Clip.open(this, ::log) } }
+                  btn("C. Index gallery (keep screen on)") { bg { if (!Clip.ready) log("Run B first") else Clip.index(this, ::log) } }
+                  val q = EditText(this).apply { hint = "dog on a beach, receipt, sunset..." }
+                  root.addView(q)
+                  btn("Search") {
+                      val s = q.text.toString()
+                      bg { if (!Clip.ready) log("Run B first") else show(Clip.search(s)) }
+                  }
+                  root.addView(grid)
+
+                  root.addView(TextView(this).apply { text = "ROOT TOOLS"; textSize = 16f; setPadding(0, 48, 0, 0) })
+                  btn("Probe SoC / Magisk / DSP") { bg { log(Sh.su(Sh.PROBE)) } }
+                  btn("Unlock FastRPC + SELinux permissive (temp)") {
+                      bg { log(Sh.su("chmod 666 /dev/fastrpc-cdsp /dev/adsprpc-smd 2>&1; setenforce 0; getenforce")) }
+                  }
+                  btn("Install Magisk module (V69 skel)") {
+                      bg {
+                          val d = "/data/adb/modules/hexnpu"; val a = "$d/system/vendor/lib/rfsa/adsp"
+                          log(Sh.su("""
+                          mkdir -p $a
+                          printf 'id=hexnpu\nname=HexNPU DSP libs\nversion=1\nversionCode=1\nauthor=me\ndescription=Hexagon v69 skel libs and FastRPC perms\n' > $d/module.prop
+                          cp $nat/libQnnHtpV69Skel.so $a/ 2>&1
+                          chmod 644 $a/*
+                          printf '#!/system/bin/sh\nchmod 666 /dev/fastrpc-cdsp /dev/adsprpc-smd 2>/dev/null\n' > $d/service.sh
+                          chmod 755 $d/service.sh
+                          ls -l $a
+                          """.trimIndent()))
+                          log("Reboot to activate the module.")
+                      }
+                  }
+                  btn("Benchmark CPU vs NPU (/sdcard/HexNPU/model.onnx)") {
+                      bg {
+                          val dst = filesDir.absolutePath + "/model.onnx"
+                          log(Sh.su("cat /sdcard/HexNPU/model.onnx > $dst && chmod 666 $dst && echo model copied"))
+                          Npu.bench(this, dst) { log(it) }
+                      }
+                  }
+                  root.addView(out)
+                  setContentView(ScrollView(this).apply { addView(root) })
+              }
+
+              private fun show(r: List<Pair<Long, Float>>) {
+                  runOnUiThread { grid.removeAllViews() }
+                  val w = resources.displayMetrics.widthPixels / 3 - 24
+                  for ((id, _) in r) {
+                      val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                      val bmp = try { contentResolver.loadThumbnail(uri, Size(w, w), null) } catch (e: Exception) { continue }
+                      runOnUiThread {
+                          grid.addView(ImageView(this).apply {
+                              setImageBitmap(bmp); scaleType = ImageView.ScaleType.CENTER_CROP
+                              layoutParams = GridLayout.LayoutParams().apply { width = w; height = w; setMargins(4, 4, 4, 4) }
+                              setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
+                          })
+                      }
+                  }
+                  if (r.isEmpty()) log("no results (index empty?)")
+              }
+          }
+          EOF
+      - run: gradle assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with: { name: HexNPU-debug, path: app/build/outputs/apk/debug/*.apk }
