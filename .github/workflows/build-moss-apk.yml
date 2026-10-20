@@ -1,0 +1,435 @@
+# Save as: .github/workflows/build-moss-apk.yml
+#
+# Builds "MossLocal": an Android app that runs OpenMOSS MOSS-Image (5B DiT + Qwen3.5-9B
+# text encoder + FLUX.2 small VAE) on-device through stable-diffusion.cpp (ggml),
+# using the Adreno GPU via OpenCL, with a CPU (NEON/i8mm) fallback.
+#
+# REQUIRED SECRETS (Settings > Secrets and variables > Actions) - needed for in-place updates:
+#   KEYSTORE_B64       base64 of your release keystore  (base64 -w0 moss.jks)
+#   KEYSTORE_PASSWORD  keystore + key password
+#   KEY_ALIAS          key alias
+# Create once:  keytool -genkeypair -v -keystore moss.jks -alias moss -keyalg RSA -keysize 4096 -validity 36500
+# NEVER lose or change this key, otherwise Android refuses to update the installed app.
+#
+# HOW UPDATES WORK
+#  - applicationId is fixed, signing key is fixed, versionCode = run number (always increases)
+#    -> Android installs the new APK OVER the old one and keeps app data.
+#  - Models live in app-specific external storage, NOT in the APK -> an update never re-downloads 5+ GB.
+#  - The app has an "Update app" button that reads the latest GitHub Release and installs it.
+
+name: Build MossLocal APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sd_cpp_ref:
+        description: "stable-diffusion.cpp branch/tag/commit (must contain MOSS-Image support)"
+        default: "master"
+      dit_url:
+        description: "URL of quantized MOSS DiT in GGUF (Q4_0 recommended for Adreno OpenCL)"
+        default: ""
+      te_url:
+        description: "URL of quantized Qwen3.5-9B text encoder in GGUF (Q4_0 / Q4_K)"
+        default: ""
+      vae_url:
+        description: "URL of FLUX.2 small VAE (safetensors)"
+        default: ""
+      extra_args:
+        description: "Default extra sd-cli args shipped in the app (editable in-app)"
+        default: "--diffusion-fa --offload-to-cpu --vae-tiling"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: moss-apk
+  cancel-in-progress: false
+
+env:
+  APP_ID: com.mosslocal.app
+  SD_CPP_REF: ${{ inputs.sd_cpp_ref || 'master' }}
+  DIT_URL: ${{ inputs.dit_url || vars.MOSS_DIT_URL || '' }}
+  TE_URL: ${{ inputs.te_url || vars.MOSS_TE_URL || '' }}
+  VAE_URL: ${{ inputs.vae_url || vars.MOSS_VAE_URL || '' }}
+  EXTRA_ARGS: ${{ inputs.extra_args || '--diffusion-fa --offload-to-cpu --vae-tiling' }}
+  VERSION_CODE: ${{ github.run_number }}
+  VERSION_NAME: 1.0.${{ github.run_number }}
+  REPO_SLUG: ${{ github.repository }}
+
+jobs:
+  native:
+    name: Build sd-cli (arm64, OpenCL/Adreno + NEON)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake git
+
+      - name: Fetch stable-diffusion.cpp
+        run: |
+          git clone --recursive https://github.com/leejet/stable-diffusion.cpp sdcpp
+          cd sdcpp
+          git checkout "$SD_CPP_REF"
+          git submodule update --init --recursive
+          echo "SD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Check this ref actually knows MOSS-Image
+        run: |
+          if grep -rIil "moss" sdcpp/src sdcpp/docs sdcpp/README.md 2>/dev/null | head -1 | grep -q .; then
+            echo "MOSS references found in sd.cpp source."
+          else
+            echo "::warning::No 'moss' reference found in stable-diffusion.cpp at $SD_COMMIT. The APK will build, but MOSS-Image will not load until sd.cpp adds the architecture. Set sd_cpp_ref to a fork/commit that has it."
+          fi
+
+      - name: Build OpenCL headers + ICD stub (link-time only)
+        run: |
+          NDK="$ANDROID_NDK_LATEST_HOME"
+          TC="$NDK/build/cmake/android.toolchain.cmake"
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git
+          cmake -S OpenCL-Headers -B oh -DCMAKE_INSTALL_PREFIX="$HOME/ocl"
+          cmake --build oh --target install
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader.git
+          cmake -S OpenCL-ICD-Loader -B ol -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$TC" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=29 \
+            -DANDROID_STL=c++_static \
+            -DOPENCL_ICD_LOADER_HEADERS_DIR="$HOME/ocl/include" \
+            -DCMAKE_INSTALL_PREFIX="$HOME/ocl" -DCMAKE_BUILD_TYPE=Release
+          cmake --build ol --target install
+          ls -l "$HOME/ocl/lib"
+
+      - name: Compile sd-cli
+        run: |
+          NDK="$ANDROID_NDK_LATEST_HOME"
+          cmake -S sdcpp -B sdcpp/build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=29 -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-march=armv8.6-a+i8mm+dotprod+fp16 -O3" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.6-a+i8mm+dotprod+fp16 -O3" \
+            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
+            -DGGML_OPENCL=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON -DGGML_OPENCL_EMBED_KERNELS=ON \
+            -DOpenCL_INCLUDE_DIR="$HOME/ocl/include" -DOpenCL_LIBRARY="$HOME/ocl/lib/libOpenCL.so" \
+            -DSD_BUILD_SHARED_LIBS=OFF -DSD_BUILD_EXAMPLES=ON
+          cmake --build sdcpp/build --target sd-cli || cmake --build sdcpp/build --target sd
+          BIN=$(find sdcpp/build -type f \( -name sd-cli -o -name sd \) | head -1)
+          test -n "$BIN"
+          mkdir -p out
+          cp "$BIN" out/libsdcli.so          # named lib*.so so Android extracts it to nativeLibraryDir (exec allowed)
+          "$NDK"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip out/libsdcli.so
+          ls -l out
+          # Record the real CLI flags of this commit so you can fix the in-app defaults
+          grep -rhoE '"--[a-z0-9-]+"' sdcpp/examples 2>/dev/null | sort -u > out/cli_flags.txt || true
+          { echo "### sd.cpp commit \`$SD_COMMIT\`"; echo "Supported CLI flags:"; echo '```'; cat out/cli_flags.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdcli
+          path: out/libsdcli.so
+
+  apk:
+    name: Scaffold, build, sign, release
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.9" }
+
+      - uses: actions/download-artifact@v4
+        with: { name: sdcli, path: native }
+
+      - name: Fail early if signing key is missing (otherwise updates would break)
+        env:
+          KS: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KS" ]; then
+            echo "::error::KEYSTORE_B64 secret missing. A stable signing key is REQUIRED so new builds install as updates instead of being rejected."
+            exit 1
+          fi
+          echo "$KS" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Scaffold Android project
+        run: |
+          mkdir -p app/src/main/{java/com/mosslocal/app,res/xml,res/values,jniLibs/arm64-v8a}
+          cp native/libsdcli.so app/src/main/jniLibs/arm64-v8a/libsdcli.so
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "MossLocal"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          echo "org.gradle.jvmargs=-Xmx3g" > gradle.properties
+          echo "android.useAndroidX=true" >> gradle.properties
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          fun env(k: String) = System.getenv(k) ?: ""
+          android {
+              namespace = "com.mosslocal.app"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.mosslocal.app"      // never change: identity used for updates
+                  minSdk = 29
+                  targetSdk = 34
+                  versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
+                  versionName = System.getenv("VERSION_NAME") ?: "1.0.0"
+                  ndk { abiFilters += "arm64-v8a" }
+                  buildConfigField("String", "DIT_URL", "\"" + env("DIT_URL") + "\"")
+                  buildConfigField("String", "TE_URL", "\"" + env("TE_URL") + "\"")
+                  buildConfigField("String", "VAE_URL", "\"" + env("VAE_URL") + "\"")
+                  buildConfigField("String", "EXTRA_ARGS", "\"" + env("EXTRA_ARGS") + "\"")
+                  buildConfigField("String", "REPO_SLUG", "\"" + env("REPO_SLUG") + "\"")
+              }
+              buildFeatures { buildConfig = true }
+              signingConfigs {
+                  create("release") {
+                      storeFile = file(env("KS_PATH"))
+                      storePassword = env("KS_PASS")
+                      keyAlias = env("KS_ALIAS")
+                      keyPassword = env("KS_PASS")
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.getByName("release")
+                      isMinifyEnabled = false
+                  }
+              }
+              packaging { jniLibs { useLegacyPackaging = true } }   // extract .so so the binary can be exec'd
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies { implementation("androidx.core:core-ktx:1.13.1") }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-native-library android:name="libOpenCL.so" android:required="false"/>
+              <application android:label="MossLocal" android:extractNativeLibs="true"
+                  android:largeHeap="true" android:usesCleartextTraffic="false">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <provider android:name="androidx.core.content.FileProvider"
+                      android:authorities="com.mosslocal.app.files" android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/>
+                  </provider>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/file_paths.xml <<'EOF'
+          <paths><external-cache-path name="updates" path="."/></paths>
+          EOF
+
+          cat > app/src/main/java/com/mosslocal/app/MainActivity.kt <<'EOF'
+          package com.mosslocal.app
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.BitmapFactory
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.text.InputType
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.*
+          import androidx.core.content.FileProvider
+          import org.json.JSONObject
+          import java.io.File
+          import java.io.RandomAccessFile
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import kotlin.concurrent.thread
+
+          class MainActivity : Activity() {
+              private val ui = Handler(Looper.getMainLooper())
+              private lateinit var logView: TextView
+              private lateinit var img: ImageView
+              @Volatile private var proc: Process? = null
+
+              // Models live outside the APK -> survive app updates (deleted only on uninstall)
+              private val modelDir get() = File(getExternalFilesDir(null), "models").apply { mkdirs() }
+              private val dit get() = File(modelDir, "moss_dit.gguf")
+              private val te get() = File(modelDir, "qwen35_te.gguf")
+              private val vae get() = File(modelDir, "flux2_vae.safetensors")
+
+              private fun log(s: String) = ui.post { logView.append(s + "\n") }
+              private fun availMemMb(): Long =
+                  File("/proc/meminfo").readLines().first { it.startsWith("MemAvailable") }
+                      .filter { it.isDigit() }.toLong() / 1024
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 48, 24, 24) }
+                  fun et(hint: String, v: String, num: Boolean = false) = EditText(this).apply {
+                      this.hint = hint; setText(v); if (num) inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                  }
+                  val prompt = et("Prompt", "a lighthouse on a cliff at dawn, volumetric light, detailed")
+                  val size = et("Size (square, multiple of 64)", "512", true)
+                  val steps = et("Steps", "28", true)
+                  val cfg = et("CFG", "3.0", true)
+                  val extra = et("Extra sd-cli args", BuildConfig.EXTRA_ARGS)
+                  val gen = Button(this).apply { text = "Generate" }
+                  val dl = Button(this).apply { text = "Download / resume models" }
+                  val upd = Button(this).apply { text = "Update app (v${BuildConfig.VERSION_NAME})" }
+                  val stop = Button(this).apply { text = "Stop" }
+                  img = ImageView(this).apply { adjustViewBounds = true }
+                  logView = TextView(this).apply { textSize = 11f; setTextIsSelectable(true) }
+                  listOf(prompt, size, steps, cfg, extra, gen, stop, dl, upd, img,
+                      ScrollView(this).apply { addView(logView) }).forEach { root.addView(it) }
+                  setContentView(root)
+                  log("Free RAM: ${availMemMb()} MB. Models dir: $modelDir")
+
+                  dl.setOnClickListener { thread { downloadAll() } }
+                  upd.setOnClickListener { thread { selfUpdate() } }
+                  stop.setOnClickListener { proc?.destroyForcibly(); log("Stopped.") }
+                  gen.setOnClickListener {
+                      thread { generate(prompt.text.toString(), size.text.toString().toIntOrNull() ?: 512,
+                          steps.text.toString().toIntOrNull() ?: 28, cfg.text.toString(), extra.text.toString()) }
+                  }
+              }
+
+              private fun generate(p: String, sizeIn: Int, steps: Int, cfg: String, extra: String) {
+                  if (!dit.exists() || !te.exists() || !vae.exists()) { log("Models missing. Tap download."); return }
+                  var size = sizeIn
+                  val free = availMemMb()
+                  if (free < 3500 && size > 512) { size = 512; log("Only $free MB free -> forcing 512px.") }
+                  val out = File(cacheDir, "out.png").also { it.delete() }
+                  val bin = File(applicationInfo.nativeLibraryDir, "libsdcli.so")
+                  val cmd = mutableListOf(bin.absolutePath,
+                      "--diffusion-model", dit.absolutePath, "--llm", te.absolutePath, "--vae", vae.absolutePath,
+                      "-p", p, "-W", "$size", "-H", "$size", "--steps", "$steps", "--cfg-scale", cfg,
+                      "-o", out.absolutePath, "-v")
+                  cmd += extra.split(" ").filter { it.isNotBlank() }
+                  log("RUN: " + cmd.joinToString(" "))
+                  val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+                  // lets the exec'd binary find the vendor Adreno OpenCL driver; falls back to CPU if it can't
+                  pb.environment()["LD_LIBRARY_PATH"] = "/vendor/lib64:/system/lib64:/vendor/lib64/egl"
+                  try {
+                      proc = pb.start()
+                      proc!!.inputStream.bufferedReader().forEachLine { log(it) }
+                      val code = proc!!.waitFor()
+                      log("exit=$code")
+                      if (out.exists()) ui.post { img.setImageBitmap(BitmapFactory.decodeFile(out.absolutePath)) }
+                  } catch (e: Exception) { log("ERR: $e") }
+              }
+
+              // ---- resumable downloads (HTTP Range) ----
+              private fun downloadAll() {
+                  listOf(BuildConfig.DIT_URL to dit, BuildConfig.TE_URL to te, BuildConfig.VAE_URL to vae).forEach { (u, f) ->
+                      if (u.isBlank()) { log("No URL baked in for ${f.name}"); return@forEach }
+                      try { download(u, f) } catch (e: Exception) { log("Download failed ${f.name}: $e") }
+                  }
+                  log("Download step finished.")
+              }
+
+              private fun download(u: String, dest: File) {
+                  val part = File(dest.path + ".part")
+                  val have = if (part.exists()) part.length() else 0L
+                  val c = URL(u).openConnection() as HttpURLConnection
+                  c.instanceFollowRedirects = true
+                  if (have > 0) c.setRequestProperty("Range", "bytes=$have-")
+                  if (c.responseCode == 416) { part.renameTo(dest); return }
+                  val append = c.responseCode == 206
+                  val total = c.contentLengthLong + if (append) have else 0
+                  if (dest.exists() && dest.length() == total) { log("${dest.name} already complete"); return }
+                  log("Downloading ${dest.name} (${total / 1048576} MB)")
+                  RandomAccessFile(part, "rw").use { raf ->
+                      raf.seek(if (append) have else 0L).also { if (!append) raf.setLength(0) }
+                      var done = if (append) have else 0L; var lastLog = 0L
+                      c.inputStream.use { inp ->
+                          val buf = ByteArray(1 shl 20)
+                          while (true) {
+                              val n = inp.read(buf); if (n < 0) break
+                              raf.write(buf, 0, n); done += n
+                              if (done - lastLog > 256L shl 20) { lastLog = done; log("  ${done / 1048576}/${total / 1048576} MB") }
+                          }
+                      }
+                  }
+                  part.renameTo(dest)
+                  log("${dest.name} done")
+              }
+
+              // ---- in-place self update from GitHub Releases ----
+              private fun selfUpdate() {
+                  try {
+                      val c = URL("https://api.github.com/repos/${BuildConfig.REPO_SLUG}/releases/latest").openConnection() as HttpURLConnection
+                      c.setRequestProperty("Accept", "application/vnd.github+json")
+                      val j = JSONObject(c.inputStream.bufferedReader().readText())
+                      val remote = j.getString("tag_name").removePrefix("v").toInt()
+                      if (remote <= BuildConfig.VERSION_CODE) { log("Up to date (build ${BuildConfig.VERSION_CODE})."); return }
+                      val assets = j.getJSONArray("assets")
+                      var url = ""
+                      for (i in 0 until assets.length()) {
+                          val a = assets.getJSONObject(i)
+                          if (a.getString("name").endsWith(".apk")) url = a.getString("browser_download_url")
+                      }
+                      if (url.isEmpty()) { log("No APK in release."); return }
+                      log("Downloading build $remote ...")
+                      val apk = File(externalCacheDir, "update.apk")
+                      URL(url).openStream().use { i -> apk.outputStream().use { o -> i.copyTo(o) } }
+                      val uri = FileProvider.getUriForFile(this, "com.mosslocal.app.files", apk)
+                      val it = Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+                          .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(it)   // installs OVER the existing app; models + settings are kept
+                  } catch (e: Exception) { log("Update check failed: $e") }
+              }
+          }
+          EOF
+
+      - name: Build signed release APK
+        env:
+          KS_PATH: ${{ runner.temp }}/release.jks
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: gradle --no-daemon :app:assembleRelease
+
+      - name: Name the artifact
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk "MossLocal-${VERSION_NAME}.apk"
+          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs "MossLocal-${VERSION_NAME}.apk" | head -3
+          sha256sum "MossLocal-${VERSION_NAME}.apk" > SHA256SUMS.txt
+
+      - name: Publish release (tag = v<versionCode>, used by in-app updater)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: MossLocal ${{ env.VERSION_NAME }}
+          files: |
+            MossLocal-${{ env.VERSION_NAME }}.apk
+            SHA256SUMS.txt
+          generate_release_notes: true
+          make_latest: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MossLocal-apk
+          path: MossLocal-*.apk
