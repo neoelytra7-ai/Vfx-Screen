@@ -1,0 +1,732 @@
+name: Build SysX APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate Android project
+        run: |
+          set -e
+          mkdir -p sysx/app/src/main/java/dev/sysx sysx/app/src/main/res/layout sysx/app/src/main/res/xml
+          cd sysx
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "SysX"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+            id("com.android.application") version "8.5.2" apply false
+            id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+            namespace = "dev.sysx"
+            compileSdk = 34
+            defaultConfig { applicationId = "dev.sysx"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+            buildTypes { release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("debug") } }
+            compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+            kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+            <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+            <uses-permission android:name="android.permission.VIBRATE"/>
+            <application android:label="SysX" android:icon="@android:drawable/sym_def_app_icon"
+                android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+              <service android:name=".Core" android:exported="false" android:foregroundServiceType="specialUse">
+                <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="system monitoring and automation"/>
+              </service>
+              <receiver android:name=".StatsWidget" android:exported="false">
+                <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter>
+                <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info"/>
+              </receiver>
+            </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/widget_info.xml <<'EOF'
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="180dp" android:minHeight="110dp" android:updatePeriodMillis="1800000"
+              android:initialLayout="@layout/widget" android:resizeMode="horizontal|vertical"/>
+          EOF
+
+          cat > app/src/main/res/layout/widget.xml <<'EOF'
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/w_root" android:layout_width="match_parent" android:layout_height="match_parent"
+              android:padding="10dp" android:background="#D90F1419">
+            <TextView android:id="@+id/w_txt" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:textColor="#E6FFFFFF" android:textSize="12sp" android:typeface="monospace"/>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/java/dev/sysx/S.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.ActivityManager
+          import android.content.*
+          import android.net.*
+          import android.opengl.*
+          import android.os.*
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          object S {
+            const val DEF_W = "🔋 {battery}%  {temp}°C\nRAM free {ramfree} MB\nCPU {cpu} MHz  🌡 {thermal}°C\n↓{down} ↑{up} KB/s\n{time}"
+            fun rd(p: String): String? = try { File(p).readText().trim() } catch (e: Throwable) { null }
+            val n get() = Runtime.getRuntime().availableProcessors()
+            fun cpu(i: Int, f: String) = rd("/sys/devices/system/cpu/cpu$i/cpufreq/$f")
+            fun freqs() = (0 until n).map { (cpu(it, "scaling_cur_freq")?.toLongOrNull() ?: 0L) / 1000 }
+            fun maxf() = (0 until n).map { (cpu(it, "cpuinfo_max_freq")?.toLongOrNull() ?: 0L) / 1000 }
+            fun ram(c: Context): Pair<Long, Long> {
+              val m = ActivityManager.MemoryInfo()
+              (c.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(m)
+              return Pair(m.availMem, m.totalMem)
+            }
+            fun mi(): Map<String, Long> = (rd("/proc/meminfo") ?: "").lines().mapNotNull {
+              val p = it.split(Regex("[: ]+")); if (p.size >= 2) p[0] to (p[1].toLongOrNull() ?: 0L) else null
+            }.toMap()
+            fun bat(c: Context): Intent? = c.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            fun batPct(c: Context): Int { val i = bat(c) ?: return -1; return i.getIntExtra("level", 0) * 100 / i.getIntExtra("scale", 100).coerceAtLeast(1) }
+            fun batTemp(c: Context): Double = (bat(c)?.getIntExtra("temperature", 0) ?: 0) / 10.0
+            fun charging(c: Context): Boolean = (bat(c)?.getIntExtra("plugged", 0) ?: 0) != 0
+            fun currentMa(c: Context): Double {
+              val bm = c.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+              val v = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW).toDouble()
+              return if (Math.abs(v) > 20000) v / 1000 else v
+            }
+            fun thermal(): List<Pair<String, Double>> {
+              val out = ArrayList<Pair<String, Double>>()
+              File("/sys/class/thermal").listFiles()?.filter { it.name.startsWith("thermal_zone") }?.sortedBy { it.name.length * 1000 + it.name.hashCode() % 1000 }?.forEach {
+                val t = rd(it.path + "/temp")?.toDoubleOrNull() ?: return@forEach
+                out.add(Pair(rd(it.path + "/type") ?: it.name, if (Math.abs(t) > 1000) t / 1000 else t))
+              }
+              return out
+            }
+            fun tmax() = thermal().map { it.second }.filter { it in 1.0..150.0 }.maxOrNull() ?: 0.0
+            var lrx = 0L; var ltx = 0L; var lt = 0L; var cache = Pair(0.0, 0.0)
+            fun net(): Pair<Double, Double> {
+              val t = System.nanoTime(); val dt = (t - lt) / 1e9
+              if (lt != 0L && dt < 0.8) return cache
+              val rx = TrafficStats.getTotalRxBytes(); val tx = TrafficStats.getTotalTxBytes()
+              cache = if (lt == 0L || dt <= 0) Pair(0.0, 0.0) else Pair((rx - lrx) / dt / 1024, (tx - ltx) / dt / 1024)
+              lrx = rx; ltx = tx; lt = t; return cache
+            }
+            fun wifi(c: Context): Boolean {
+              val cm = c.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+              return cm.getNetworkCapabilities(cm.activeNetwork)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ?: false
+            }
+            fun stor(): Pair<Long, Long> { val s = StatFs(Environment.getDataDirectory().path); return Pair(s.availableBytes, s.totalBytes) }
+            fun gb(b: Long) = "%.2f".format(b / 1073741824.0)
+            fun up(): String { val s = SystemClock.elapsedRealtime() / 1000; return "%dd %02d:%02d:%02d".format(s / 86400, s % 86400 / 3600, s % 3600 / 60, s % 60) }
+            fun bar(p: Int): String { val k = (p / 10).coerceIn(0, 10); return "█".repeat(k) + "░".repeat(10 - k) }
+            fun minutes(): Int { val c = Calendar.getInstance(); return c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE) }
+
+            fun live(c: Context): String {
+              val f = freqs(); val m = maxf(); val sb = StringBuilder()
+              sb.append("⏱ ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}  up ${up()}\n")
+              for (i in 0 until n) {
+                val p = if (m[i] > 0) (f[i] * 100 / m[i]).toInt() else 0
+                sb.append("CPU$i ${f[i].toString().padStart(4)}MHz ${bar(p)} $p%\n")
+              }
+              val (a, t) = ram(c); val mm = mi()
+              sb.append("RAM ${(t - a) / 1048576}/${t / 1048576}MB ${bar(((t - a) * 100 / t).toInt())}\n")
+              val st = mm["SwapTotal"] ?: 0L; val sf = mm["SwapFree"] ?: 0L
+              if (st > 0) sb.append("SWAP ${(st - sf) / 1024}/${st / 1024}MB\n")
+              val i = bat(c); val ma = currentMa(c); val v = i?.getIntExtra("voltage", 0) ?: 0
+              sb.append("BAT ${batPct(c)}% ${batTemp(c)}°C ${v}mV ${"%.0f".format(ma)}mA ${"%.2f".format(Math.abs(ma) * v / 1e6)}W ${if (charging(c)) "⚡" else ""}\n")
+              val th = thermal().filter { it.second in 1.0..150.0 }.distinctBy { it.first }.take(5)
+              sb.append("TEMP max ${"%.1f".format(tmax())}°C\n")
+              th.forEach { sb.append("  ${it.first.take(14)} ${"%.1f".format(it.second)}°C\n") }
+              val (d, u) = net(); sb.append("NET ↓${"%.0f".format(d)} ↑${"%.0f".format(u)} KB/s ${if (wifi(c)) "WiFi" else "Mobile"}\n")
+              val (fr, to) = stor(); sb.append("STO free ${gb(fr)}/${gb(to)}GB")
+              return sb.toString()
+            }
+
+            fun tpl(c: Context, t: String): String {
+              val f = freqs().filter { it > 0 }; val (d, u) = net()
+              return t.replace("{battery}", batPct(c).toString()).replace("{temp}", batTemp(c).toString())
+                .replace("{ramfree}", (ram(c).first / 1048576).toString()).replace("{cpu}", (if (f.isEmpty()) 0 else f.average().toInt()).toString())
+                .replace("{thermal}", "%.0f".format(tmax())).replace("{down}", "%.0f".format(d)).replace("{up}", "%.0f".format(u))
+                .replace("{time}", SimpleDateFormat("HH:mm", Locale.US).format(Date()))
+            }
+
+            fun <T> gl(w: Int, f: () -> T): T? {
+              val d = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY); val v = IntArray(2)
+              var ctx: EGLContext? = null; var sf: EGLSurface? = null
+              return try {
+                EGL14.eglInitialize(d, v, 0, v, 1)
+                val cfg = arrayOfNulls<EGLConfig>(1); val k = IntArray(1)
+                EGL14.eglChooseConfig(d, intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT, EGL14.EGL_NONE), 0, cfg, 0, 1, k, 0)
+                ctx = EGL14.eglCreateContext(d, cfg[0], EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
+                sf = EGL14.eglCreatePbufferSurface(d, cfg[0], intArrayOf(EGL14.EGL_WIDTH, w, EGL14.EGL_HEIGHT, w, EGL14.EGL_NONE), 0)
+                EGL14.eglMakeCurrent(d, sf, sf, ctx); f()
+              } catch (e: Throwable) { null } finally {
+                try {
+                  EGL14.eglMakeCurrent(d, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                  sf?.let { EGL14.eglDestroySurface(d, it) }; ctx?.let { EGL14.eglDestroyContext(d, it) }; EGL14.eglTerminate(d)
+                } catch (e: Throwable) {}
+              }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Info.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.ActivityManager
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.hardware.Sensor
+          import android.hardware.SensorManager
+          import android.hardware.camera2.CameraCharacteristics
+          import android.hardware.camera2.CameraManager
+          import android.hardware.display.DisplayManager
+          import android.media.MediaCodecList
+          import android.net.ConnectivityManager
+          import android.opengl.GLES20
+          import android.os.*
+          import java.io.File
+          import java.util.*
+
+          object Info {
+            fun build(c: Context): String {
+              val b = StringBuilder()
+              fun h(t: String) { b.append("\n━━ $t ━━\n") }
+              fun l(k: String, v: Any?) { b.append(k.padEnd(17)).append(v).append('\n') }
+
+              h("DEVICE")
+              l("Model", Build.MODEL); l("Manufacturer", Build.MANUFACTURER); l("Brand", Build.BRAND); l("Device", Build.DEVICE)
+              l("Product", Build.PRODUCT); l("Board", Build.BOARD); l("Hardware", Build.HARDWARE); l("Bootloader", Build.BOOTLOADER)
+              l("Build ID", Build.DISPLAY); l("Fingerprint", Build.FINGERPRINT); l("Type/Tags", "${Build.TYPE} / ${Build.TAGS}")
+
+              h("SOC / CPU")
+              if (Build.VERSION.SDK_INT >= 31) { l("SoC vendor", Build.SOC_MANUFACTURER); l("SoC model", Build.SOC_MODEL) }
+              l("ABIs", Build.SUPPORTED_ABIS.joinToString()); l("Cores", S.n)
+              (S.rd("/proc/cpuinfo") ?: "").lines().filter { it.startsWith("Hardware") || it.startsWith("model name") || it.startsWith("Features") }.distinct().forEach { b.append(it.take(160)).append('\n') }
+              val gov = S.cpu(0, "scaling_available_governors"); if (gov != null) l("Governors", gov)
+              for (i in 0 until S.n) {
+                l("cpu$i", "${(S.cpu(i, "cpuinfo_min_freq")?.toLongOrNull() ?: 0) / 1000}-${(S.cpu(i, "cpuinfo_max_freq")?.toLongOrNull() ?: 0) / 1000} MHz  now ${(S.cpu(i, "scaling_cur_freq")?.toLongOrNull() ?: 0) / 1000}  ${S.cpu(i, "scaling_governor") ?: ""}")
+              }
+
+              h("GPU / GRAPHICS")
+              val ai = (c.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
+              l("GLES version", ai.deviceConfigurationInfo.glEsVersion)
+              l("GL", S.gl(1) { "${GLES20.glGetString(GLES20.GL_VENDOR)} | ${GLES20.glGetString(GLES20.GL_RENDERER)} | ${GLES20.glGetString(GLES20.GL_VERSION)}" } ?: "n/a")
+              val pm = c.packageManager
+              l("Vulkan", if (pm.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION)) "yes (0x${Integer.toHexString(pm.systemAvailableFeatures.firstOrNull { it.name == PackageManager.FEATURE_VULKAN_HARDWARE_VERSION }?.version ?: 0)})" else "no")
+
+              h("MEMORY")
+              val (a, t) = S.ram(c); val mm = S.mi()
+              l("Total RAM", "${t / 1048576} MB"); l("Available", "${a / 1048576} MB"); l("App class", "${ai.memoryClass} MB (large ${ai.largeMemoryClass} MB)")
+              listOf("MemFree", "Cached", "Buffers", "SwapTotal", "SwapFree", "Dirty", "Mapped").forEach { l(it, "${(mm[it] ?: 0) / 1024} MB") }
+
+              h("STORAGE")
+              val (fr, to) = S.stor(); l("Data", "${S.gb(fr)} free / ${S.gb(to)} GB")
+              l("External", "${S.gb(Environment.getExternalStorageDirectory().freeSpace)} free / ${S.gb(Environment.getExternalStorageDirectory().totalSpace)} GB")
+
+              h("DISPLAY")
+              val dm = c.resources.displayMetrics
+              l("Resolution", "${dm.widthPixels}x${dm.heightPixels}"); l("Density", "${dm.densityDpi} dpi (x${dm.density})"); l("xdpi/ydpi", "${dm.xdpi}/${dm.ydpi}")
+              val d = (c.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).getDisplay(0)
+              l("Refresh", "${d.refreshRate} Hz"); l("Modes", d.supportedModes.joinToString { "${it.physicalWidth}x${it.physicalHeight}@${"%.0f".format(it.refreshRate)}" })
+              l("Wide gamut", d.isWideColorGamut); l("HDR types", d.hdrCapabilities?.supportedHdrTypes?.joinToString() ?: "none")
+
+              h("BATTERY")
+              val i = S.bat(c); val bm = c.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+              l("Level", "${S.batPct(c)}%"); l("Temp", "${S.batTemp(c)} °C"); l("Voltage", "${i?.getIntExtra("voltage", 0)} mV"); l("Tech", i?.getStringExtra("technology"))
+              val st = arrayOf("?", "unknown", "charging", "discharging", "not charging", "full"); val hl = arrayOf("?", "unknown", "good", "overheat", "dead", "overvolt", "failure", "cold")
+              l("Status", st.getOrElse(i?.getIntExtra("status", 0) ?: 0) { "?" }); l("Health", hl.getOrElse(i?.getIntExtra("health", 0) ?: 0) { "?" })
+              l("Plugged", when (i?.getIntExtra("plugged", 0)) { 1 -> "AC"; 2 -> "USB"; 4 -> "Wireless"; else -> "no" })
+              l("Current", "${"%.0f".format(S.currentMa(c))} mA"); l("Charge counter", "${bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER) / 1000} mAh")
+              listOf("charge_full_design", "charge_full", "cycle_count").forEach { k -> S.rd("/sys/class/power_supply/battery/$k")?.let { l(k, it) } }
+
+              h("THERMAL ZONES")
+              S.thermal().forEach { l(it.first.take(16), "${"%.1f".format(it.second)} °C") }
+
+              h("NETWORK")
+              val cm = c.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+              val k = cm.getNetworkCapabilities(cm.activeNetwork)
+              l("Down/Up", "${k?.linkDownstreamBandwidthKbps} / ${k?.linkUpstreamBandwidthKbps} kbps"); l("WiFi", S.wifi(c))
+
+              h("OS / KERNEL")
+              l("Android", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"); l("Security patch", Build.VERSION.SECURITY_PATCH)
+              l("Kernel", System.getProperty("os.version")); l("Arch", System.getProperty("os.arch")); l("VM", System.getProperty("java.vm.version"))
+              l("Uptime", S.up()); l("Locale/TZ", "${Locale.getDefault()} / ${TimeZone.getDefault().id}")
+
+              h("CAMERAS")
+              try {
+                val cam = c.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                for (id in cam.cameraIdList) {
+                  val ch = cam.getCameraCharacteristics(id); val px = ch.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                  l("cam $id", "${if (ch.get(CameraCharacteristics.LENS_FACING) == 0) "front" else "back"} ${px?.width}x${px?.height} (${"%.1f".format((px?.width ?: 0) * (px?.height ?: 0) / 1e6)}MP) f=${ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.joinToString()} ap=${ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.joinToString()} flash=${ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE)}")
+                }
+              } catch (e: Throwable) { l("error", e.message) }
+
+              h("SENSORS")
+              val sm = c.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+              sm.getSensorList(Sensor.TYPE_ALL).forEach { l(it.type.toString(), "${it.name} (${it.vendor}) max=${it.maximumRange} res=${it.resolution} ${it.power}mA") }
+
+              h("HW CODECS")
+              MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.filter { it.isHardwareAccelerated && !it.isSoftwareOnly }.forEach { l(if (it.isEncoder) "enc" else "dec", "${it.name} ${it.supportedTypes.joinToString()}") }
+
+              h("SYSTEM FEATURES")
+              b.append(pm.systemAvailableFeatures.mapNotNull { it.name?.removePrefix("android.hardware.")?.removePrefix("android.software.") }.sorted().joinToString(", "))
+              return b.toString()
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Bench.kt <<'EOF'
+          package dev.sysx
+
+          import android.content.Context
+          import android.opengl.GLES20
+          import java.io.*
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import javax.crypto.Cipher
+          import javax.crypto.spec.IvParameterSpec
+          import javax.crypto.spec.SecretKeySpec
+
+          object Bench {
+            @Volatile var sink = 0L
+            private fun loop(ms: Long, chunk: Int, body: () -> Unit): Double {
+              var n = 0L; val t = System.nanoTime(); val e = t + ms * 1_000_000
+              while (System.nanoTime() < e) { body(); n += chunk }
+              return n / ((System.nanoTime() - t) / 1e9) / 1e6
+            }
+            fun intB(ms: Long): Double { var x = 1L; val r = loop(ms, 100000) { for (i in 0 until 100000) { x = x * 6364136223846793005L + 1442695040888963407L; x = x xor (x ushr 29) } }; sink = x; return r }
+            fun fltB(ms: Long): Double { var x = 1.0; val r = loop(ms, 20000) { for (i in 0 until 20000) { x = Math.sqrt(x * 1.000001 + i) + Math.sin(x) * 0.5 } }; sink = x.toLong(); return r }
+            fun multi(ms: Long, f: (Long) -> Double): Double {
+              val r = DoubleArray(S.n); val ts = (0 until S.n).map { i -> Thread { r[i] = f(ms) }.also { it.start() } }
+              ts.forEach { it.join() }; return r.sum()
+            }
+            fun mem(ms: Long): Double {
+              val a = ByteArray(32 shl 20); val b = ByteArray(32 shl 20); var bytes = 0L; val t = System.nanoTime(); val e = t + ms * 1_000_000
+              while (System.nanoTime() < e) { System.arraycopy(a, 0, b, 0, a.size); bytes += a.size.toLong() * 2 }
+              sink = b[5].toLong(); return bytes / ((System.nanoTime() - t) / 1e9) / 1e9
+            }
+            fun lat(): Double {
+              val n = 1 shl 22; val a = IntArray(n) { it }; val r = java.util.Random(7)
+              for (i in n - 1 downTo 1) { val j = r.nextInt(i); val t = a[i]; a[i] = a[j]; a[j] = t }
+              var p = 0; val steps = 4_000_000; val t = System.nanoTime(); for (s in 0 until steps) p = a[p]
+              sink = p.toLong(); return (System.nanoTime() - t).toDouble() / steps
+            }
+            fun aes(ms: Long): Double {
+              val ci = Cipher.getInstance("AES/CBC/NoPadding"); ci.init(Cipher.ENCRYPT_MODE, SecretKeySpec(ByteArray(16), "AES"), IvParameterSpec(ByteArray(16)))
+              val d = ByteArray(1 shl 20); var b = 0L; val t = System.nanoTime(); val e = t + ms * 1_000_000
+              while (System.nanoTime() < e) { ci.update(d); b += d.size }
+              return b / ((System.nanoTime() - t) / 1e9) / 1e6
+            }
+            fun zip(ms: Long): Double {
+              val r = java.util.Random(2); val d = ByteArray(2 shl 20) { (r.nextInt(16) + 65).toByte() }; val out = ByteArray(4 shl 20)
+              var b = 0L; val t = System.nanoTime(); val e = t + ms * 1_000_000
+              while (System.nanoTime() < e) { val df = java.util.zip.Deflater(6); df.setInput(d); df.finish(); while (!df.finished()) df.deflate(out); df.end(); b += d.size }
+              return b / ((System.nanoTime() - t) / 1e9) / 1e6
+            }
+            fun sto(c: Context): Pair<Double, Double> {
+              val f = File(c.cacheDir, "b.bin"); val buf = ByteArray(1 shl 20).also { java.util.Random(1).nextBytes(it) }; val mb = 96
+              var t = System.nanoTime(); FileOutputStream(f).use { o -> repeat(mb) { o.write(buf) }; o.fd.sync() }
+              val w = mb / ((System.nanoTime() - t) / 1e9)
+              t = System.nanoTime(); FileInputStream(f).use { i -> while (i.read(buf) > 0) {} }
+              val r = mb / ((System.nanoTime() - t) / 1e9); f.delete(); return Pair(w, r)
+            }
+            private fun sh(t: Int, s: String): Int { val h = GLES20.glCreateShader(t); GLES20.glShaderSource(h, s); GLES20.glCompileShader(h); return h }
+            fun gpu(): Double = S.gl(1024) {
+              val pr = GLES20.glCreateProgram()
+              GLES20.glAttachShader(pr, sh(GLES20.GL_VERTEX_SHADER, "attribute vec4 p;void main(){gl_Position=p;}"))
+              GLES20.glAttachShader(pr, sh(GLES20.GL_FRAGMENT_SHADER, "precision highp float;void main(){vec2 u=gl_FragCoord.xy/1024.;float a=0.;for(int i=0;i<64;i++){a+=sin(u.x*float(i)+a)*cos(u.y*float(i)-a);}gl_FragColor=vec4(a,a*.5,1.,1.);}"))
+              GLES20.glLinkProgram(pr); GLES20.glUseProgram(pr)
+              val vb = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder()).asFloatBuffer()
+              vb.put(floatArrayOf(-1f, -1f, 0f, 1f, 1f, -1f, 0f, 1f, -1f, 1f, 0f, 1f, 1f, 1f, 0f, 1f)); vb.position(0)
+              val l = GLES20.glGetAttribLocation(pr, "p"); GLES20.glEnableVertexAttribArray(l)
+              GLES20.glVertexAttribPointer(l, 4, GLES20.GL_FLOAT, false, 0, vb); GLES20.glViewport(0, 0, 1024, 1024)
+              var fr = 0; val t = System.nanoTime()
+              while (System.nanoTime() - t < 1_500_000_000L) { repeat(4) { GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4) }; GLES20.glFinish(); fr += 4 }
+              fr / ((System.nanoTime() - t) / 1e9)
+            } ?: 0.0
+
+            fun run(c: Context, out: (String) -> Unit) {
+              val sb = StringBuilder(); var score = 0.0
+              fun r(name: String, v: Double, unit: String, w: Double) { score += v * w; sb.append(name.padEnd(18)).append("%.1f".format(v)).append(" $unit\n"); out(sb.toString()) }
+              out("Warming up…")
+              intB(300); fltB(300)
+              r("CPU int 1T", intB(1200), "Mops/s", 2.0)
+              r("CPU float 1T", fltB(1200), "Mops/s", 10.0)
+              r("CPU int ${S.n}T", multi(1500) { intB(it) }, "Mops/s", 0.5)
+              r("CPU float ${S.n}T", multi(1500) { fltB(it) }, "Mops/s", 2.5)
+              r("RAM copy", mem(1200), "GB/s", 50.0)
+              val lt = lat(); sb.append("RAM latency".padEnd(18)).append("%.1f ns\n".format(lt)); score += 2000 / lt; out(sb.toString())
+              r("AES-CBC", aes(1000), "MB/s", 1.0)
+              r("Deflate", zip(1000), "MB/s", 10.0)
+              r("GPU 1024² shader", gpu(), "fps", 5.0)
+              val (w, rd) = sto(c)
+              r("Storage write", w, "MB/s", 1.0); r("Storage read*", rd, "MB/s", 0.1)
+              sb.append("\n★ TOTAL SCORE ${score.toInt()}\n(*read may hit page cache; scores are relative to this app only)")
+              out(sb.toString())
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Auto.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.*
+          import android.content.*
+          import android.hardware.camera2.CameraManager
+          import android.media.AudioManager
+          import android.net.Uri
+          import android.os.*
+          import android.widget.Toast
+          import org.json.*
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          object Auto {
+            const val MODEL = "claude-haiku-5-5"
+            private val logs = ArrayList<String>(); private val last = HashMap<String, Long>()
+            fun log(s: String) = synchronized(logs) { logs.add(0, "${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())} $s"); while (logs.size > 40) logs.removeAt(logs.size - 1) }
+            fun logText() = synchronized(logs) { logs.joinToString("\n") }
+
+            const val RULE_SYS = """You convert a user's plain-English automation request into ONE JSON rule for an Android app. Reply with ONLY the JSON object, no prose, no markdown.
+          Schema: {"name":str,"enabled":true,"cooldown":seconds,"when":{"all":[cond...],"any":[cond...]},"do":[action...]}
+          cond = {"t":TYPE,"v":VALUE}. TYPE: battery_lt, battery_gt (percent), temp_gt, temp_lt (battery C), thermal_gt (hottest sensor C), charging (v true/false), ram_free_lt (MB), wifi (v true/false), time_after, time_before (v "HH:MM" 24h), net_down_gt (KB/s).
+          action = {"a":TYPE,"v":VALUE}. TYPE: notify (text), toast (text), vibrate (ms), torch (on/off), volume (0-100 media), open_url (url), open_app (package name), widget (text shown on the home widget).
+          Text may use variables {battery} {temp} {ramfree} {cpu} {thermal} {down} {up} {time}. Use "all" for AND, "any" for OR, omit unused one. Default cooldown 300."""
+            const val WIDGET_SYS = """Write a compact Android home-screen widget text template for the user's request. Reply with ONLY the template text (max 6 short lines), no markdown. Allowed variables: {battery} {temp} {ramfree} {cpu} {thermal} {down} {up} {time}. Emojis allowed."""
+
+            private fun call(key: String, system: String, user: String): String {
+              val cn = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+              cn.requestMethod = "POST"; cn.connectTimeout = 15000; cn.readTimeout = 60000; cn.doOutput = true
+              cn.setRequestProperty("x-api-key", key); cn.setRequestProperty("anthropic-version", "2023-06-01"); cn.setRequestProperty("content-type", "application/json")
+              val body = JSONObject().put("model", MODEL).put("max_tokens", 1000).put("system", system)
+                .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", user)))
+              cn.outputStream.use { it.write(body.toString().toByteArray()) }
+              val code = cn.responseCode; val s = (if (code < 400) cn.inputStream else cn.errorStream).bufferedReader().readText()
+              if (code >= 400) throw RuntimeException("HTTP $code ${s.take(200)}")
+              return JSONObject(s).getJSONArray("content").getJSONObject(0).getString("text")
+            }
+            fun genRule(key: String, ask: String): JSONObject {
+              val t = call(key, RULE_SYS, ask); return JSONObject(t.substring(t.indexOf('{'), t.lastIndexOf('}') + 1))
+            }
+            fun genWidget(key: String, ask: String) = call(key, WIDGET_SYS, ask).trim()
+
+            private fun cond(c: Context, o: JSONObject): Boolean {
+              val v = o.optDouble("v", 0.0)
+              fun tm(): Int { val p = o.optString("v").split(":"); return (p.getOrNull(0)?.toIntOrNull() ?: 0) * 60 + (p.getOrNull(1)?.toIntOrNull() ?: 0) }
+              return when (o.optString("t")) {
+                "battery_lt" -> S.batPct(c) < v; "battery_gt" -> S.batPct(c) > v
+                "temp_gt" -> S.batTemp(c) > v; "temp_lt" -> S.batTemp(c) < v
+                "thermal_gt" -> S.tmax() > v; "charging" -> S.charging(c) == o.optBoolean("v", true)
+                "ram_free_lt" -> S.ram(c).first / 1048576 < v; "wifi" -> S.wifi(c) == o.optBoolean("v", true)
+                "time_after" -> S.minutes() >= tm(); "time_before" -> S.minutes() < tm()
+                "net_down_gt" -> S.net().first > v
+                else -> false
+              }
+            }
+            fun tick(c: Context) {
+              val arr = try { JSONArray(c.getSharedPreferences("sx", 0).getString("rules", "[]")) } catch (e: Throwable) { return }
+              for (i in 0 until arr.length()) {
+                val r = arr.optJSONObject(i) ?: continue
+                if (!r.optBoolean("enabled", true)) continue
+                val w = r.optJSONObject("when") ?: continue; val all = w.optJSONArray("all"); val any = w.optJSONArray("any")
+                if (all == null && any == null) continue
+                val ok = (all == null || (0 until all.length()).all { cond(c, all.getJSONObject(it)) }) && (any == null || (0 until any.length()).any { cond(c, any.getJSONObject(it)) })
+                val name = r.optString("name", "rule$i"); val now = System.currentTimeMillis()
+                if (!ok || now - (last[name] ?: 0L) < r.optLong("cooldown", 300) * 1000) continue
+                last[name] = now; log("▶ $name")
+                val acts = r.optJSONArray("do") ?: continue
+                for (j in 0 until acts.length()) try { act(c, acts.getJSONObject(j)) } catch (e: Throwable) { log("  ✖ ${e.message}") }
+              }
+            }
+            private fun act(c: Context, a: JSONObject) {
+              val v = S.tpl(c, a.optString("v")); val ui = Handler(Looper.getMainLooper())
+              when (a.optString("a")) {
+                "notify" -> {
+                  val nm = c.getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("sxa", "SysX alerts", NotificationManager.IMPORTANCE_HIGH))
+                  nm.notify((System.nanoTime() % 100000).toInt() + 10, Notification.Builder(c, "sxa").setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("SysX").setContentText(v).build())
+                }
+                "toast" -> ui.post { Toast.makeText(c, v, Toast.LENGTH_LONG).show() }
+                "vibrate" -> (c.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator).vibrate(VibrationEffect.createOneShot(v.toLongOrNull() ?: 500, VibrationEffect.DEFAULT_AMPLITUDE))
+                "torch" -> { val cm = c.getSystemService(Context.CAMERA_SERVICE) as CameraManager; cm.setTorchMode(cm.cameraIdList[0], v != "off") }
+                "volume" -> { val am = c.getSystemService(Context.AUDIO_SERVICE) as AudioManager; am.setStreamVolume(AudioManager.STREAM_MUSIC, (am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) * (v.toDoubleOrNull() ?: 50.0) / 100).toInt(), 0) }
+                "open_url" -> c.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(v)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                "open_app" -> c.packageManager.getLaunchIntentForPackage(v)?.let { c.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                "widget" -> { c.getSharedPreferences("sx", 0).edit().putString("wtxt", a.optString("v")).apply(); StatsWidget.update(c) }
+                else -> log("  ? unknown action")
+              }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/StatsWidget.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.widget.RemoteViews
+
+          class StatsWidget : AppWidgetProvider() {
+            override fun onUpdate(c: Context, m: AppWidgetManager, ids: IntArray) = update(c)
+            companion object {
+              fun update(c: Context) {
+                val m = AppWidgetManager.getInstance(c); val ids = m.getAppWidgetIds(ComponentName(c, StatsWidget::class.java))
+                if (ids.isEmpty()) return
+                val rv = RemoteViews(c.packageName, R.layout.widget)
+                rv.setTextViewText(R.id.w_txt, S.tpl(c, c.getSharedPreferences("sx", 0).getString("wtxt", S.DEF_W)!!))
+                rv.setOnClickPendingIntent(R.id.w_root, PendingIntent.getActivity(c, 0, Intent(c, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+                m.updateAppWidget(ids, rv)
+              }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Core.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.*
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.*
+          import android.os.*
+          import android.provider.Settings
+          import android.view.*
+          import android.widget.TextView
+
+          class Core : Service() {
+            private val h = Handler(Looper.getMainLooper()); private var tv: TextView? = null; private var tick = 0
+            private val loop = object : Runnable {
+              override fun run() {
+                val p = getSharedPreferences("sx", 0)
+                if (p.getBoolean("overlay", false) && Settings.canDrawOverlays(this@Core)) showOv() else hideOv()
+                tv?.text = S.live(this@Core)
+                if (p.getBoolean("engine", false) && tick % 5 == 0) Thread { try { Auto.tick(this@Core) } catch (e: Throwable) { Auto.log("err ${e.message}") } }.start()
+                tick++; if (tick % 10 == 0) StatsWidget.update(this@Core)
+                h.postDelayed(this, 1000)
+              }
+            }
+            override fun onBind(i: Intent?): IBinder? = null
+            override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
+              getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("sx", "SysX", NotificationManager.IMPORTANCE_LOW))
+              val n = Notification.Builder(this, "sx").setContentTitle("SysX running").setSmallIcon(android.R.drawable.stat_notify_sync).build()
+              if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) else startForeground(1, n)
+              h.removeCallbacks(loop); h.post(loop); return START_STICKY
+            }
+            private fun showOv() {
+              if (tv != null) return
+              val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+              val t = TextView(this).apply { typeface = Typeface.MONOSPACE; textSize = 8.5f; setTextColor(0xFF9CFFB0.toInt()); setBackgroundColor(0xB0000000.toInt()); setPadding(10, 6, 10, 6) }
+              val lp = WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT)
+              lp.gravity = Gravity.TOP or Gravity.START; lp.x = 0; lp.y = 80
+              var dx = 0f; var dy = 0f; var sx = 0; var sy = 0
+              t.setOnTouchListener { _, e ->
+                when (e.action) {
+                  MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; sx = lp.x; sy = lp.y }
+                  MotionEvent.ACTION_MOVE -> { lp.x = sx + (e.rawX - dx).toInt(); lp.y = sy + (e.rawY - dy).toInt(); wm.updateViewLayout(t, lp) }
+                }; true
+              }
+              wm.addView(t, lp); tv = t
+            }
+            private fun hideOv() { tv?.let { try { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(it) } catch (e: Throwable) {} }; tv = null }
+            override fun onDestroy() { h.removeCallbacksAndMessages(null); hideOv(); super.onDestroy() }
+            companion object {
+              fun sync(c: Context) {
+                val p = c.getSharedPreferences("sx", 0); val i = Intent(c, Core::class.java)
+                if (p.getBoolean("overlay", false) || p.getBoolean("engine", false)) c.startForegroundService(i) else c.stopService(i)
+              }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/MainActivity.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Typeface
+          import android.net.Uri
+          import android.os.*
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
+          import org.json.JSONArray
+
+          class MainActivity : Activity() {
+            private val h = Handler(Looper.getMainLooper())
+            private lateinit var host: FrameLayout; private lateinit var liveTv: TextView; private lateinit var lg: TextView
+            private val tabs = ArrayList<View>()
+            private val tick = object : Runnable {
+              override fun run() {
+                if (liveTv.isShown) liveTv.text = S.live(this@MainActivity)
+                if (lg.isShown) lg.text = Auto.logText()
+                h.postDelayed(this, 1000)
+              }
+            }
+            private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+            private fun mono() = TextView(this).apply { typeface = Typeface.MONOSPACE; textSize = 11f; setTextColor(0xFFCDE3F5.toInt()); setPadding(dp(10), dp(10), dp(10), dp(10)) }
+            private fun et(hint: String, v: String) = EditText(this).apply { this.hint = hint; setText(v); setTextColor(0xFFE6EEF5.toInt()); setHintTextColor(0xFF6B7C8C.toInt()); textSize = 12f }
+            private fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; isAllCaps = false; setOnClickListener { f() } }
+
+            override fun onCreate(b: Bundle?) {
+              super.onCreate(b)
+              if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)
+              val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFF0B0F14.toInt()) }
+              host = FrameLayout(this); root.addView(host, LinearLayout.LayoutParams(-1, 0, 1f))
+              val bar = LinearLayout(this)
+              liveTv = mono(); lg = mono()
+              tabs += infoTab(); tabs += autoTab(); tabs += benchTab(); tabs += liveTab()
+              val names = listOf("Info", "Auto", "Bench", "Live")
+              tabs.forEachIndexed { i, v ->
+                host.addView(v); v.visibility = if (i == 0) View.VISIBLE else View.GONE
+                bar.addView(btn(names[i]) { tabs.forEachIndexed { j, w -> w.visibility = if (i == j) View.VISIBLE else View.GONE } }, LinearLayout.LayoutParams(0, -2, 1f))
+              }
+              root.addView(bar); setContentView(root)
+            }
+            override fun onResume() { super.onResume(); h.post(tick) }
+            override fun onPause() { super.onPause(); h.removeCallbacks(tick) }
+
+            private fun infoTab(): View {
+              val t = mono().apply { text = "Collecting…"; setTextIsSelectable(true) }
+              Thread { val s = Info.build(this); runOnUiThread { t.text = s } }.start()
+              return ScrollView(this).apply { addView(t) }
+            }
+
+            private fun benchTab(): View {
+              val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(10), dp(10), dp(10)) }
+              val out = mono(); var running = false
+              col.addView(btn("▶ Run full benchmark (~20 s)") {
+                if (running) return@btn; running = true
+                Thread { try { Bench.run(this) { s -> runOnUiThread { out.text = s } } } finally { running = false } }.start()
+              })
+              col.addView(out); return ScrollView(this).apply { addView(col) }
+            }
+
+            private fun liveTab(): View {
+              val p = getSharedPreferences("sx", 0)
+              val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(10), dp(10), dp(10)) }
+              col.addView(btn("Toggle floating overlay") {
+                if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                else { p.edit().putBoolean("overlay", !p.getBoolean("overlay", false)).apply(); Core.sync(this) }
+              })
+              col.addView(liveTv); return ScrollView(this).apply { addView(col) }
+            }
+
+            private fun autoTab(): View {
+              val p = getSharedPreferences("sx", 0)
+              val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(10), dp(10), dp(10)) }
+              fun hd(t: String) = col.addView(TextView(this).apply { text = t; setTextColor(0xFF4FC3F7.toInt()); textSize = 14f; setPadding(0, dp(12), 0, dp(4)) })
+              val key = et("Anthropic API key (stored only on this device)", p.getString("key", "")!!)
+              val ask = et("Describe a rule or widget in plain English", "")
+              val rules = et("Rules JSON", p.getString("rules", "[]")!!).apply { typeface = Typeface.MONOSPACE; minLines = 8; gravity = Gravity.TOP }
+              val wt = et("Widget template", p.getString("wtxt", S.DEF_W)!!).apply { minLines = 3; gravity = Gravity.TOP }
+              val st = mono()
+              val sw = Switch(this).apply {
+                text = "Run automations in background"; setTextColor(0xFFFFFFFF.toInt()); isChecked = p.getBoolean("engine", false)
+                setOnCheckedChangeListener { _, v -> p.edit().putBoolean("engine", v).apply(); Core.sync(this@MainActivity) }
+              }
+              hd("AI"); col.addView(key); col.addView(ask)
+              col.addView(btn("✨ Generate rule with AI") {
+                p.edit().putString("key", key.text.toString().trim()).apply(); st.text = "Thinking…"
+                Thread {
+                  val r = try { Result.success(Auto.genRule(key.text.toString().trim(), ask.text.toString())) } catch (e: Throwable) { Result.failure(e) }
+                  runOnUiThread {
+                    r.onSuccess { o ->
+                      val a = try { JSONArray(rules.text.toString()) } catch (e: Throwable) { JSONArray() }
+                      a.put(o); rules.setText(a.toString(2)); p.edit().putString("rules", a.toString()).apply(); st.text = "Rule added: ${o.optString("name")}"
+                    }.onFailure { st.text = "Error: ${it.message}" }
+                  }
+                }.start()
+              })
+              col.addView(btn("✨ Generate widget text with AI") {
+                p.edit().putString("key", key.text.toString().trim()).apply(); st.text = "Thinking…"
+                Thread {
+                  val r = try { Result.success(Auto.genWidget(key.text.toString().trim(), ask.text.toString())) } catch (e: Throwable) { Result.failure(e) }
+                  runOnUiThread { r.onSuccess { wt.setText(it); st.text = "Template ready, tap Save widget" }.onFailure { st.text = "Error: ${it.message}" } }
+                }.start()
+              })
+              hd("Rules (editable JSON, full manual control)"); col.addView(rules)
+              col.addView(btn("💾 Save rules") {
+                try { val a = JSONArray(rules.text.toString()); p.edit().putString("rules", a.toString()).apply(); st.text = "Saved ${a.length()} rules" } catch (e: Throwable) { st.text = "Invalid JSON: ${e.message}" }
+              })
+              col.addView(sw)
+              hd("Home-screen widget (long-press home > Widgets > SysX)"); col.addView(wt)
+              col.addView(btn("💾 Save widget") { p.edit().putString("wtxt", wt.text.toString()).apply(); StatsWidget.update(this); st.text = "Widget updated" })
+              col.addView(st); hd("Rule log"); col.addView(lg)
+              return ScrollView(this).apply { addView(col) }
+            }
+          }
+          EOF
+
+      - name: Build release APK
+        working-directory: sysx
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: cp sysx/app/build/outputs/apk/release/app-release.apk SysX.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SysX-apk
+          path: SysX.apk
+
+      - name: Publish GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SysX.apk
