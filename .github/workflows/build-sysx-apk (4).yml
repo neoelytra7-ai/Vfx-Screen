@@ -1,0 +1,1468 @@
+name: Build SysX APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate Android project
+        run: |
+          set -e
+          mkdir -p sysx/app/src/main/java/dev/sysx sysx/app/src/main/res/layout sysx/app/src/main/res/xml sysx/app/src/main/res/drawable sysx/app/src/main/res/mipmap-anydpi-v26 sysx/app/src/main/res/values
+          cd sysx
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "SysX"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+            id("com.android.application") version "8.5.2" apply false
+            id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+            namespace = "dev.sysx"
+            compileSdk = 34
+            defaultConfig { applicationId = "dev.sysx"; minSdk = 26; targetSdk = 34; versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt(); versionName = if (System.getenv("GITHUB_REF_TYPE") == "tag") System.getenv("GITHUB_REF_NAME")!!.removePrefix("v") else "1.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0") }
+            buildTypes { release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("debug") } }
+            compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+            kotlinOptions { jvmTarget = "17" }
+            lint { abortOnError = false; checkReleaseBuilds = false }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+            <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+            <uses-permission android:name="android.permission.VIBRATE"/>
+            <queries><intent><action android:name="android.intent.action.TTS_SERVICE"/></intent></queries>
+            <application android:label="SysX" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
+                android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+              <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+                <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts"/>
+              </activity>
+              <service android:name=".Core" android:exported="false" android:foregroundServiceType="specialUse">
+                <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="system monitoring and automation"/>
+              </service>
+              <service android:name=".OvTile" android:exported="true" android:icon="@drawable/ic_fg" android:label="@string/tile_label"
+                  android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+                <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE"/></intent-filter>
+              </service>
+              <receiver android:name=".StatsWidget" android:exported="false">
+                <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter>
+                <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info"/>
+              </receiver>
+            </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/widget_info.xml <<'EOF'
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="180dp" android:minHeight="110dp" android:updatePeriodMillis="1800000"
+              android:initialLayout="@layout/widget" android:resizeMode="horizontal|vertical"/>
+          EOF
+
+          cat > app/src/main/res/layout/widget.xml <<'EOF'
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/w_root" android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="vertical" android:padding="12dp" android:background="@drawable/w_bg0">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical">
+              <TextView android:id="@+id/w_hd" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                  android:text="● SYSX" android:textSize="10sp" android:textStyle="bold" android:letterSpacing="0.15" android:textColor="#4FC3F7" android:typeface="monospace"/>
+              <TextView android:id="@+id/w_tm" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:textSize="10sp" android:textColor="#80FFFFFF" android:typeface="monospace"/>
+            </LinearLayout>
+            <TextView android:id="@+id/w_txt" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="6dp" android:textColor="#EEFFFFFF" android:textSize="12sp" android:typeface="monospace"/>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/java/dev/sysx/S.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.ActivityManager
+          import android.content.*
+          import android.net.*
+          import android.opengl.*
+          import android.os.*
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          object S {
+            const val DEF_W = "🔋 {battery}%  {temp}°C\nRAM free {ramfree} MB\nCPU {cpu} MHz  🌡 {thermal}°C\n↓{down} ↑{up} KB/s\n{time}"
+            fun rd(p: String): String? = try { File(p).readText().trim() } catch (e: Throwable) { null }
+            val n get() = Runtime.getRuntime().availableProcessors()
+            fun cpu(i: Int, f: String) = rd("/sys/devices/system/cpu/cpu$i/cpufreq/$f")
+            fun freqs() = (0 until n).map { (cpu(it, "scaling_cur_freq")?.toLongOrNull() ?: 0L) / 1000 }
+            fun maxf() = (0 until n).map { (cpu(it, "cpuinfo_max_freq")?.toLongOrNull() ?: 0L) / 1000 }
+            fun ram(c: Context): Pair<Long, Long> {
+              val m = ActivityManager.MemoryInfo()
+              (c.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(m)
+              return Pair(m.availMem, m.totalMem)
+            }
+            fun mi(): Map<String, Long> = (rd("/proc/meminfo") ?: "").lines().mapNotNull {
+              val p = it.split(Regex("[: ]+")); if (p.size >= 2) p[0] to (p[1].toLongOrNull() ?: 0L) else null
+            }.toMap()
+            fun bat(c: Context): Intent? = c.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            fun batPct(c: Context): Int { val i = bat(c) ?: return -1; return i.getIntExtra("level", 0) * 100 / i.getIntExtra("scale", 100).coerceAtLeast(1) }
+            fun batTemp(c: Context): Double = (bat(c)?.getIntExtra("temperature", 0) ?: 0) / 10.0
+            fun charging(c: Context): Boolean = (bat(c)?.getIntExtra("plugged", 0) ?: 0) != 0
+            fun currentMa(c: Context): Double {
+              val bm = c.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+              val v = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW).toDouble()
+              return if (Math.abs(v) > 20000) v / 1000 else v
+            }
+            fun thermal(): List<Pair<String, Double>> {
+              val out = ArrayList<Pair<String, Double>>()
+              File("/sys/class/thermal").listFiles()?.filter { it.name.startsWith("thermal_zone") }?.sortedBy { it.name.length * 1000 + it.name.hashCode() % 1000 }?.forEach {
+                val t = rd(it.path + "/temp")?.toDoubleOrNull() ?: return@forEach
+                out.add(Pair(rd(it.path + "/type") ?: it.name, if (Math.abs(t) > 1000) t / 1000 else t))
+              }
+              return out
+            }
+            fun tmax() = thermal().map { it.second }.filter { it in 1.0..150.0 }.maxOrNull() ?: 0.0
+            var lrx = 0L; var ltx = 0L; var lt = 0L; var cache = Pair(0.0, 0.0)
+            fun net(): Pair<Double, Double> {
+              val t = System.nanoTime(); val dt = (t - lt) / 1e9
+              if (lt != 0L && dt < 0.8) return cache
+              val rx = TrafficStats.getTotalRxBytes(); val tx = TrafficStats.getTotalTxBytes()
+              cache = if (lt == 0L || dt <= 0) Pair(0.0, 0.0) else Pair((rx - lrx) / dt / 1024, (tx - ltx) / dt / 1024)
+              lrx = rx; ltx = tx; lt = t; return cache
+            }
+            fun wifi(c: Context): Boolean {
+              val cm = c.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+              return cm.getNetworkCapabilities(cm.activeNetwork)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ?: false
+            }
+            fun stor(): Pair<Long, Long> { val s = StatFs(Environment.getDataDirectory().path); return Pair(s.availableBytes, s.totalBytes) }
+            fun gb(b: Long) = "%.2f".format(b / 1073741824.0)
+            fun up(): String { val s = SystemClock.elapsedRealtime() / 1000; return "%dd %02d:%02d:%02d".format(s / 86400, s % 86400 / 3600, s % 3600 / 60, s % 60) }
+            fun bar(p: Int): String { val k = (p / 10).coerceIn(0, 10); return "█".repeat(k) + "░".repeat(10 - k) }
+            fun minutes(): Int { val c = Calendar.getInstance(); return c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE) }
+
+            fun live(c: Context): String {
+              val f = freqs(); val m = maxf(); val sb = StringBuilder()
+              sb.append("⏱ ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}  up ${up()}\n")
+              for (i in 0 until n) {
+                val p = if (m[i] > 0) (f[i] * 100 / m[i]).toInt() else 0
+                sb.append("CPU$i ${f[i].toString().padStart(4)}MHz ${bar(p)} $p%\n")
+              }
+              val (a, t) = ram(c); val mm = mi()
+              sb.append("RAM ${(t - a) / 1048576}/${t / 1048576}MB ${bar(((t - a) * 100 / t).toInt())}\n")
+              val st = mm["SwapTotal"] ?: 0L; val sf = mm["SwapFree"] ?: 0L
+              if (st > 0) sb.append("SWAP ${(st - sf) / 1024}/${st / 1024}MB\n")
+              val i = bat(c); val ma = currentMa(c); val v = i?.getIntExtra("voltage", 0) ?: 0
+              sb.append("BAT ${batPct(c)}% ${batTemp(c)}°C ${v}mV ${"%.0f".format(ma)}mA ${"%.2f".format(Math.abs(ma) * v / 1e6)}W ${if (charging(c)) "⚡" else ""}\n")
+              val th = thermal().filter { it.second in 1.0..150.0 }.distinctBy { it.first }.take(5)
+              sb.append("TEMP max ${"%.1f".format(tmax())}°C\n")
+              th.forEach { sb.append("  ${it.first.take(14)} ${"%.1f".format(it.second)}°C\n") }
+              val (d, u) = net(); sb.append("NET ↓${"%.0f".format(d)} ↑${"%.0f".format(u)} KB/s ${if (wifi(c)) "WiFi" else "Mobile"}\n")
+              val (fr, to) = stor(); sb.append("STO free ${gb(fr)}/${gb(to)}GB")
+              return sb.toString()
+            }
+
+            fun tpl(c: Context, t0: String): String {
+            val t = H.vars(c, t0)
+              val f = freqs().filter { it > 0 }; val (d, u) = net()
+              return t.replace("{battery}", batPct(c).toString()).replace("{temp}", batTemp(c).toString())
+                .replace("{ramfree}", (ram(c).first / 1048576).toString()).replace("{cpu}", (if (f.isEmpty()) 0 else f.average().toInt()).toString())
+                .replace("{thermal}", "%.0f".format(tmax())).replace("{down}", "%.0f".format(d)).replace("{up}", "%.0f".format(u))
+                .replace("{time}", SimpleDateFormat("HH:mm", Locale.US).format(Date()))
+            }
+
+            fun <T> gl(w: Int, f: () -> T): T? {
+              val d = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY); val v = IntArray(2)
+              var ctx: EGLContext? = null; var sf: EGLSurface? = null
+              return try {
+                EGL14.eglInitialize(d, v, 0, v, 1)
+                val cfg = arrayOfNulls<EGLConfig>(1); val k = IntArray(1)
+                EGL14.eglChooseConfig(d, intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT, EGL14.EGL_NONE), 0, cfg, 0, 1, k, 0)
+                ctx = EGL14.eglCreateContext(d, cfg[0], EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
+                sf = EGL14.eglCreatePbufferSurface(d, cfg[0], intArrayOf(EGL14.EGL_WIDTH, w, EGL14.EGL_HEIGHT, w, EGL14.EGL_NONE), 0)
+                EGL14.eglMakeCurrent(d, sf, sf, ctx); f()
+              } catch (e: Throwable) { null } finally {
+                try {
+                  EGL14.eglMakeCurrent(d, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                  sf?.let { EGL14.eglDestroySurface(d, it) }; ctx?.let { EGL14.eglDestroyContext(d, it) }; EGL14.eglTerminate(d)
+                } catch (e: Throwable) {}
+              }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Info.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.ActivityManager
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.hardware.Sensor
+          import android.hardware.SensorManager
+          import android.hardware.camera2.CameraCharacteristics
+          import android.hardware.camera2.CameraManager
+          import android.hardware.display.DisplayManager
+          import android.media.MediaCodecList
+          import android.net.ConnectivityManager
+          import android.opengl.GLES20
+          import android.os.*
+          import java.io.File
+          import java.util.*
+
+          object Info {
+            fun build(c: Context): String {
+              val b = StringBuilder()
+              fun h(t: String) { b.append("\n━━ $t ━━\n") }
+              fun l(k: String, v: Any?) { b.append(k.padEnd(17)).append(v).append('\n') }
+
+              h("DEVICE")
+              l("Model", Build.MODEL); l("Manufacturer", Build.MANUFACTURER); l("Brand", Build.BRAND); l("Device", Build.DEVICE)
+              l("Product", Build.PRODUCT); l("Board", Build.BOARD); l("Hardware", Build.HARDWARE); l("Bootloader", Build.BOOTLOADER)
+              l("Build ID", Build.DISPLAY); l("Fingerprint", Build.FINGERPRINT); l("Type/Tags", "${Build.TYPE} / ${Build.TAGS}")
+
+              h("SOC / CPU")
+              if (Build.VERSION.SDK_INT >= 31) { l("SoC vendor", Build.SOC_MANUFACTURER); l("SoC model", Build.SOC_MODEL) }
+              l("ABIs", Build.SUPPORTED_ABIS.joinToString()); l("Cores", S.n)
+              (S.rd("/proc/cpuinfo") ?: "").lines().filter { it.startsWith("Hardware") || it.startsWith("model name") || it.startsWith("Features") }.distinct().forEach { b.append(it.take(160)).append('\n') }
+              val gov = S.cpu(0, "scaling_available_governors"); if (gov != null) l("Governors", gov)
+              for (i in 0 until S.n) {
+                l("cpu$i", "${(S.cpu(i, "cpuinfo_min_freq")?.toLongOrNull() ?: 0) / 1000}-${(S.cpu(i, "cpuinfo_max_freq")?.toLongOrNull() ?: 0) / 1000} MHz  now ${(S.cpu(i, "scaling_cur_freq")?.toLongOrNull() ?: 0) / 1000}  ${S.cpu(i, "scaling_governor") ?: ""}")
+              }
+
+              h("GPU / GRAPHICS")
+              val ai = (c.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
+              l("GLES version", ai.deviceConfigurationInfo.glEsVersion)
+              l("GL", S.gl(1) { "${GLES20.glGetString(GLES20.GL_VENDOR)} | ${GLES20.glGetString(GLES20.GL_RENDERER)} | ${GLES20.glGetString(GLES20.GL_VERSION)}" } ?: "n/a")
+              val pm = c.packageManager
+              l("Vulkan", if (pm.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION)) "yes (0x${Integer.toHexString(pm.systemAvailableFeatures.firstOrNull { it.name == PackageManager.FEATURE_VULKAN_HARDWARE_VERSION }?.version ?: 0)})" else "no")
+
+              h("MEMORY")
+              val (a, t) = S.ram(c); val mm = S.mi()
+              l("Total RAM", "${t / 1048576} MB"); l("Available", "${a / 1048576} MB"); l("App class", "${ai.memoryClass} MB (large ${ai.largeMemoryClass} MB)")
+              listOf("MemFree", "Cached", "Buffers", "SwapTotal", "SwapFree", "Dirty", "Mapped").forEach { l(it, "${(mm[it] ?: 0) / 1024} MB") }
+
+              h("STORAGE")
+              val (fr, to) = S.stor(); l("Data", "${S.gb(fr)} free / ${S.gb(to)} GB")
+              l("External", "${S.gb(Environment.getExternalStorageDirectory().freeSpace)} free / ${S.gb(Environment.getExternalStorageDirectory().totalSpace)} GB")
+
+              h("DISPLAY")
+              val dm = c.resources.displayMetrics
+              l("Resolution", "${dm.widthPixels}x${dm.heightPixels}"); l("Density", "${dm.densityDpi} dpi (x${dm.density})"); l("xdpi/ydpi", "${dm.xdpi}/${dm.ydpi}")
+              val d = (c.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).getDisplay(0)
+              l("Refresh", "${d.refreshRate} Hz"); l("Modes", d.supportedModes.joinToString { "${it.physicalWidth}x${it.physicalHeight}@${"%.0f".format(it.refreshRate)}" })
+              l("Wide gamut", d.isWideColorGamut); l("HDR types", d.hdrCapabilities?.supportedHdrTypes?.joinToString() ?: "none")
+
+              h("BATTERY")
+              val i = S.bat(c); val bm = c.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+              l("Level", "${S.batPct(c)}%"); l("Temp", "${S.batTemp(c)} °C"); l("Voltage", "${i?.getIntExtra("voltage", 0)} mV"); l("Tech", i?.getStringExtra("technology"))
+              val st = arrayOf("?", "unknown", "charging", "discharging", "not charging", "full"); val hl = arrayOf("?", "unknown", "good", "overheat", "dead", "overvolt", "failure", "cold")
+              l("Status", st.getOrElse(i?.getIntExtra("status", 0) ?: 0) { "?" }); l("Health", hl.getOrElse(i?.getIntExtra("health", 0) ?: 0) { "?" })
+              l("Plugged", when (i?.getIntExtra("plugged", 0)) { 1 -> "AC"; 2 -> "USB"; 4 -> "Wireless"; else -> "no" })
+              l("Current", "${"%.0f".format(S.currentMa(c))} mA"); l("Charge counter", "${bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER) / 1000} mAh")
+              listOf("charge_full_design", "charge_full", "cycle_count").forEach { k -> S.rd("/sys/class/power_supply/battery/$k")?.let { l(k, it) } }
+
+              h("THERMAL ZONES")
+              S.thermal().forEach { l(it.first.take(16), "${"%.1f".format(it.second)} °C") }
+
+              h("NETWORK")
+              val cm = c.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+              val k = cm.getNetworkCapabilities(cm.activeNetwork)
+              l("Down/Up", "${k?.linkDownstreamBandwidthKbps} / ${k?.linkUpstreamBandwidthKbps} kbps"); l("WiFi", S.wifi(c))
+
+              h("OS / KERNEL")
+              l("Android", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"); l("Security patch", Build.VERSION.SECURITY_PATCH)
+              l("Kernel", System.getProperty("os.version")); l("Arch", System.getProperty("os.arch")); l("VM", System.getProperty("java.vm.version"))
+              l("Uptime", S.up()); l("Locale/TZ", "${Locale.getDefault()} / ${TimeZone.getDefault().id}")
+
+              h("CAMERAS")
+              try {
+                val cam = c.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                for (id in cam.cameraIdList) {
+                  val ch = cam.getCameraCharacteristics(id); val px = ch.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                  l("cam $id", "${if (ch.get(CameraCharacteristics.LENS_FACING) == 0) "front" else "back"} ${px?.width}x${px?.height} (${"%.1f".format((px?.width ?: 0) * (px?.height ?: 0) / 1e6)}MP) f=${ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.joinToString()} ap=${ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.joinToString()} flash=${ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE)}")
+                }
+              } catch (e: Throwable) { l("error", e.message) }
+
+              h("SENSORS")
+              val sm = c.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+              sm.getSensorList(Sensor.TYPE_ALL).forEach { l(it.type.toString(), "${it.name} (${it.vendor}) max=${it.maximumRange} res=${it.resolution} ${it.power}mA") }
+
+              h("HW CODECS")
+              MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.filter { it.isHardwareAccelerated && !it.isSoftwareOnly }.forEach { l(if (it.isEncoder) "enc" else "dec", "${it.name} ${it.supportedTypes.joinToString()}") }
+
+              h("SYSTEM FEATURES")
+              b.append(pm.systemAvailableFeatures.mapNotNull { it.name?.removePrefix("android.hardware.")?.removePrefix("android.software.") }.sorted().joinToString(", "))
+              return b.toString()
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Bench.kt <<'EOF'
+          package dev.sysx
+
+          import android.content.Context
+          import android.opengl.GLES20
+          import java.io.*
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import javax.crypto.Cipher
+          import javax.crypto.spec.IvParameterSpec
+          import javax.crypto.spec.SecretKeySpec
+
+          object Bench {
+            @Volatile var sink = 0L
+            private fun loop(ms: Long, chunk: Int, body: () -> Unit): Double {
+              var n = 0L; val t = System.nanoTime(); val e = t + ms * 1_000_000
+              while (System.nanoTime() < e) { body(); n += chunk }
+              return n / ((System.nanoTime() - t) / 1e9) / 1e6
+            }
+            fun intB(ms: Long): Double { var x = 1L; val r = loop(ms, 100000) { for (i in 0 until 100000) { x = x * 6364136223846793005L + 1442695040888963407L; x = x xor (x ushr 29) } }; sink = x; return r }
+            fun fltB(ms: Long): Double { var x = 1.0; val r = loop(ms, 20000) { for (i in 0 until 20000) { x = Math.sqrt(x * 1.000001 + i) + Math.sin(x) * 0.5 } }; sink = x.toLong(); return r }
+            fun multi(ms: Long, f: (Long) -> Double): Double {
+              val r = DoubleArray(S.n); val ts = (0 until S.n).map { i -> Thread { r[i] = f(ms) }.also { it.start() } }
+              ts.forEach { it.join() }; return r.sum()
+            }
+            fun mem(ms: Long): Double {
+              val a = ByteArray(32 shl 20); val b = ByteArray(32 shl 20); var bytes = 0L; val t = System.nanoTime(); val e = t + ms * 1_000_000
+              while (System.nanoTime() < e) { System.arraycopy(a, 0, b, 0, a.size); bytes += a.size.toLong() * 2 }
+              sink = b[5].toLong(); return bytes / ((System.nanoTime() - t) / 1e9) / 1e9
+            }
+            fun lat(): Double {
+              val n = 1 shl 22; val a = IntArray(n) { it }; val r = java.util.Random(7)
+              for (i in n - 1 downTo 1) { val j = r.nextInt(i); val t = a[i]; a[i] = a[j]; a[j] = t }
+              var p = 0; val steps = 4_000_000; val t = System.nanoTime(); for (s in 0 until steps) p = a[p]
+              sink = p.toLong(); return (System.nanoTime() - t).toDouble() / steps
+            }
+            fun aes(ms: Long): Double {
+              val ci = Cipher.getInstance("AES/CBC/NoPadding"); ci.init(Cipher.ENCRYPT_MODE, SecretKeySpec(ByteArray(16), "AES"), IvParameterSpec(ByteArray(16)))
+              val d = ByteArray(1 shl 20); var b = 0L; val t = System.nanoTime(); val e = t + ms * 1_000_000
+              while (System.nanoTime() < e) { ci.update(d); b += d.size }
+              return b / ((System.nanoTime() - t) / 1e9) / 1e6
+            }
+            fun zip(ms: Long): Double {
+              val r = java.util.Random(2); val d = ByteArray(2 shl 20) { (r.nextInt(16) + 65).toByte() }; val out = ByteArray(4 shl 20)
+              var b = 0L; val t = System.nanoTime(); val e = t + ms * 1_000_000
+              while (System.nanoTime() < e) { val df = java.util.zip.Deflater(6); df.setInput(d); df.finish(); while (!df.finished()) df.deflate(out); df.end(); b += d.size }
+              return b / ((System.nanoTime() - t) / 1e9) / 1e6
+            }
+            fun sto(c: Context): Pair<Double, Double> {
+              val f = File(c.cacheDir, "b.bin"); val buf = ByteArray(1 shl 20).also { java.util.Random(1).nextBytes(it) }; val mb = 96
+              var t = System.nanoTime(); FileOutputStream(f).use { o -> repeat(mb) { o.write(buf) }; o.fd.sync() }
+              val w = mb / ((System.nanoTime() - t) / 1e9)
+              t = System.nanoTime(); FileInputStream(f).use { i -> while (i.read(buf) > 0) {} }
+              val r = mb / ((System.nanoTime() - t) / 1e9); f.delete(); return Pair(w, r)
+            }
+            private fun sh(t: Int, s: String): Int { val h = GLES20.glCreateShader(t); GLES20.glShaderSource(h, s); GLES20.glCompileShader(h); return h }
+            fun gpu(): Double = S.gl(1024) {
+              val pr = GLES20.glCreateProgram()
+              GLES20.glAttachShader(pr, sh(GLES20.GL_VERTEX_SHADER, "attribute vec4 p;void main(){gl_Position=p;}"))
+              GLES20.glAttachShader(pr, sh(GLES20.GL_FRAGMENT_SHADER, "precision highp float;void main(){vec2 u=gl_FragCoord.xy/1024.;float a=0.;for(int i=0;i<64;i++){a+=sin(u.x*float(i)+a)*cos(u.y*float(i)-a);}gl_FragColor=vec4(a,a*.5,1.,1.);}"))
+              GLES20.glLinkProgram(pr); GLES20.glUseProgram(pr)
+              val vb = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder()).asFloatBuffer()
+              vb.put(floatArrayOf(-1f, -1f, 0f, 1f, 1f, -1f, 0f, 1f, -1f, 1f, 0f, 1f, 1f, 1f, 0f, 1f)); vb.position(0)
+              val l = GLES20.glGetAttribLocation(pr, "p"); GLES20.glEnableVertexAttribArray(l)
+              GLES20.glVertexAttribPointer(l, 4, GLES20.GL_FLOAT, false, 0, vb); GLES20.glViewport(0, 0, 1024, 1024)
+              var fr = 0; val t = System.nanoTime()
+              while (System.nanoTime() - t < 1_500_000_000L) { repeat(4) { GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4) }; GLES20.glFinish(); fr += 4 }
+              fr / ((System.nanoTime() - t) / 1e9)
+            } ?: 0.0
+
+            fun run(c: Context, out: (String) -> Unit) {
+              val sb = StringBuilder(); var score = 0.0
+              fun r(name: String, v: Double, unit: String, w: Double) { score += v * w; sb.append(name.padEnd(18)).append("%.1f".format(v)).append(" $unit\n"); out(sb.toString()) }
+              out("Warming up…")
+              intB(300); fltB(300)
+              r("CPU int 1T", intB(1200), "Mops/s", 2.0)
+              r("CPU float 1T", fltB(1200), "Mops/s", 10.0)
+              r("CPU int ${S.n}T", multi(1500) { intB(it) }, "Mops/s", 0.5)
+              r("CPU float ${S.n}T", multi(1500) { fltB(it) }, "Mops/s", 2.5)
+              r("RAM copy", mem(1200), "GB/s", 50.0)
+              val lt = lat(); sb.append("RAM latency".padEnd(18)).append("%.1f ns\n".format(lt)); score += 2000 / lt; out(sb.toString())
+              r("AES-CBC", aes(1000), "MB/s", 1.0)
+              r("Deflate", zip(1000), "MB/s", 10.0)
+              r("GPU 1024² shader", gpu(), "fps", 5.0)
+              val (w, rd) = sto(c)
+              r("Storage write", w, "MB/s", 1.0); r("Storage read*", rd, "MB/s", 0.1)
+              sb.append("\n★ TOTAL SCORE ${score.toInt()}\n(*read may hit page cache; scores are relative to this app only)")
+              out(sb.toString())
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Auto.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.*
+          import android.content.*
+          import android.hardware.camera2.CameraManager
+          import android.media.AudioManager
+          import android.net.Uri
+          import android.os.*
+          import android.widget.Toast
+          import org.json.*
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          object Auto {
+            const val MODEL = "claude-haiku-5-5"
+            private val logs = ArrayList<String>(); private val last = HashMap<String, Long>()
+            fun log(s: String) = synchronized(logs) { logs.add(0, "${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())} $s"); while (logs.size > 40) logs.removeAt(logs.size - 1) }
+            fun logText() = synchronized(logs) { logs.joinToString("\n") }
+
+            const val RULE_SYS = """You convert a user's plain-English automation request into ONE JSON rule for an Android app. Reply with ONLY the JSON object, no prose, no markdown.
+          Schema: {"name":str,"enabled":true,"cooldown":seconds,"when":{"all":[cond...],"any":[cond...]},"do":[action...]}
+          cond = {"t":TYPE,"v":VALUE}. TYPE: battery_lt, battery_gt (percent), temp_gt, temp_lt (battery C), thermal_gt (hottest sensor C), charging (v true/false), ram_free_lt (MB), wifi (v true/false), time_after, time_before (v "HH:MM" 24h), net_down_gt, net_up_gt (KB/s), cpu_gt (avg CPU freq load %), ram_used_gt (%), storage_free_lt (GB), power_gt (watts), uptime_gt (hours), weekday (v like "Mon,Sat").
+          action = {"a":TYPE,"v":VALUE}. TYPE: notify (text), toast (text), vibrate (ms), torch (on/off), volume (0-100 media), open_url (url), open_app (package name), widget (text shown on the home widget), speak (TTS text), beep (ms), blink (flash count), haptic (any), copy (clipboard text), log (text), overlay (on/off).
+          Text may use variables {battery} {temp} {ramfree} {cpu} {thermal} {down} {up} {time} {cpupct} {rampct} {power} {uptime} {storfree}. Use "all" for AND, "any" for OR, omit unused one. Default cooldown 300."""
+            const val WIDGET_SYS = """Write a compact Android home-screen widget text template for the user's request. Reply with ONLY the template text (max 6 short lines), no markdown. Allowed variables: {battery} {temp} {ramfree} {cpu} {thermal} {down} {up} {time} {cpupct} {rampct} {power} {uptime} {bcpu} {bram} {bbat} {date}. Emojis allowed."""
+
+            private fun call(key: String, system: String, user: String): String {
+              val cn = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+              cn.requestMethod = "POST"; cn.connectTimeout = 15000; cn.readTimeout = 60000; cn.doOutput = true
+              cn.setRequestProperty("x-api-key", key); cn.setRequestProperty("anthropic-version", "2023-06-01"); cn.setRequestProperty("content-type", "application/json")
+              val body = JSONObject().put("model", MODEL).put("max_tokens", 1000).put("system", system)
+                .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", user)))
+              cn.outputStream.use { it.write(body.toString().toByteArray()) }
+              val code = cn.responseCode; val s = (if (code < 400) cn.inputStream else cn.errorStream).bufferedReader().readText()
+              if (code >= 400) throw RuntimeException("HTTP $code ${s.take(200)}")
+              return JSONObject(s).getJSONArray("content").getJSONObject(0).getString("text")
+            }
+            fun genRule(key: String, ask: String): JSONObject {
+              val t = call(key, RULE_SYS, ask); return JSONObject(t.substring(t.indexOf('{'), t.lastIndexOf('}') + 1))
+            }
+            fun genWidget(key: String, ask: String) = call(key, WIDGET_SYS, ask).trim()
+
+            private fun cond(c: Context, o: JSONObject): Boolean {
+              val v = o.optDouble("v", 0.0)
+              fun tm(): Int { val p = o.optString("v").split(":"); return (p.getOrNull(0)?.toIntOrNull() ?: 0) * 60 + (p.getOrNull(1)?.toIntOrNull() ?: 0) }
+              return when (o.optString("t")) {
+                "battery_lt" -> S.batPct(c) < v; "battery_gt" -> S.batPct(c) > v
+                "temp_gt" -> S.batTemp(c) > v; "temp_lt" -> S.batTemp(c) < v
+                "thermal_gt" -> S.tmax() > v; "charging" -> S.charging(c) == o.optBoolean("v", true)
+                "ram_free_lt" -> S.ram(c).first / 1048576 < v; "wifi" -> S.wifi(c) == o.optBoolean("v", true)
+                "time_after" -> S.minutes() >= tm(); "time_before" -> S.minutes() < tm()
+                "net_down_gt" -> S.net().first > v; "net_up_gt" -> S.net().second > v; "cpu_gt" -> H.cpuPct(c) > v; "ram_used_gt" -> H.ramPct(c) > v
+                "storage_free_lt" -> S.stor().first / 1073741824.0 < v; "power_gt" -> H.power(c) > v; "uptime_gt" -> SystemClock.elapsedRealtime() / 3600000.0 > v
+                "weekday" -> o.optString("v").split(",").any { it.trim().equals(SimpleDateFormat("EEE", Locale.US).format(Date()), true) }
+                else -> false
+              }
+            }
+            fun tick(c: Context) {
+              val arr = try { JSONArray(c.getSharedPreferences("sx", 0).getString("rules", "[]")) } catch (e: Throwable) { return }
+              for (i in 0 until arr.length()) {
+                val r = arr.optJSONObject(i) ?: continue
+                if (!r.optBoolean("enabled", true)) continue
+                val w = r.optJSONObject("when") ?: continue; val all = w.optJSONArray("all"); val any = w.optJSONArray("any")
+                if (all == null && any == null) continue
+                val ok = (all == null || (0 until all.length()).all { cond(c, all.getJSONObject(it)) }) && (any == null || (0 until any.length()).any { cond(c, any.getJSONObject(it)) })
+                val name = r.optString("name", "rule$i"); val now = System.currentTimeMillis()
+                if (!ok || now - (last[name] ?: 0L) < r.optLong("cooldown", 300) * 1000) continue
+                last[name] = now; log("▶ $name")
+                val acts = r.optJSONArray("do") ?: continue
+                for (j in 0 until acts.length()) try { act(c, acts.getJSONObject(j)) } catch (e: Throwable) { log("  ✖ ${e.message}") }
+              }
+            }
+            fun act(c: Context, a: JSONObject) {
+              val v = S.tpl(c, a.optString("v")); val ui = Handler(Looper.getMainLooper())
+              when (a.optString("a")) {
+                "notify" -> {
+                  val nm = c.getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("sxa", "SysX alerts", NotificationManager.IMPORTANCE_HIGH))
+                  nm.notify((System.nanoTime() % 100000).toInt() + 10, Notification.Builder(c, "sxa").setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("SysX").setContentText(v).build())
+                }
+                "toast" -> ui.post { Toast.makeText(c, v, Toast.LENGTH_LONG).show() }
+                "vibrate" -> (c.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator).vibrate(VibrationEffect.createOneShot(v.toLongOrNull() ?: 500, VibrationEffect.DEFAULT_AMPLITUDE))
+                "torch" -> { val cm = c.getSystemService(Context.CAMERA_SERVICE) as CameraManager; cm.setTorchMode(cm.cameraIdList[0], v != "off") }
+                "volume" -> { val am = c.getSystemService(Context.AUDIO_SERVICE) as AudioManager; am.setStreamVolume(AudioManager.STREAM_MUSIC, (am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) * (v.toDoubleOrNull() ?: 50.0) / 100).toInt(), 0) }
+                "open_url" -> c.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(v)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                "open_app" -> c.packageManager.getLaunchIntentForPackage(v)?.let { c.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                "widget" -> { c.getSharedPreferences("sx", 0).edit().putString("wtxt", a.optString("v")).apply(); StatsWidget.update(c) }
+                "speak" -> ui.post { H.say(c, v) }
+                "beep" -> android.media.ToneGenerator(AudioManager.STREAM_MUSIC, 90).startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, v.toIntOrNull() ?: 300)
+                "blink" -> Thread { val cm = c.getSystemService(Context.CAMERA_SERVICE) as CameraManager; val id = cm.cameraIdList[0]; repeat(v.toIntOrNull() ?: 3) { cm.setTorchMode(id, true); Thread.sleep(160); cm.setTorchMode(id, false); Thread.sleep(160) } }.start()
+                "copy" -> ui.post { (c.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("SysX", v)) }
+                "haptic" -> (c.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator).vibrate(VibrationEffect.createWaveform(longArrayOf(0, 70, 60, 70, 60, 180), -1))
+                "log" -> log("  $v")
+                "overlay" -> { c.getSharedPreferences("sx", 0).edit().putBoolean("overlay", v != "off").apply(); Core.sync(c) }
+                "settings" -> c.startActivity(Intent(android.provider.Settings.ACTION_BATTERY_SAVER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                else -> log("  ? unknown action")
+              }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/StatsWidget.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.util.TypedValue
+          import android.widget.RemoteViews
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          class StatsWidget : AppWidgetProvider() {
+            override fun onUpdate(c: Context, m: AppWidgetManager, ids: IntArray) = update(c)
+            companion object {
+              fun update(c: Context) {
+                val m = AppWidgetManager.getInstance(c); val ids = m.getAppWidgetIds(ComponentName(c, StatsWidget::class.java))
+                if (ids.isEmpty()) return
+                val p = c.getSharedPreferences("sx", 0); val rv = RemoteViews(c.packageName, R.layout.widget)
+                rv.setTextViewText(R.id.w_txt, S.tpl(c, p.getString("wtxt", S.DEF_W)!!)); rv.setTextColor(R.id.w_txt, 0xEEFFFFFF.toInt())
+                rv.setTextViewTextSize(R.id.w_txt, TypedValue.COMPLEX_UNIT_SP, p.getInt("w_size", 12).toFloat())
+                rv.setTextColor(R.id.w_hd, T.accents[p.getInt("w_acc", 0) % 6]); rv.setTextViewText(R.id.w_tm, SimpleDateFormat("HH:mm", Locale.US).format(Date()))
+                rv.setInt(R.id.w_root, "setBackgroundResource", intArrayOf(R.drawable.w_bg0, R.drawable.w_bg1, R.drawable.w_bg2)[p.getInt("w_style", 0).coerceIn(0, 2)])
+                rv.setOnClickPendingIntent(R.id.w_root, PendingIntent.getActivity(c, 0, Intent(c, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+                m.updateAppWidget(ids, rv)
+              }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Core.kt <<'EOF'
+          package dev.sysx
+
+          import android.animation.*
+          import android.app.*
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.ServiceInfo
+          import android.graphics.*
+          import android.graphics.drawable.GradientDrawable
+          import android.os.*
+          import android.provider.Settings
+          import android.view.*
+          import android.view.animation.OvershootInterpolator
+          import android.widget.*
+
+          class Core : Service() {
+            private val h = Handler(Looper.getMainLooper()); private lateinit var wm: WindowManager
+            private var box: LinearLayout? = null; private var tv: TextView? = null; private var sa: Spark? = null; private var sb: Spark? = null
+            private var sig = ""; private var tick = 0; private var lastAuto = 0L; private var oacc = 0; private var flash = ""; private var flashT = 0L
+            private val loop = object : Runnable {
+              override fun run() {
+                val p = getSharedPreferences("sx", 0); Fx.hap = p.getBoolean("hap", true); H.sample(this@Core)
+                val want = p.getBoolean("overlay", false) && Settings.canDrawOverlays(this@Core)
+                val s = p.all.filterKeys { it.startsWith("ov_") && it != "ov_x" && it != "ov_y" && it != "ov_lock" }.toString()
+                if (!want) hideOv() else { if (s != sig) { hideOv(true); sig = s }; showOv(p); updOv(p) }
+                val now = System.currentTimeMillis()
+                if (p.getBoolean("engine", false) && now - lastAuto >= 5000) { lastAuto = now; Thread { try { Auto.tick(this@Core) } catch (e: Throwable) { Auto.log("err ${e.message}") } }.start() }
+                tick++; if (tick % 10 == 0) StatsWidget.update(this@Core); if (tick % 5 == 0) note()
+                h.postDelayed(this, p.getInt("rate", 1000).toLong())
+              }
+            }
+            override fun onBind(i: Intent?): IBinder? = null
+            override fun onCreate() { super.onCreate(); wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager }
+            private fun notif(): Notification {
+              val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+              return Notification.Builder(this, "sx").setContentTitle("SysX · ${"%.0f".format(H.cpu.last())}% CPU · ${"%.0f".format(H.ram.last())}% RAM")
+                .setContentText("${"%.1f".format(H.tmp.last())}°C · ${"%.1f".format(H.pw.last())}W · ↓${"%.0f".format(H.dn.last())} KB/s")
+                .setSmallIcon(android.R.drawable.stat_notify_sync).setOnlyAlertOnce(true).setContentIntent(pi).build()
+            }
+            private fun note() { getSystemService(NotificationManager::class.java).notify(1, notif()) }
+            override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
+              getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("sx", "SysX", NotificationManager.IMPORTANCE_LOW))
+              val n = notif(); if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) else startForeground(1, n)
+              h.removeCallbacks(loop); h.post(loop); return START_STICKY
+            }
+            private fun showOv(p: SharedPreferences) {
+              if (box != null) return
+              val mode = p.getInt("ov_mode", 1); oacc = T.accents[p.getInt("ov_color", 1) % 6]; val acc = oacc
+              val corner = dpf(p.getInt("ov_corner", 14).toFloat()); val bgA = p.getInt("ov_alpha", 70) * 255 / 100
+              val b = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(7), dp(10), dp(8)); alpha = 0f; scaleX = .85f; scaleY = .85f }
+              b.background = rr((bgA shl 24) or 0x05080C, corner, (acc and 0xFFFFFF) or 0xAA000000.toInt(), dp(1))
+              val t = TextView(this).apply { typeface = Typeface.MONOSPACE; textSize = p.getInt("ov_size", 9).toFloat(); setTextColor(acc); setLineSpacing(0f, 1.06f) }
+              b.addView(t); box = b; tv = t
+              if (mode == 2) {
+                sa = Spark(this, "", "%", acc).apply { src = H.cpu.v; fixMax = 100f; compact = true }; sb = Spark(this, "", "", T.accents[0]).apply { src = H.dn.v; compact = true }
+                b.addView(sa, LinearLayout.LayoutParams(dp(150), dp(24)).apply { topMargin = dp(4) }); b.addView(sb, LinearLayout.LayoutParams(dp(150), dp(24)).apply { topMargin = dp(2) })
+              }
+              val through = if (p.getBoolean("ov_through", false)) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0
+              val l = WindowManager.LayoutParams(-2, -2, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or through, PixelFormat.TRANSLUCENT)
+              l.gravity = Gravity.TOP or Gravity.START; l.x = p.getInt("ov_x", 0); l.y = p.getInt("ov_y", dp(70))
+              var dx = 0f; var dy = 0f; var sx = 0; var sy = 0; var moved = false; var downT = 0L
+              b.setOnTouchListener { v, e ->
+                when (e.actionMasked) {
+                  MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; sx = l.x; sy = l.y; moved = false; downT = System.currentTimeMillis(); v.animate().scaleX(.95f).scaleY(.95f).setDuration(80).start() }
+                  MotionEvent.ACTION_MOVE -> if (!p.getBoolean("ov_lock", false)) {
+                    val ax = (e.rawX - dx).toInt(); val ay = (e.rawY - dy).toInt()
+                    if (moved || Math.abs(ax) + Math.abs(ay) > dp(6)) { moved = true; l.x = sx + ax; l.y = sy + ay; try { wm.updateViewLayout(v, l) } catch (x: Throwable) {} }
+                  }
+                  MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(260).setInterpolator(OvershootInterpolator(3f)).start()
+                    if (!moved && e.actionMasked == MotionEvent.ACTION_UP) {
+                      if (System.currentTimeMillis() - downT > 450) {
+                        val lk = !p.getBoolean("ov_lock", false); p.edit().putBoolean("ov_lock", lk).apply(); Fx.heavy(v); flash = if (lk) "🔒 locked" else "🔓 unlocked"; flashT = System.currentTimeMillis() + 1400
+                      } else { Fx.tick(v); p.edit().putInt("ov_mode", (mode + 1) % 3).apply(); h.post { hideOv(true); sig = ""; showOv(p) } }
+                    } else if (moved) snap(v, l, p)
+                  }
+                }
+                true
+              }
+              wm.addView(b, l); b.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(320).setInterpolator(OvershootInterpolator(1.8f)).start()
+            }
+            private fun snap(v: View, l: WindowManager.LayoutParams, p: SharedPreferences) {
+              val sw = resources.displayMetrics.widthPixels
+              val tx = if (!p.getBoolean("ov_snap", true)) l.x else if (l.x + v.width / 2 < sw / 2) 0 else sw - v.width
+              ValueAnimator.ofInt(l.x, tx).apply {
+                duration = 320; interpolator = OvershootInterpolator(1.3f)
+                addUpdateListener { l.x = it.animatedValue as Int; try { wm.updateViewLayout(v, l) } catch (e: Throwable) {} }
+                addListener(object : AnimatorListenerAdapter() { override fun onAnimationEnd(a: Animator) { p.edit().putInt("ov_x", l.x).putInt("ov_y", l.y).apply() } }); start()
+              }
+            }
+            private fun updOv(p: SharedPreferences) {
+              val t = tv ?: return; val mode = p.getInt("ov_mode", 1)
+              var s = H.ovText(this, mode, p.getInt("ov_mask", 255)); if (System.currentTimeMillis() < flashT) s = "$flash\n$s"
+              t.text = s; sa?.invalidate(); sb?.invalidate()
+              val hot = p.getBoolean("ov_alert", true) && H.tmp.last() > p.getInt("ov_thr", 45)
+              (box?.background as? GradientDrawable)?.setStroke(dp(if (hot) 2 else 1), if (hot) T.bad else ((oacc and 0xFFFFFF) or 0xAA000000.toInt()))
+              t.setTextColor(if (hot) T.bad else oacc)
+            }
+            private fun hideOv(now: Boolean = false) {
+              val b = box ?: return; box = null; tv = null; sa = null; sb = null
+              if (now) rm(b) else b.animate().alpha(0f).scaleX(.8f).scaleY(.8f).setDuration(220).withEndAction { rm(b) }.start()
+            }
+            private fun rm(b: View) { try { wm.removeView(b) } catch (e: Throwable) {} }
+            override fun onDestroy() { h.removeCallbacksAndMessages(null); hideOv(true); super.onDestroy() }
+            companion object {
+              fun sync(c: Context) {
+                val p = c.getSharedPreferences("sx", 0); val i = Intent(c, Core::class.java)
+                if (p.getBoolean("overlay", false) || p.getBoolean("engine", false)) c.startForegroundService(i) else c.stopService(i)
+              }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/MainActivity.kt <<'EOF'
+          package dev.sysx
+
+          import android.animation.ValueAnimator
+          import android.app.Activity
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.*
+          import android.graphics.*
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.camera2.CameraManager
+          import android.net.Uri
+          import android.os.*
+          import android.provider.Settings
+          import android.text.*
+          import android.text.style.ForegroundColorSpan
+          import android.transition.TransitionManager
+          import android.view.*
+          import android.view.animation.*
+          import android.widget.*
+          import org.json.*
+
+          class MainActivity : Activity() {
+            private val h = Handler(Looper.getMainLooper())
+            private lateinit var p: SharedPreferences; private lateinit var host: FrameLayout; private lateinit var bar: FrameLayout; private lateinit var ind: View
+            private lateinit var gd: GestureDetector; private lateinit var wt: EditText; private lateinit var hdSub: TextView; private lateinit var hdHp: TextView
+            private lateinit var rbox: LinearLayout; private lateinit var json: EditText; private lateinit var lg: TextView
+            private val pages = ArrayList<View>(); private val refs = ArrayList<() -> Unit>(); private val tabIc = ArrayList<TextView>(); private val tileRef = ArrayList<() -> Unit>()
+            private var cur = 0; private var torch = false
+            private val names = listOf("Home", "Live", "Info", "Bench", "Auto", "Tune"); private val icons = listOf("🏠", "📈", "📋", "🏁", "⚡", "🎛")
+            private val tick = object : Runnable {
+              override fun run() {
+                H.sample(this@MainActivity); val hp = H.health(this@MainActivity)
+                hdSub.text = "${Build.MANUFACTURER} ${Build.MODEL} · up ${S.up()}"; hdHp.text = "♥ $hp"; hdHp.setTextColor(hc(hp))
+                refs.getOrNull(cur)?.invoke(); h.postDelayed(this, p.getInt("rate", 1000).toLong())
+              }
+            }
+            private fun hc(hp: Int) = if (hp >= 75) T.ok else if (hp >= 50) T.warn else T.bad
+            private fun sn(m: String, c: Int = T.acc) = Fx.snack(this, m, c)
+            private fun pi(k: String, v: Int) = p.edit().putInt(k, v).apply()
+            private fun pb(k: String, v: Boolean) = p.edit().putBoolean(k, v).apply()
+            private fun copy(s: String) { (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("SysX", s)); sn("Copied to clipboard ✓", T.ok) }
+            private fun share(s: String, subj: String) = startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, s.take(200000)).putExtra(Intent.EXTRA_SUBJECT, subj), subj))
+            private fun pg() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(6), dp(14), dp(24)) }
+            private fun wrap(c: LinearLayout): View = ScrollView(this).apply { isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER; addView(c) }
+            private fun LinearLayout.put(v: View, mb: Int = 10) = add(v, mb = mb)
+
+            override fun onCreate(b: Bundle?) {
+              super.onCreate(b); p = getSharedPreferences("sx", 0); T.acc = T.accents[p.getInt("acc", 0) % 6]; Fx.hap = p.getBoolean("hap", true); Fx.anim = p.getBoolean("anim", true)
+              window.statusBarColor = T.bg; window.navigationBarColor = T.bg
+              if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)
+              gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+                override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                  if (e1 != null && Math.abs(vx) > Math.abs(vy) * 2 && Math.abs(e2.x - e1.x) > dp(90)) go((cur + if (vx < 0) 1 else -1).coerceIn(0, 5))
+                  return false
+                }
+              })
+              val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(T.bg) }
+              val title = tv("SysX", 26f, T.tx, true, true); title.post { title.paint.shader = LinearGradient(0f, 0f, title.width.toFloat(), 0f, T.acc, T.ok, Shader.TileMode.CLAMP); title.invalidate() }
+              hdSub = tv("", 10.5f, T.dim, true); hdHp = tv("♥ --", 13f, T.ok, true, true).apply { setPadding(dp(12), dp(6), dp(12), dp(6)); background = rr(T.card2, dpf(14f), T.line, 1) }
+              val hd = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(12), dp(16), dp(6)) }
+              val tl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; val tr = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+              tr.add(Dot(this, T.ok), -2, -2, mr = 6); tr.add(tv("LIVE", 9.5f, T.ok, true, true), -2, -2, mr = 8); tr.add(title, -2, -2)
+              tl.addView(tr); tl.addView(hdSub); hd.add(tl, 0, -2, 1f); hd.addView(hdHp.also { it.press { go(0); sn("Health score ${H.health(this)}/100", hc(H.health(this))) } })
+              root.addView(hd)
+              host = FrameLayout(this); root.addView(host, LinearLayout.LayoutParams(-1, 0, 1f))
+              listOf(home(), live(), info(), bench(), auto(), tune()).forEachIndexed { i, v -> pages.add(v); host.addView(v); v.visibility = if (i == 0) View.VISIBLE else View.GONE }
+              bar = FrameLayout(this).apply { background = rr(T.card, dpf(28f), T.line, 1); elevation = dpf(10f) }
+              ind = View(this).apply { background = rr((T.acc and 0xFFFFFF) or 0x33000000, dpf(22f)) }; bar.addView(ind)
+              val items = LinearLayout(this); bar.addView(items, FrameLayout.LayoutParams(-1, -1))
+              names.forEachIndexed { i, n ->
+                val ic = tv(icons[i], 19f).apply { gravity = Gravity.CENTER }; tabIc.add(ic)
+                val it = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(0, dp(7), 0, dp(6)); addView(ic); addView(tv(n, 9.5f, T.dim, true, true).apply { gravity = Gravity.CENTER }); press { go(i) } }
+                items.add(it, 0, -2, 1f)
+              }
+              root.add(bar, ml = 12, mr = 12, mb = 10, mt = 4)
+              bar.post { val iw = bar.width / 6; ind.layoutParams = FrameLayout.LayoutParams(iw - dp(10), bar.height - dp(10)).apply { leftMargin = dp(5); topMargin = dp(5) }; ind.translationX = cur * iw.toFloat(); tabIc[cur].scaleX = 1.2f; tabIc[cur].scaleY = 1.2f }
+              setContentView(root)
+              val t0 = intent?.getStringExtra("tab")?.toIntOrNull() ?: b?.getInt("cur") ?: 0; if (t0 in 1..5) go(t0)
+              val col0 = ((pages[0] as ViewGroup).getChildAt(0) as ViewGroup); for (j in 0 until col0.childCount) col0.getChildAt(j).enter(j)
+            }
+            override fun onSaveInstanceState(o: Bundle) { super.onSaveInstanceState(o); o.putInt("cur", cur) }
+            override fun dispatchTouchEvent(e: MotionEvent): Boolean { gd.onTouchEvent(e); return super.dispatchTouchEvent(e) }
+            override fun onResume() { super.onResume(); h.post(tick) }
+            override fun onPause() { super.onPause(); h.removeCallbacks(tick) }
+
+            private fun go(i: Int) {
+              if (i == cur) return; val d = if (i > cur) 1 else -1; val o = pages[cur]; val n = pages[i]; val w = dp(56).toFloat()
+              o.animate().alpha(0f).translationX(-d * w).setDuration(150).withEndAction { o.visibility = View.GONE; o.alpha = 1f; o.translationX = 0f }.start()
+              n.visibility = View.VISIBLE; n.alpha = 0f; n.translationX = d * w; n.animate().alpha(1f).translationX(0f).setStartDelay(60).setDuration(300).setInterpolator(DecelerateInterpolator()).start()
+              val col = (n as ViewGroup).getChildAt(0) as ViewGroup; for (j in 0 until col.childCount) col.getChildAt(j).enter(j + 1)
+              tabIc.forEachIndexed { k, v -> v.animate().scaleX(if (k == i) 1.2f else 1f).scaleY(if (k == i) 1.2f else 1f).setDuration(260).setInterpolator(OvershootInterpolator(3f)).start() }
+              if (bar.width > 0) ind.animate().translationX(i * (bar.width / 6f)).setDuration(380).setInterpolator(OvershootInterpolator(1.3f)).start()
+              cur = i; refs.getOrNull(i)?.invoke()
+            }
+
+            // ───────── HOME
+            private fun tile(ic: String, nm: String, on: () -> Boolean, tap: () -> Unit): View {
+              val bg = GradientDrawable().apply { cornerRadius = dpf(18f); setColor(T.card2); setStroke(dp(1), T.line) }; var cc = T.card2
+              val s = tv("", 10f, T.dim, true)
+              val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(12), dp(14), dp(12)); background = rip(bg); addView(tv(ic, 22f)); addView(tv(nm, 13f, T.tx, false, true)); addView(s) }
+              fun ref() {
+                val o = on(); s.text = if (o) "● ON" else "○ OFF"; s.setTextColor(if (o) T.acc else T.dim); val tg = if (o) T.mix(T.card2, T.acc, .26f) else T.card2; val c0 = cc; cc = tg
+                bg.setStroke(dp(1), if (o) T.acc else T.line); ValueAnimator.ofFloat(0f, 1f).apply { duration = 300; addUpdateListener { bg.setColor(T.mix(c0, tg, it.animatedFraction)) }; start() }
+              }
+              v.press { tap(); ref() }; tileRef.add { ref() }; ref(); return v
+            }
+            private fun home(): View {
+              val col = pg(); val ring = Ring(this, "HEALTH"); val st = tv("", 17f, T.tx, false, true); val s2 = tv("", 11f, T.dim, true); val s3 = tv("", 11f, T.dim, true)
+              val hero = card(); val hr = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }; hr.add(ring, dp(104), dp(104), mr = 14)
+              hr.add(LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(st); addView(s2); addView(s3) }, 0, -2, 1f); hero.addView(hr); col.put(hero)
+              val vit = card("Vitals"); val r4 = LinearLayout(this); val rc = Ring(this, "CPU"); val rm = Ring(this, "RAM"); val rb = Ring(this, "BAT"); val rt = Ring(this, "TEMP")
+              listOf(rc, rm, rb, rt).forEach { r4.add(it, 0, -2, 1f, ml = 3, mr = 3) }; vit.addView(r4); col.put(vit)
+              val sto = card("Storage · Swap"); val bars = Bars(this); sto.addView(bars); col.put(sto)
+              val q = card("Quick actions"); val grid = listOf(
+                tile("🪟", "Overlay", { p.getBoolean("overlay", false) }) { pb("overlay", !p.getBoolean("overlay", false)); if (!Settings.canDrawOverlays(this)) { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))); sn("Grant overlay permission", T.warn) }; Core.sync(this) },
+                tile("🤖", "Engine", { p.getBoolean("engine", false) }) { pb("engine", !p.getBoolean("engine", false)); Core.sync(this); sn(if (p.getBoolean("engine", false)) "Automation engine online ⚡" else "Engine stopped") },
+                tile("🔦", "Torch", { torch }) { try { val cm = getSystemService(CAMERA_SERVICE) as CameraManager; torch = !torch; cm.setTorchMode(cm.cameraIdList[0], torch) } catch (e: Throwable) { torch = false; sn("Torch unavailable", T.bad) } },
+                tile("⏺", "Record", { H.rec != null }) { if (H.rec == null) { H.startRec(); sn("Recording samples…", T.bad) } else { H.stopRec(); sn("Recording discarded", T.warn) } },
+                tile("📳", "Haptics", { Fx.hap }) { Fx.hap = !Fx.hap; pb("hap", Fx.hap) },
+                tile("📋", "Copy stats", { false }) { copy(S.live(this)) })
+              for (i in 0 until 6 step 2) { val r = LinearLayout(this); r.add(grid[i], 0, -2, 1f, mr = 5); r.add(grid[i + 1], 0, -2, 1f, ml = 5); q.add(r, mb = 10) }
+              col.put(q)
+              val gc = card("Trends"); val sc = Spark(this, "CPU load", "%", T.acc).apply { src = H.cpu.v; fixMax = 100f }; val sp = Spark(this, "Power", " W", T.warn).apply { src = H.pw.v }
+              gc.add(sc, -1, dp(84)); gc.add(sp, -1, dp(84), mt = 8); col.put(gc)
+              refs.add {
+                val hp = H.health(this); ring.set(hp / 100f, "$hp", hc(hp)); st.text = if (hp >= 85) "Excellent shape" else if (hp >= 70) "Healthy" else if (hp >= 50) "Under load" else "Needs attention"
+                s2.text = "⏱ up ${S.up()}"; s3.text = "pk ${"%.0f".format(H.tmp.pk)}°C · ↓${"%.0f".format(H.dn.pk)} KB/s"
+                val c = H.cpu.last(); val m = H.ram.last(); val b = S.batPct(this); val t = H.tmp.last()
+                rc.set(c / 100, "%.0f".format(c), T.heat(c / 100)); rm.set(m / 100, "%.0f".format(m), T.heat(m / 100)); rb.set(b / 100f, "$b", T.heat(1f - b / 100f)); rt.set(t / 60, "%.0f°".format(t), T.heat((t - 30) / 20))
+                val (fr, to) = S.stor(); val mi = S.mi(); val sw = mi["SwapTotal"] ?: 0L; val su = sw - (mi["SwapFree"] ?: 0L)
+                bars.set(listOf(1f - fr.toFloat() / to.coerceAtLeast(1), if (sw > 0) su.toFloat() / sw else 0f), listOf("STO ${S.gb(fr)}G free", "SWAP ${su / 1024}/${sw / 1024}M"))
+                sc.invalidate(); sp.invalidate(); tileRef.forEach { it() }
+              }
+              return wrap(col)
+            }
+
+            // ───────── LIVE
+            private fun live(): View {
+              val col = pg(); val ctl = LinearLayout(this); val fz = btn("❄ Freeze"); val rc = btn("⏺ Record"); val ex = btn("📤 Export")
+              fz.press { H.frozen = !H.frozen; fz.text = if (H.frozen) "▶ Resume" else "❄ Freeze"; sn(if (H.frozen) "Graphs frozen" else "Live again", if (H.frozen) T.warn else T.ok) }
+              rc.press { if (H.rec == null) { H.startRec(); rc.text = "⏹ Stop"; sn("Recording…", T.bad) } else { rc.text = "⏺ Record"; sn("Saved ${H.recN} samples — tap Export", T.ok); recDone = H.stopRec() } }
+              ex.press { val r = recDone; if (r == null) sn("Record something first", T.warn) else share(r, "SysX recording") }
+              ctl.add(fz, 0, -2, 1f, mr = 4); ctl.add(rc, 0, -2, 1f, ml = 4, mr = 4); ctl.add(ex, 0, -2, 1f, ml = 4); col.put(ctl)
+              val defs = listOf(Triple("CPU load", "%", H.cpu), Triple("RAM used", "%", H.ram), Triple("Hottest sensor", "°C", H.tmp), Triple("Power draw", " W", H.pw), Triple("Download", " KB/s", H.dn), Triple("Upload", " KB/s", H.upl))
+              val sps = defs.mapIndexed { i, d -> Spark(this, d.first, d.second, T.accents[i % 6]).apply { src = d.third.v; if (i < 2) fixMax = 100f } }
+              sps.forEach { col.put(card().apply { add(it, -1, dp(92)) }) }
+              val cc = card("Cores · frequency"); val cb = Bars(this); cc.addView(cb); col.put(cc)
+              val tc = card("Thermal zones"); val chips = LinkedHashMap<String, TextView>()
+              S.thermal().filter { it.second in 1.0..150.0 }.distinctBy { it.first }.sortedByDescending { it.second }.take(14).chunked(2).forEach { pr ->
+                val r = LinearLayout(this); pr.forEach { z -> val t = tv("", 11f, T.tx, true).apply { setPadding(dp(10), dp(7), dp(10), dp(7)); background = rr(T.card2, dpf(12f)) }; chips[z.first] = t; r.add(t, 0, -2, 1f, mr = 4, ml = 4) }
+                tc.add(r, mb = 6)
+              }
+              col.put(tc)
+              refs.add {
+                sps.forEach { it.invalidate() }; val f = S.freqs(); val m = S.maxf()
+                cb.set(f.indices.map { if (m[it] > 0) f[it].toFloat() / m[it] else 0f }, f.indices.map { "CPU$it ${f[it]}MHz" })
+                val z = S.thermal().filter { it.second in 1.0..150.0 }.groupBy { it.first }.mapValues { e -> e.value.maxOf { x -> x.second } }
+                chips.forEach { (k, v) -> val t = z[k] ?: 0.0; v.text = "${k.take(11)}  ${"%.1f".format(t)}°"; v.setTextColor(T.heat(((t - 30) / 20).toFloat())) }
+                rc.text = if (H.rec != null) "⏹ ${H.recN}" else "⏺ Record"
+              }
+              return wrap(col)
+            }
+            private var recDone: String? = null
+
+            // ───────── INFO
+            private fun kv(ls: List<String>): CharSequence {
+              val sb = SpannableStringBuilder()
+              for (l in ls) { val s = sb.length; sb.append(l).append('\n'); if (l.length > 17 && !l.startsWith(" ")) sb.setSpan(ForegroundColorSpan(T.dim), s, s + 17, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
+              return sb
+            }
+            private fun secCard(n: String, ls: List<String>, open: Boolean): View {
+              val c = card(); val ch = tv(if (open) "▾" else "▸", 15f, T.acc)
+              val body = TextView(this).apply { typeface = Typeface.MONOSPACE; textSize = 11f; setTextColor(T.tx); setTextIsSelectable(true); text = kv(ls); visibility = if (open) View.VISIBLE else View.GONE; setPadding(0, dp(8), 0, 0) }
+              val hd = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(2), 0, dp(2)); add(tv(n, 13f, T.tx, true, true), 0, -2, 1f); add(tv("${ls.size}", 11f, T.dim, true), -2, -2, mr = 10); addView(ch) }
+              hd.press { TransitionManager.beginDelayedTransition((c.parent as? ViewGroup) ?: c); val o = body.visibility != View.VISIBLE; body.visibility = if (o) View.VISIBLE else View.GONE; ch.text = if (o) "▾" else "▸" }
+              c.setOnLongClickListener { Fx.heavy(c); copy(n + "\n" + ls.joinToString("\n")); true }
+              c.addView(hd); c.addView(body); return c
+            }
+            private fun info(): View {
+              val col = pg(); val secs = ArrayList<Pair<String, List<String>>>(); var all = ""; val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+              val q = field("🔍  Filter specs…", "").apply { setSingleLine() }; val sh = Shimmer(this).apply { run(true) }
+              fun render(f: String) {
+                box.removeAllViews(); var i = 0
+                for ((n, ls) in secs) { val m = if (f.isBlank()) ls else ls.filter { it.contains(f, true) || n.contains(f, true) }; if (m.isEmpty()) continue; box.add(secCard(n, m, f.isNotBlank() || i == 0), mb = 10); i++ }
+                for (j in 0 until box.childCount) box.getChildAt(j).enter(j)
+              }
+              q.addTextChangedListener(object : TextWatcher { override fun afterTextChanged(s: Editable?) { render(s.toString().trim()) }; override fun beforeTextChanged(a: CharSequence?, b: Int, c: Int, d: Int) {}; override fun onTextChanged(a: CharSequence?, b: Int, c: Int, d: Int) {} })
+              col.put(q, 8); val br = LinearLayout(this); br.add(btn("📋 Copy all") { if (all.isNotEmpty()) copy(all) }, 0, -2, 1f, mr = 4); br.add(btn("📤 Share report") { if (all.isNotEmpty()) share(all, "SysX device report") }, 0, -2, 1f, ml = 4)
+              col.put(br, 8); col.add(sh, -1, dp(3), mb = 10); col.addView(box)
+              Thread {
+                val s = Info.build(this); var nm = ""; var cl = ArrayList<String>(); val out = ArrayList<Pair<String, List<String>>>()
+                for (l in s.lines()) { if (l.startsWith("━━ ")) { if (nm.isNotEmpty()) out.add(Pair(nm, cl)); nm = l.removePrefix("━━ ").removeSuffix(" ━━"); cl = ArrayList() } else if (l.isNotBlank()) cl.add(l) }
+                if (nm.isNotEmpty()) out.add(Pair(nm, cl))
+                runOnUiThread { secs.addAll(out); all = s; sh.run(false); render("") }
+              }.start()
+              refs.add {}; return wrap(col)
+            }
+
+            // ───────── BENCH
+            private fun bench(): View {
+              val col = pg(); var run = false; val hist = ArrayList<Float>(); try { val a = JSONArray(p.getString("bh", "[]")); for (i in 0 until a.length()) hist.add(a.getDouble(i).toFloat()) } catch (e: Throwable) {}
+              val ring = Ring(this, "SCORE"); val msg = tv("Stress CPU · RAM · AES · GPU · storage", 12f, T.dim, true); val sh = Shimmer(this); val go = btn("▶  Run benchmark", true)
+              val hero = card(); val hr = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }; hr.add(ring, dp(112), dp(112), mr = 14)
+              val tx = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; add(msg, mb = 10); addView(go) }; hr.add(tx, 0, -2, 1f); hero.addView(hr); hero.add(sh, -1, dp(3), mt = 12); col.put(hero)
+              val res = card("Results"); res.visibility = View.GONE; col.put(res)
+              val hc = card("History"); val sp = Spark(this, "score", "", T.ok).apply { src = hist; fit = true }; val hs = tv("", 11f, T.dim, true); hc.add(sp, -1, dp(90)); hc.add(hs, mt = 6); col.put(hc)
+              fun setRing() { val b = hist.maxOrNull() ?: 0f; val l = hist.lastOrNull() ?: 0f; ring.set(if (b > 0) l / b else 0f, if (l > 0) "${l.toInt()}" else "–", T.acc); hs.text = if (hist.isEmpty()) "No runs yet" else "runs ${hist.size} · best ${b.toInt()} · last ${l.toInt()}"; sp.invalidate() }
+              setRing(); var lastS = ""
+              fun showRes(s: String) {
+                lastS = s; while (res.childCount > 1) res.removeViewAt(1); var n = 0
+                for (l in s.lines()) { if (l.contains("Warming")) { msg.text = "Warming up…"; continue }; if (l.length > 18 && !l.startsWith("★") && !l.startsWith("(")) { n++
+                  val r = LinearLayout(this).apply { setPadding(0, dp(5), 0, dp(5)); add(tv(l.take(18).trim(), 12f, T.dim, true), 0, -2, 1f); addView(tv(l.drop(18).trim(), 12.5f, T.tx, true, true)) }; res.addView(r) } }
+                if (n > 0) { msg.text = "Testing… $n/11"; ring.set(n / 11f, "$n/11", T.acc); res.getChildAt(res.childCount - 1).enter(0) }
+              }
+              go.press {
+                if (run) return@press; run = true; go.text = "Running…"; go.alpha = .6f; sh.run(true); res.visibility = View.VISIBLE; while (res.childCount > 1) res.removeViewAt(1); msg.text = "Warming up…"; window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                Thread {
+                  try { Bench.run(this) { s -> runOnUiThread { showRes(s) } } } finally {
+                    runOnUiThread {
+                      run = false; go.text = "▶  Run again"; go.alpha = 1f; sh.run(false); window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                      val sc = Regex("TOTAL SCORE (\\d+)").find(lastS)?.groupValues?.get(1)?.toFloatOrNull()
+                      if (sc != null) { val pb0 = hist.maxOrNull() ?: 0f; hist.add(sc); while (hist.size > 30) hist.removeAt(0); p.edit().putString("bh", JSONArray(hist.map { it.toDouble() }).toString()).apply(); setRing()
+                        msg.text = if (sc > pb0) "🏆 New personal best!" else "${(sc * 100 / pb0).toInt()}% of your best"; Fx.heavy(go); sn("Score ${sc.toInt()}", T.ok) } else msg.text = "Interrupted"
+                    }
+                  }
+                }.start()
+              }
+              refs.add {}; return wrap(col)
+            }
+
+            // ───────── AUTO
+            private fun rules(): JSONArray = try { JSONArray(p.getString("rules", "[]")) } catch (e: Throwable) { JSONArray() }
+            private fun saveRules(a: JSONArray) { p.edit().putString("rules", a.toString()).apply(); json.setText(a.toString(2)); renderRules() }
+            private fun runRule(o: JSONObject) {
+              val acts = o.optJSONArray("do") ?: return; Auto.log("▶ test ${o.optString("name")}")
+              Thread { for (j in 0 until acts.length()) try { Auto.act(this, acts.getJSONObject(j)) } catch (e: Throwable) { Auto.log("  ✖ ${e.message}") } }.start(); sn("Ran “${o.optString("name")}”", T.ok)
+            }
+            private fun renderRules() {
+              rbox.removeAllViews(); val a = rules()
+              if (a.length() == 0) { rbox.addView(tv("No rules yet — forge one with AI or add a template ↓", 12f, T.dim)); return }
+              for (i in 0 until a.length()) {
+                val o = a.optJSONObject(i) ?: continue; val w = o.optJSONObject("when"); val nc = (w?.optJSONArray("all")?.length() ?: 0) + (w?.optJSONArray("any")?.length() ?: 0)
+                val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(8), 0, dp(8)); alpha = if (o.optBoolean("enabled", true)) 1f else .5f }
+                row.add(LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(tv(o.optString("name", "rule $i"), 14f, T.tx, false, true)); addView(tv("$nc cond · ${o.optJSONArray("do")?.length() ?: 0} act · cd ${o.optLong("cooldown", 300)}s", 11f, T.dim, true)) }, 0, -2, 1f)
+                row.add(tv("▶", 17f, T.ok).apply { setPadding(dp(10), dp(6), dp(10), dp(6)); press { runRule(o) } }, -2, -2)
+                row.add(tv("🗑", 15f).apply { setPadding(dp(8), dp(6), dp(12), dp(6)); press { val x = rules(); x.remove(i); saveRules(x); sn("Rule removed", T.bad) } }, -2, -2)
+                row.add(Tog(this, o.optBoolean("enabled", true)) { v -> val x = rules(); x.getJSONObject(i).put("enabled", v); p.edit().putString("rules", x.toString()).apply(); json.setText(x.toString(2)); row.animate().alpha(if (v) 1f else .5f).setDuration(200).start() }, -2, -2)
+                rbox.addView(row); row.enter(i)
+              }
+            }
+            private fun addRule(o: JSONObject) { val a = rules(); a.put(o); saveRules(a); sn("Rule added: ${o.optString("name")}", T.ok) }
+            private fun colorLog(): CharSequence {
+              val sb = SpannableStringBuilder()
+              for (l in Auto.logText().lines()) { val s = sb.length; sb.append(l).append('\n'); sb.setSpan(ForegroundColorSpan(if (l.contains("▶")) T.ok else if (l.contains("✖") || l.contains("err")) T.bad else T.dim), s, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
+              return sb
+            }
+            private fun auto(): View {
+              val col = pg(); val key = field("Anthropic API key (stored only on this device)", p.getString("key", "")!!).apply { setSingleLine(); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+              val ask = field("Describe a rule or widget in plain English…", "").apply { minLines = 2; gravity = Gravity.TOP }; val sh = Shimmer(this); val st = tv("", 11.5f, T.dim, true)
+              val forge = card("AI forge ✨"); forge.add(key, mb = 8); forge.add(ask, mb = 8)
+              val sug = listOf("Warn me when my phone gets hot", "Mute media after 11pm", "Beep when charged above 95%", "Alert when storage under 5GB", "Warn on heavy mobile data")
+              forge.add(chips(sug.map { it.take(18) + "…" }, -1) { ask.setText(sug[it]) }, mb = 10)
+              val b1 = btn("✨ Rule", true); val b2 = btn("🧩 Widget text"); val br = LinearLayout(this); br.add(b1, 0, -2, 1f, mr = 4); br.add(b2, 0, -2, 1f, ml = 4); forge.add(br)
+              forge.add(sh, -1, dp(3), mt = 10); forge.add(st, mt = 6); col.put(forge)
+              fun ai(isRule: Boolean) {
+                val k = key.text.toString().trim(); if (k.isEmpty() || ask.text.isBlank()) { sn("Need API key + request", T.warn); return }
+                p.edit().putString("key", k).apply(); sh.run(true); st.text = "Thinking…"
+                Thread {
+                  val r = try { Result.success(if (isRule) Auto.genRule(k, ask.text.toString()) else Auto.genWidget(k, ask.text.toString())) } catch (e: Throwable) { Result.failure<Any>(e) }
+                  runOnUiThread { sh.run(false); r.onSuccess { o -> if (o is JSONObject) { addRule(o); st.text = "Rule forged ✓" } else { wt.setText(o.toString()); st.text = "Template ready → Tune › Widget › Apply"; sn("Widget text generated", T.ok) } }.onFailure { st.text = "Error: ${it.message}"; sn("AI request failed", T.bad) } }
+                }.start()
+              }
+              b1.press { ai(true) }; b2.press { ai(false) }
+              val en = card("Engine"); en.addView(togRow("Run automations in background", "Evaluates every rule every 5 s via a foreground service", p.getBoolean("engine", false)) { pb("engine", it); Core.sync(this); sn(if (it) "Engine online ⚡" else "Engine stopped") }); col.put(en)
+              val tc = card("Template gallery"); val tr = LinearLayout(this)
+              val tpl = listOf(
+                Triple("🔋 Low battery nag", "Notify + buzz under 20%", """{"name":"Low battery","enabled":true,"cooldown":900,"when":{"all":[{"t":"battery_lt","v":20},{"t":"charging","v":false}]},"do":[{"a":"notify","v":"🔋 {battery}% — plug in"},{"a":"vibrate","v":"300"}]}"""),
+                Triple("🔥 Hot phone", "Speak + notify above 45°C", """{"name":"Hot phone","enabled":true,"cooldown":600,"when":{"all":[{"t":"thermal_gt","v":45}]},"do":[{"a":"notify","v":"🔥 {thermal}°C — let it cool"},{"a":"speak","v":"Phone is getting hot"}]}"""),
+                Triple("✅ Charged", "Beep at 95% on charger", """{"name":"Charged","enabled":true,"cooldown":1800,"when":{"all":[{"t":"battery_gt","v":95},{"t":"charging","v":true}]},"do":[{"a":"beep","v":"400"},{"a":"notify","v":"Charged {battery}% — unplug"}]}"""),
+                Triple("🧠 RAM pressure", "Toast when under 500MB free", """{"name":"RAM pressure","enabled":true,"cooldown":300,"when":{"all":[{"t":"ram_free_lt","v":500}]},"do":[{"a":"toast","v":"RAM low: {ramfree} MB free"},{"a":"haptic","v":"1"}]}"""),
+                Triple("🌙 Night hush", "Media volume 0 after 23:00", """{"name":"Night hush","enabled":true,"cooldown":3600,"when":{"all":[{"t":"time_after","v":"23:00"}]},"do":[{"a":"volume","v":"0"}]}"""),
+                Triple("📶 Data hog", "Alert >5MB/s on mobile", """{"name":"Data hog","enabled":true,"cooldown":600,"when":{"all":[{"t":"net_down_gt","v":5000},{"t":"wifi","v":false}]},"do":[{"a":"notify","v":"Heavy mobile data ↓{down} KB/s"}]}"""),
+                Triple("⚡ Power spike", "Haptic above 8W draw", """{"name":"Power spike","enabled":true,"cooldown":120,"when":{"all":[{"t":"power_gt","v":8}]},"do":[{"a":"haptic","v":"1"},{"a":"log","v":"spike {power}W"}]}"""),
+                Triple("💾 Storage low", "Notify under 5GB free", """{"name":"Storage low","enabled":true,"cooldown":7200,"when":{"all":[{"t":"storage_free_lt","v":5}]},"do":[{"a":"notify","v":"Only {storfree} GB free"}]}"""))
+              tpl.forEach { t -> val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(10), dp(12), dp(10)); background = rip(rr(T.card2, dpf(16f), T.line, 1)); addView(tv(t.first, 13f, T.tx, false, true)); addView(tv(t.second, 10.5f, T.dim).apply { setPadding(0, dp(2), 0, dp(6)) }); addView(tv("＋ Add", 12f, T.acc, true, true)); press { addRule(JSONObject(t.third)) } }; tr.add(c, dp(170), -2, mr = 8) }
+              tc.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(tr) }); col.put(tc)
+              val rl = card("Rules"); rbox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; rl.addView(rbox)
+              json = field("Rules JSON", JSONArray(rules().toString()).toString(2)).apply { typeface = Typeface.MONOSPACE; minLines = 6; gravity = Gravity.TOP; visibility = View.GONE }
+              val adv = tv("▸ Advanced · edit JSON", 12f, T.acc, true, true).apply { setPadding(0, dp(10), 0, dp(4)) }
+              val sv = btn("💾 Save JSON") { try { saveRules(JSONArray(json.text.toString())); sn("Saved", T.ok) } catch (e: Throwable) { sn("Invalid JSON", T.bad) } }; sv.visibility = View.GONE
+              adv.press { TransitionManager.beginDelayedTransition(rl); val o = json.visibility != View.VISIBLE; json.visibility = if (o) View.VISIBLE else View.GONE; sv.visibility = json.visibility; adv.text = if (o) "▾ Advanced · edit JSON" else "▸ Advanced · edit JSON" }
+              rl.addView(adv); rl.add(json, mb = 8); rl.addView(sv); col.put(rl); renderRules()
+              val lc = card("Rule log"); lg = tv("", 11f, T.dim, true); lc.addView(lg); col.put(lc)
+              refs.add { lg.text = colorLog() }; return wrap(col)
+            }
+
+            // ───────── TUNE
+            private fun mchips(names: List<String>, key: String, def: Int): View {
+              var m = p.getInt(key, def); val vs = ArrayList<TextView>(); val rows = listOf(LinearLayout(this), LinearLayout(this))
+              fun paint() = vs.forEachIndexed { i, v -> val o = ((m shr i) and 1) == 1; v.background = rip(rr(if (o) T.acc else T.card2, dpf(14f))); v.setTextColor(if (o) T.bg else T.tx) }
+              names.forEachIndexed { i, n -> val v = tv(n, 11.5f, T.tx, false, true).apply { gravity = Gravity.CENTER; setPadding(0, dp(9), 0, dp(9)); press { m = m xor (1 shl i); pi(key, m); paint() } }; vs.add(v); rows[i / 4].add(v, 0, -2, 1f, ml = 3, mr = 3) }
+              paint(); return LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; add(rows[0], mb = 6); addView(rows[1]) }
+            }
+            private fun tune(): View {
+              val col = pg(); val ap = card("Appearance")
+              ap.addView(tv("Accent colour", 12f, T.dim)); ap.add(swatch(T.accents, p.getInt("acc", 0)) { pi("acc", it); recreate() }, -2, -2, mt = 8, mb = 6)
+              ap.addView(togRow("Haptic feedback", "Tactile ticks on taps, toggles, snaps", Fx.hap) { Fx.hap = it; pb("hap", it) })
+              ap.addView(togRow("Animations", "Springs, fades, count-ups, shimmer", Fx.anim) { Fx.anim = it; pb("anim", it) })
+              val rates = listOf(500, 1000, 2000, 5000); ap.add(tv("Refresh rate", 12f, T.dim), mt = 6, mb = 6); ap.add(chips(listOf("0.5 s", "1 s", "2 s", "5 s"), rates.indexOf(p.getInt("rate", 1000)).coerceAtLeast(0)) { pi("rate", rates[it]); sn("Refresh ${rates[it] / 1000.0}s") }); col.put(ap)
+              val ov = card("Floating overlay")
+              ov.addView(togRow("Show overlay", "Drag · tap cycles mode · long-press locks", p.getBoolean("overlay", false)) { pb("overlay", it); if (it && !Settings.canDrawOverlays(this)) { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))); sn("Grant overlay permission", T.warn) }; Core.sync(this) })
+              ov.add(tv("Mode", 12f, T.dim), mt = 4, mb = 6); ov.add(chips(listOf("Compact", "Detail", "Graph"), p.getInt("ov_mode", 1)) { pi("ov_mode", it) }, mb = 8)
+              ov.add(tv("Colour", 12f, T.dim), mb = 6); ov.add(swatch(T.accents, p.getInt("ov_color", 1)) { pi("ov_color", it) }, -2, -2, mb = 6)
+              ov.add(tv("Metrics", 12f, T.dim), mt = 4, mb = 6); ov.add(mchips(listOf("Time", "CPU", "RAM", "Swap", "Batt", "Temp", "Net", "Disk"), "ov_mask", 255), mb = 6)
+              ov.addView(sld("Opacity", 15, 100, p.getInt("ov_alpha", 70), { "$it%" }) { pi("ov_alpha", it) }); ov.addView(sld("Text size", 6, 14, p.getInt("ov_size", 9), { "${it}sp" }) { pi("ov_size", it) }); ov.addView(sld("Corner radius", 0, 28, p.getInt("ov_corner", 14), { "${it}dp" }) { pi("ov_corner", it) })
+              ov.addView(togRow("Snap to edge", "Springs to the nearest side on release", p.getBoolean("ov_snap", true)) { pb("ov_snap", it) }); ov.addView(togRow("Lock position", "Same as long-press on the overlay", p.getBoolean("ov_lock", false)) { pb("ov_lock", it) })
+              ov.addView(togRow("Click-through", "Touches pass through to apps below", p.getBoolean("ov_through", false)) { pb("ov_through", it) }); ov.addView(togRow("Heat alert", "Overlay turns red above threshold", p.getBoolean("ov_alert", true)) { pb("ov_alert", it) })
+              ov.addView(sld("Heat threshold", 35, 65, p.getInt("ov_thr", 45), { "$it°C" }) { pi("ov_thr", it) })
+              ov.add(btn("↺ Reset position") { p.edit().remove("ov_x").remove("ov_y").apply(); sn("Overlay position reset", T.ok) }, mt = 8); col.put(ov)
+              val wc = card("Home-screen widget"); val styles = listOf("Glass", "Neon", "Forest")
+              wc.add(tv("Style", 12f, T.dim), mb = 6); wc.add(chips(styles, p.getInt("w_style", 0)) { pi("w_style", it); StatsWidget.update(this) }, mb = 8)
+              wc.add(tv("Accent", 12f, T.dim), mb = 6); wc.add(swatch(T.accents, p.getInt("w_acc", 0)) { pi("w_acc", it); StatsWidget.update(this) }, -2, -2, mb = 4)
+              wc.addView(sld("Text size", 9, 18, p.getInt("w_size", 12), { "${it}sp" }) { pi("w_size", it); StatsWidget.update(this) })
+              wt = field("Widget template", p.getString("wtxt", S.DEF_W)!!).apply { minLines = 3; gravity = Gravity.TOP; typeface = Typeface.MONOSPACE }
+              val pre = listOf("Minimal" to "{battery}% · {temp}°C\n{time}", "Terminal" to "{bcpu} {cpupct}%\n{bram} {rampct}%\n{bbat} {battery}%\n🌡 {thermal}°C  ⚡{power}W", "Dashboard" to S.DEF_W, "Date" to "{date}\n{time} · 🔋{battery}%\n↑ {uptime}")
+              wc.add(tv("Presets", 12f, T.dim), mt = 6, mb = 6); wc.add(chips(pre.map { it.first }, -1) { wt.setText(pre[it].second) }, mb = 8); wc.add(wt, mb = 6)
+              wc.add(tv("{battery} {temp} {ramfree} {ramused} {rampct} {cpu} {cpupct} {thermal} {power} {down} {up} {net} {time} {date} {uptime} {storfree} {bcpu} {bram} {bbat}", 10f, T.dim, true), mb = 8)
+              wc.add(btn("✔ Apply to widget", true) { p.edit().putString("wtxt", wt.text.toString()).apply(); StatsWidget.update(this); sn("Widget updated", T.ok) }); col.put(wc)
+              val dc = card("Data"); var armed = false; val rs = btn("⚠ Reset all settings")
+              dc.add(btn("🗑 Clear benchmark history") { p.edit().remove("bh").apply(); sn("History cleared — reopen Bench", T.warn) }, mb = 8)
+              rs.press { if (!armed) { armed = true; rs.text = "Tap again to confirm"; rs.setTextColor(T.bad); h.postDelayed({ armed = false; rs.text = "⚠ Reset all settings"; rs.setTextColor(T.tx) }, 3000) } else { val k = p.getString("key", ""); p.edit().clear().putString("key", k).apply(); Core.sync(this); recreate() } }
+              dc.addView(rs); col.put(dc)
+              col.addView(tv("SysX · system monitor + automation", 10.5f, T.dim, true).apply { gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
+              refs.add {}; return wrap(col)
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/UI.kt <<'EOF'
+          package dev.sysx
+
+          import android.animation.*
+          import android.app.Activity
+          import android.content.Context
+          import android.content.res.ColorStateList
+          import android.graphics.*
+          import android.graphics.drawable.*
+          import android.view.*
+          import android.view.animation.*
+          import android.widget.*
+
+          object T {
+            var acc = 0xFF4FC3F7.toInt()
+            val bg = 0xFF070B10.toInt(); val card = 0xFF0F1620.toInt(); val card2 = 0xFF172334.toInt(); val line = 0x24FFFFFF
+            val tx = 0xFFE6EEF5.toInt(); val dim = 0xFF7C8FA3.toInt()
+            val ok = 0xFF5CFFA0.toInt(); val warn = 0xFFFFC857.toInt(); val bad = 0xFFFF5C7A.toInt()
+            val accents = listOf(0xFF4FC3F7.toInt(), 0xFF5CFFA0.toInt(), 0xFFFF6AD5.toInt(), 0xFFFFC857.toInt(), 0xFFB388FF.toInt(), 0xFFFF7A59.toInt())
+            fun heat(f: Float) = if (f < .6f) ok else if (f < .85f) warn else bad
+            fun mix(a: Int, b: Int, t: Float) = ArgbEvaluator().evaluate(t.coerceIn(0f, 1f), a, b) as Int
+          }
+
+          object Fx {
+            var hap = true; var anim = true
+            fun tick(v: View) { if (hap) v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
+            fun heavy(v: View) { if (hap) v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }
+            fun snack(a: Activity, msg: String, col: Int = T.acc) {
+              val root = a.findViewById<ViewGroup>(android.R.id.content); val d = a.resources.displayMetrics.density
+              val tv = TextView(a).apply {
+                text = msg; setTextColor(T.tx); textSize = 13f; setPadding((18 * d).toInt(), (11 * d).toInt(), (18 * d).toInt(), (11 * d).toInt())
+                background = rr(T.card2, 24 * d, col, (1.5f * d).toInt()); elevation = 14 * d; alpha = 0f; translationY = 40 * d
+              }
+              root.addView(tv, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = (98 * d).toInt() })
+              tick(tv)
+              tv.animate().alpha(1f).translationY(0f).setDuration(300).setInterpolator(OvershootInterpolator(2f)).withEndAction {
+                tv.animate().alpha(0f).translationY(16 * d).setStartDelay(1600).setDuration(260).setInterpolator(AccelerateInterpolator()).withEndAction { root.removeView(tv) }.start()
+              }.start()
+            }
+          }
+
+          fun Context.dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+          fun Context.dpf(v: Float) = v * resources.displayMetrics.density
+          fun View.dp(v: Int) = context.dp(v)
+          fun View.dpf(v: Float) = context.dpf(v)
+          fun rr(c: Int, r: Float, s: Int = 0, sw: Int = 0) = GradientDrawable().apply { setColor(c); cornerRadius = r; if (sw > 0) setStroke(sw, s) }
+          fun rip(bg: Drawable, c: Int = 0x33FFFFFF) = RippleDrawable(ColorStateList.valueOf(c), bg, null)
+
+          fun View.press(act: () -> Unit) {
+            isClickable = true
+            setOnTouchListener { v, e ->
+              when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> v.animate().scaleX(.94f).scaleY(.94f).setStartDelay(0).setDuration(80).setInterpolator(DecelerateInterpolator()).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate().scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(300).setInterpolator(OvershootInterpolator(3.5f)).start()
+              }
+              false
+            }
+            setOnClickListener { Fx.tick(it); act() }
+          }
+
+          fun View.enter(i: Int) {
+            if (!Fx.anim) return
+            alpha = 0f; translationY = dpf(18f)
+            animate().alpha(1f).translationY(0f).setStartDelay(i * 45L).setDuration(380).setInterpolator(DecelerateInterpolator(1.8f)).start()
+          }
+
+          fun LinearLayout.add(v: View, w: Int = -1, h: Int = -2, wg: Float = 0f, mt: Int = 0, ml: Int = 0, mr: Int = 0, mb: Int = 0) =
+            addView(v, LinearLayout.LayoutParams(w, h, wg).apply { setMargins(dp(ml), dp(mt), dp(mr), dp(mb)) })
+
+          fun Context.tv(t: String, sz: Float = 13f, col: Int = T.tx, mono: Boolean = false, bold: Boolean = false) = TextView(this).apply {
+            text = t; textSize = sz; setTextColor(col); typeface = if (mono) Typeface.MONOSPACE else Typeface.DEFAULT; if (bold) setTypeface(typeface, Typeface.BOLD)
+          }
+
+          fun Context.card(title: String? = null): LinearLayout {
+            val c = this
+            return LinearLayout(c).apply {
+              orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(12), dp(14), dp(14)); background = rr(T.card, dpf(20f), T.line, 1)
+              if (title != null) {
+                val r = LinearLayout(c).apply { gravity = Gravity.CENTER_VERTICAL }
+                r.add(View(c).apply { background = rr(T.acc, dpf(2f)) }, dp(3), dp(12), mr = 8)
+                r.add(c.tv(title.uppercase(), 11f, T.dim, true, true), -2, -2)
+                add(r, mb = 8)
+              }
+            }
+          }
+
+          fun Context.btn(t: String, primary: Boolean = false, act: () -> Unit = {}): TextView {
+            val c = this
+            return TextView(c).apply {
+              text = t; textSize = 13f; gravity = Gravity.CENTER; setTypeface(Typeface.DEFAULT, Typeface.BOLD); setTextColor(if (primary) T.bg else T.tx)
+              setPadding(dp(14), dp(12), dp(14), dp(12))
+              background = rip(if (primary) rr(T.acc, dpf(14f)) else rr(T.card2, dpf(14f), T.line, 1)); press(act)
+            }
+          }
+
+          fun Context.field(hint: String, v: String): EditText = EditText(this).apply {
+            this.hint = hint; setText(v); setTextColor(T.tx); setHintTextColor(T.dim); textSize = 12.5f
+            setPadding(dp(14), dp(11), dp(14), dp(11)); background = rr(0xFF0B121B.toInt(), dpf(14f), T.line, 1)
+          }
+
+          class Tog(c: Context, init0: Boolean, val cb: (Boolean) -> Unit) : View(c) {
+            var on = init0; private var k = if (init0) 1f else 0f; private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+            init { setOnClickListener { set(!on, true) } }
+            fun set(v: Boolean, fire: Boolean) {
+              on = v
+              ValueAnimator.ofFloat(k, if (v) 1f else 0f).apply { duration = 280; interpolator = OvershootInterpolator(1.6f); addUpdateListener { k = it.animatedValue as Float; invalidate() }; start() }
+              if (fire) { Fx.tick(this); cb(v) }
+            }
+            override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(dp(48), dp(28))
+            override fun onDraw(cv: Canvas) {
+              val kk = k.coerceIn(0f, 1f); val hh = height.toFloat(); p.color = T.mix(0xFF2A3748.toInt(), T.acc, kk)
+              cv.drawRoundRect(0f, 0f, width.toFloat(), hh, hh / 2, hh / 2, p)
+              p.color = Color.WHITE; cv.drawCircle(hh / 2 + (width - hh) * k, hh / 2, hh / 2 - dpf(3.5f), p)
+            }
+          }
+
+          fun Context.togRow(t: String, s: String, on: Boolean, cb: (Boolean) -> Unit): LinearLayout {
+            val c = this; val tg = Tog(c, on, cb)
+            val tx = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL; addView(c.tv(t, 14f)); if (s.isNotEmpty()) addView(c.tv(s, 11f, T.dim)) }
+            return LinearLayout(c).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(7), 0, dp(7)); add(tx, 0, -2, 1f); addView(tg); setOnClickListener { tg.performClick() } }
+          }
+
+          fun Context.sld(t: String, lo: Int, hi: Int, cur: Int, fmt: (Int) -> String, cb: (Int) -> Unit): LinearLayout {
+            val c = this; val lab = c.tv(fmt(cur), 12f, T.acc, true)
+            val sb = SeekBar(c).apply {
+              max = hi - lo; progress = cur - lo
+              progressTintList = ColorStateList.valueOf(T.acc); thumbTintList = ColorStateList.valueOf(T.acc); progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
+              setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) { lab.text = fmt(v + lo); if (u) cb(v + lo) }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) { s?.let { Fx.tick(it) } }
+              })
+            }
+            val r = LinearLayout(c); r.add(c.tv(t, 13f), 0, -2, 1f); r.addView(lab)
+            return LinearLayout(c).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(6), 0, dp(2)); addView(r); addView(sb) }
+          }
+
+          fun Context.chips(opts: List<String>, sel: Int, cb: (Int) -> Unit): HorizontalScrollView {
+            val c = this; val row = LinearLayout(c); val vs = ArrayList<TextView>()
+            fun paint(s: Int) = vs.forEachIndexed { i, v -> v.background = rip(rr(if (i == s) T.acc else T.card2, dpf(16f))); v.setTextColor(if (i == s) T.bg else T.tx) }
+            opts.forEachIndexed { i, o ->
+              val v = c.tv(o, 12f, T.tx, false, true).apply { setPadding(dp(13), dp(8), dp(13), dp(8)); press { paint(i); cb(i) } }
+              vs.add(v); row.add(v, -2, -2, mr = 6)
+            }
+            paint(sel)
+            return HorizontalScrollView(c).apply { isHorizontalScrollBarEnabled = false; addView(row) }
+          }
+
+          fun Context.swatch(cols: List<Int>, sel: Int, cb: (Int) -> Unit): LinearLayout {
+            val c = this; val row = LinearLayout(c); val vs = ArrayList<View>()
+            fun paint(s: Int) = vs.forEachIndexed { i, v ->
+              v.background = rr(cols[i], dpf(16f), Color.WHITE, if (i == s) dp(2) else 0)
+              v.animate().scaleX(if (i == s) 1.15f else 1f).scaleY(if (i == s) 1.15f else 1f).setDuration(200).start()
+            }
+            cols.forEachIndexed { i, col -> val v = View(c).apply { press { paint(i); cb(i) } }; vs.add(v); row.add(v, dp(32), dp(32), mr = 10) }
+            paint(sel); return row
+          }
+
+          class Ring(c: Context, val lab: String) : View(c) {
+            private var shown = 0f; private var cs = T.acc; private var col = T.acc; private var txt = "–"; private var an: ValueAnimator? = null
+            private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+            private val t = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; typeface = Typeface.MONOSPACE }
+            fun set(v: Float, text: String, color: Int) {
+              val f0 = shown; val c0 = cs; txt = text; col = color; val tg = v.coerceIn(0f, 1f); an?.cancel()
+              if (!Fx.anim) { shown = tg; cs = color; invalidate(); return }
+              an = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 700; interpolator = DecelerateInterpolator()
+                addUpdateListener { val f = it.animatedFraction; shown = f0 + (tg - f0) * f; cs = T.mix(c0, col, f); invalidate() }; start()
+              }
+            }
+            override fun onMeasure(w: Int, h: Int) { val s = MeasureSpec.getSize(w); setMeasuredDimension(s, s) }
+            override fun onDraw(cv: Canvas) {
+              val w = width.toFloat(); val sw = w * .09f; p.strokeWidth = sw; val r = RectF(sw * 1.6f, sw * 1.6f, w - sw * 1.6f, w - sw * 1.6f)
+              p.color = 0x1FFFFFFF; cv.drawArc(r, 135f, 270f, false, p)
+              p.color = cs; p.alpha = 50; p.strokeWidth = sw * 1.9f; cv.drawArc(r, 135f, 270f * shown, false, p)
+              p.color = cs; p.strokeWidth = sw; cv.drawArc(r, 135f, 270f * shown, false, p)
+              t.color = T.tx; t.textSize = w * .235f; cv.drawText(txt, w / 2, w / 2 + t.textSize * .12f, t)
+              t.color = T.dim; t.textSize = w * .13f; cv.drawText(lab, w / 2, w * .88f, t)
+            }
+          }
+
+          class Spark(c: Context, val title: String, val unit: String = "", var col: Int = T.acc) : View(c) {
+            var src: List<Float> = emptyList(); var fixMax = 0f; var compact = false; var fit = false
+            private val p = Paint(Paint.ANTI_ALIAS_FLAG); private var ph = 0f
+            private val an = ValueAnimator.ofFloat(0f, 1f).apply { duration = 1500; repeatCount = ValueAnimator.INFINITE; addUpdateListener { ph = it.animatedFraction; invalidate() }; start() }
+            override fun onDetachedFromWindow() { an.cancel(); super.onDetachedFromWindow() }
+            private fun f(v: Float) = if (v >= 100f) "%.0f".format(v) else "%.1f".format(v)
+            override fun onDraw(cv: Canvas) {
+              val w = width.toFloat(); val h = height.toFloat(); val d = src; val n = d.size; val top = if (compact) 2f else dpf(24f)
+              if (!compact) {
+                p.style = Paint.Style.FILL; p.typeface = Typeface.MONOSPACE; p.textSize = dpf(11f)
+                p.color = T.dim; p.textAlign = Paint.Align.LEFT; cv.drawText(title.uppercase() + if (n > 0) "  pk " + f(d.maxOrNull() ?: 0f) else "", 0f, dpf(12f), p)
+                if (n > 0) { p.color = col; p.textAlign = Paint.Align.RIGHT; p.textSize = dpf(15f); p.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD); cv.drawText(f(d[n - 1]) + unit, w, dpf(14f), p) }
+              }
+              if (n < 2) return
+              val mx = if (fixMax > 0) fixMax else maxOf(d.maxOrNull() ?: 1f, 1f) * 1.15f
+              val step = if (fit) w / (n - 1) else w / 89f; val path = Path(); var px = 0f; var py = 0f; var fx = 0f
+              for (i in 0 until n) {
+                val x = if (fit) i * step else w - (n - 1 - i) * step; val y = h - 3f - (d[i] / mx).coerceIn(0f, 1f) * (h - top - 6f)
+                if (i == 0) { path.moveTo(x, y); fx = x } else { val m = (px + x) / 2; path.cubicTo(m, py, m, y, x, y) }
+                px = x; py = y
+              }
+              val fill = Path(path).apply { lineTo(px, h); lineTo(fx, h); close() }
+              p.style = Paint.Style.FILL; p.shader = LinearGradient(0f, top, 0f, h, (col and 0xFFFFFF) or 0x66000000, col and 0xFFFFFF, Shader.TileMode.CLAMP)
+              cv.drawPath(fill, p); p.shader = null
+              p.style = Paint.Style.STROKE; p.strokeWidth = dpf(2f); p.strokeJoin = Paint.Join.ROUND; p.color = col; cv.drawPath(path, p)
+              p.style = Paint.Style.FILL; p.alpha = ((1 - ph) * 110).toInt(); cv.drawCircle(px, py, dpf(3f + 7f * ph), p)
+              p.color = col; cv.drawCircle(px, py, dpf(3f), p)
+            }
+          }
+
+          class Bars(c: Context) : View(c) {
+            private var f = FloatArray(0); private var t = FloatArray(0); private var lab = emptyList<String>()
+            private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.MONOSPACE }
+            fun set(v: List<Float>, labels: List<String>) {
+              lab = labels; if (f.size != v.size) { f = FloatArray(v.size); requestLayout() }
+              val s0 = f.copyOf(); t = v.toFloatArray()
+              if (!Fx.anim) { f = t.copyOf(); invalidate(); return }
+              ValueAnimator.ofFloat(0f, 1f).apply { duration = 600; interpolator = DecelerateInterpolator(); addUpdateListener { for (i in f.indices) f[i] = s0[i] + (t[i] - s0[i]) * it.animatedFraction; invalidate() }; start() }
+            }
+            override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(MeasureSpec.getSize(w), maxOf(f.size, 1) * dp(24))
+            override fun onDraw(cv: Canvas) {
+              val w = width.toFloat(); val rh = dp(24).toFloat(); p.textSize = dpf(10.5f)
+              for (i in f.indices) {
+                val y = i * rh; val x0 = w * .40f; val tr = RectF(x0, y + rh * .3f, w, y + rh * .7f)
+                p.style = Paint.Style.FILL; p.color = 0x1AFFFFFF; cv.drawRoundRect(tr, rh, rh, p)
+                p.color = T.heat(f[i]); cv.drawRoundRect(RectF(x0, tr.top, x0 + (w - x0) * f[i].coerceIn(.02f, 1f), tr.bottom), rh, rh, p)
+                p.color = T.dim; cv.drawText(lab.getOrElse(i) { "" }, 0f, y + rh * .68f, p)
+              }
+            }
+          }
+
+          class Shimmer(c: Context) : View(c) {
+            private val p = Paint(); private var ph = 0f; private var on = false
+            private val an = ValueAnimator.ofFloat(0f, 1f).apply { duration = 1100; repeatCount = ValueAnimator.INFINITE; addUpdateListener { ph = it.animatedFraction; invalidate() } }
+            init { background = rr(0x14FFFFFF, dpf(2f)); visibility = INVISIBLE }
+            fun run(b: Boolean) { on = b; if (b) { visibility = VISIBLE; if (!an.isStarted) an.start() } else { an.cancel(); visibility = INVISIBLE } }
+            override fun onDraw(cv: Canvas) {
+              if (!on) return; val w = width.toFloat(); val x = w * (ph * 2 - 1)
+              p.shader = LinearGradient(x, 0f, x + w * .5f, 0f, intArrayOf(T.acc and 0xFFFFFF, T.acc, T.acc and 0xFFFFFF), null, Shader.TileMode.CLAMP)
+              cv.drawRect(0f, 0f, w, height.toFloat(), p)
+            }
+            override fun onDetachedFromWindow() { an.cancel(); super.onDetachedFromWindow() }
+          }
+
+          class Dot(c: Context, val col: Int) : View(c) {
+            private var ph = 0f; private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+            private val an = ValueAnimator.ofFloat(0f, 1f).apply { duration = 1300; repeatCount = ValueAnimator.INFINITE; addUpdateListener { ph = it.animatedFraction; invalidate() }; start() }
+            override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(dp(14), dp(14))
+            override fun onDraw(cv: Canvas) {
+              val m = width / 2f; p.color = col; p.alpha = ((1 - ph) * 120).toInt(); cv.drawCircle(m, m, m * (.4f + .6f * ph), p)
+              p.color = col; cv.drawCircle(m, m, m * .38f, p)
+            }
+            override fun onDetachedFromWindow() { an.cancel(); super.onDetachedFromWindow() }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/Hist.kt <<'EOF'
+          package dev.sysx
+
+          import android.content.Context
+          import android.speech.tts.TextToSpeech
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          class Series {
+            val v = ArrayList<Float>(); var pk = 0f
+            fun add(x: Float) { v.add(x); if (v.size > 90) v.removeAt(0); if (x > pk) pk = x }
+            fun last() = if (v.isEmpty()) 0f else v[v.size - 1]
+          }
+
+          object H {
+            val cpu = Series(); val ram = Series(); val tmp = Series(); val pw = Series(); val dn = Series(); val upl = Series(); val bat = Series()
+            var frozen = false; var rec: StringBuilder? = null; var recN = 0; private var last = 0L; private var tts: TextToSpeech? = null
+            private val tf = SimpleDateFormat("HH:mm:ss", Locale.US)
+            fun cpuPct(c: Context): Float { val f = S.freqs(); val m = S.maxf(); var s = 0f; var k = 0; for (i in f.indices) if (m[i] > 0) { s += f[i].toFloat() / m[i]; k++ }; return if (k == 0) 0f else s * 100 / k }
+            fun ramPct(c: Context): Float { val (a, t) = S.ram(c); return if (t > 0) (t - a) * 100f / t else 0f }
+            fun power(c: Context): Float { val v = S.bat(c)?.getIntExtra("voltage", 0) ?: 0; return (Math.abs(S.currentMa(c)) * v / 1e6).toFloat() }
+            fun sample(c: Context) {
+              val n = System.currentTimeMillis(); if (frozen || n - last < 800) return; last = n
+              val cp = cpuPct(c); val rp = ramPct(c); val tm = S.tmax().toFloat(); val pwr = power(c); val (d, u) = S.net(); val b = S.batPct(c)
+              cpu.add(cp); ram.add(rp); tmp.add(tm); pw.add(pwr); dn.add(d.toFloat()); upl.add(u.toFloat()); bat.add(b.toFloat())
+              rec?.let { it.append(tf.format(Date())).append(",%.1f,%.1f,%.1f,%.2f,%.0f,%.0f,%d\n".format(cp, rp, tm, pwr, d, u, b)); recN++ }
+            }
+            fun startRec() { rec = StringBuilder("time,cpu_pct,ram_pct,temp_c,power_w,down_kbs,up_kbs,bat_pct\n"); recN = 0 }
+            fun stopRec(): String? { val r = rec?.toString(); rec = null; return r }
+            fun health(c: Context): Int {
+              var s = 100.0; val t = S.tmax(); if (t > 38) s -= (t - 38) * 2.5
+              val r = ramPct(c); if (r > 70) s -= (r - 70) * .8
+              val st = S.stor(); val fp = st.first * 100.0 / st.second.coerceAtLeast(1); if (fp < 20) s -= (20 - fp)
+              val b = S.batPct(c); if (b in 0..20 && !S.charging(c)) s -= (20 - b) * .8
+              return s.coerceIn(0.0, 100.0).toInt()
+            }
+            fun sk(p: Float): Char = "▁▂▃▄▅▆▇█"[(p / 100f * 7.99f).toInt().coerceIn(0, 7)]
+            fun say(c: Context, s: String) {
+              val t = tts
+              if (t == null) { tts = TextToSpeech(c.applicationContext) { if (it == TextToSpeech.SUCCESS) { tts?.language = Locale.getDefault(); tts?.speak(s, TextToSpeech.QUEUE_FLUSH, null, "sx") } } }
+              else t.speak(s, TextToSpeech.QUEUE_FLUSH, null, "sx")
+            }
+            fun vars(c: Context, t: String): String {
+              if (!t.contains('{')) return t
+              val (fr, _) = S.stor(); val cp = cpuPct(c); val rp = ramPct(c); val b = S.batPct(c); val (a, tt) = S.ram(c)
+              return t.replace("{cpupct}", "%.0f".format(cp)).replace("{rampct}", "%.0f".format(rp)).replace("{ramused}", ((tt - a) / 1048576).toString())
+                .replace("{power}", "%.1f".format(power(c))).replace("{uptime}", S.up()).replace("{storfree}", S.gb(fr))
+                .replace("{date}", SimpleDateFormat("EEE d MMM", Locale.getDefault()).format(Date())).replace("{net}", if (S.wifi(c)) "WiFi" else "Mobile")
+                .replace("{bbat}", S.bar(b)).replace("{bram}", S.bar(rp.toInt())).replace("{bcpu}", S.bar(cp.toInt()))
+            }
+            fun ovText(c: Context, mode: Int, m: Int): String {
+              fun has(b: Int) = (m and b) != 0
+              val cp = cpu.last(); val rp = ram.last(); val b = S.batPct(c); val (d, u) = S.net()
+              if (mode == 0) {
+                val p = ArrayList<String>()
+                if (has(1)) p.add(SimpleDateFormat("HH:mm", Locale.US).format(Date()))
+                if (has(2)) p.add("⚙${"%.0f".format(cp)}%"); if (has(4)) p.add("▤${"%.0f".format(rp)}%")
+                if (has(16)) p.add("🔋$b%"); if (has(32)) p.add("🌡${"%.0f".format(S.tmax())}°"); if (has(64)) p.add("↓${"%.0f".format(d)}")
+                if (has(128)) p.add("💾${S.gb(S.stor().first)}G")
+                return p.joinToString(" · ").ifEmpty { "SysX" }
+              }
+              val sb = StringBuilder()
+              if (has(1)) sb.append("⏱ ${tf.format(Date())}  up ${S.up()}\n")
+              if (has(2)) { val f = S.freqs(); val mx = S.maxf(); sb.append("CPU "); for (i in f.indices) sb.append(sk(if (mx[i] > 0) f[i] * 100f / mx[i] else 0f)); sb.append(" ${"%.0f".format(cp)}%\n") }
+              if (has(4)) { val (a, t) = S.ram(c); sb.append("RAM ${S.bar(rp.toInt())} ${(t - a) / 1048576}/${t / 1048576}M\n") }
+              if (has(8)) { val mm = S.mi(); val st = mm["SwapTotal"] ?: 0L; if (st > 0) sb.append("SWP ${((st - (mm["SwapFree"] ?: 0L)) / 1024)}/${st / 1024}M\n") }
+              if (has(16)) sb.append("BAT $b% ${"%.1f".format(S.batTemp(c))}°C ${"%.1f".format(power(c))}W${if (S.charging(c)) " ⚡" else ""}\n")
+              if (has(32)) sb.append("TMP ${"%.1f".format(S.tmax())}°C\n")
+              if (has(64)) sb.append("NET ↓${"%.0f".format(d)} ↑${"%.0f".format(u)} KB/s ${if (S.wifi(c)) "WiFi" else "Mobile"}\n")
+              if (has(128)) { val (fr, to) = S.stor(); sb.append("STO ${S.gb(fr)}/${S.gb(to)}G\n") }
+              return sb.toString().trimEnd().ifEmpty { "SysX" }
+            }
+          }
+          EOF
+
+          cat > app/src/main/java/dev/sysx/OvTile.kt <<'EOF'
+          package dev.sysx
+
+          import android.app.PendingIntent
+          import android.content.Intent
+          import android.os.Build
+          import android.provider.Settings
+          import android.service.quicksettings.Tile
+          import android.service.quicksettings.TileService
+
+          class OvTile : TileService() {
+            private fun ref() { val t = qsTile ?: return; t.state = if (getSharedPreferences("sx", 0).getBoolean("overlay", false)) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE; t.updateTile() }
+            override fun onStartListening() = ref()
+            override fun onClick() {
+              val p = getSharedPreferences("sx", 0)
+              if (!Settings.canDrawOverlays(this)) {
+                val i = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("tab", "5")
+                if (Build.VERSION.SDK_INT >= 34) startActivityAndCollapse(PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_IMMUTABLE)) else startActivityAndCollapse(i)
+                return
+              }
+              p.edit().putBoolean("overlay", !p.getBoolean("overlay", false)).apply(); Core.sync(this); ref()
+            }
+          }
+          EOF
+
+          cat > app/src/main/res/drawable/w_bg0.xml <<'EOF'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+            <gradient android:startColor="#EE0B1118" android:endColor="#EE121C28" android:angle="135"/>
+            <corners android:radius="22dp"/>
+            <stroke android:width="1dp" android:color="#33FFFFFF"/>
+          </shape>
+          EOF
+
+          cat > app/src/main/res/drawable/w_bg1.xml <<'EOF'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+            <gradient android:startColor="#F0141E3C" android:endColor="#F0301454" android:angle="135"/>
+            <corners android:radius="22dp"/>
+            <stroke android:width="1dp" android:color="#554FC3F7"/>
+          </shape>
+          EOF
+
+          cat > app/src/main/res/drawable/w_bg2.xml <<'EOF'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+            <gradient android:startColor="#F00B2B26" android:endColor="#F0062014" android:angle="135"/>
+            <corners android:radius="22dp"/>
+            <stroke android:width="1dp" android:color="#555CFFA0"/>
+          </shape>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_bg.xml <<'EOF'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android"><solid android:color="#0B0F14"/></shape>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_fg.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+            <path android:pathData="M24,56 L40,56 L47,34 L58,78 L66,46 L72,56 L84,56" android:strokeColor="#4FC3F7" android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round"/>
+          </vector>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@drawable/ic_bg"/>
+            <foreground android:drawable="@drawable/ic_fg"/>
+          </adaptive-icon>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+            <string name="tile_label">SysX overlay</string>
+            <string name="sc_live">Live graphs</string>
+            <string name="sc_bench">Benchmark</string>
+            <string name="sc_auto">Automations</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/xml/shortcuts.xml <<'EOF'
+          <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+            <shortcut xmlns:android="http://schemas.android.com/apk/res/android" android:shortcutId="live" android:enabled="true" android:icon="@drawable/ic_fg" android:shortcutShortLabel="@string/sc_live" android:shortcutLongLabel="@string/sc_live">
+              <intent android:action="android.intent.action.VIEW" android:targetPackage="dev.sysx" android:targetClass="dev.sysx.MainActivity"><extra android:name="tab" android:value="1"/></intent>
+            </shortcut>
+            <shortcut xmlns:android="http://schemas.android.com/apk/res/android" android:shortcutId="bench" android:enabled="true" android:icon="@drawable/ic_fg" android:shortcutShortLabel="@string/sc_bench" android:shortcutLongLabel="@string/sc_bench">
+              <intent android:action="android.intent.action.VIEW" android:targetPackage="dev.sysx" android:targetClass="dev.sysx.MainActivity"><extra android:name="tab" android:value="3"/></intent>
+            </shortcut>
+            <shortcut xmlns:android="http://schemas.android.com/apk/res/android" android:shortcutId="auto" android:enabled="true" android:icon="@drawable/ic_fg" android:shortcutShortLabel="@string/sc_auto" android:shortcutLongLabel="@string/sc_auto">
+              <intent android:action="android.intent.action.VIEW" android:targetPackage="dev.sysx" android:targetClass="dev.sysx.MainActivity"><extra android:name="tab" android:value="4"/></intent>
+            </shortcut>
+          </shortcuts>
+          EOF
+
+      - name: Build release APK
+        working-directory: sysx
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          cp sysx/app/build/outputs/apk/release/app-release.apk SysX.apk
+          { echo "### 📦 SysX APK"; echo "- size: $(du -h SysX.apk | cut -f1)"; echo "- sha256: \`$(sha256sum SysX.apk | cut -d' ' -f1)\`"; echo "- build: #$GITHUB_RUN_NUMBER @ ${GITHUB_SHA::7}"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SysX-apk
+          path: SysX.apk
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SysX.apk
+          generate_release_notes: true
