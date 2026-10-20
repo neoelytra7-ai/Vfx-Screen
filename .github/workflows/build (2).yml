@@ -1,0 +1,324 @@
+name: build-revive-apk
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: '8.7'}
+      - name: scaffold project
+        run: |
+          D=app/src/main; K=$D/java/app/revive
+          mkdir -p $K $D/res/xml $D/res/values $D/assets
+          curl -fsSL -o $D/assets/o.ttf "https://github.com/google/fonts/raw/main/ofl/orbitron/Orbitron%5Bwght%5D.ttf" || true
+          curl -fsSL -o $D/assets/m.ttf "https://github.com/JetBrains/JetBrainsMono/raw/master/fonts/ttf/JetBrainsMono-Bold.ttf" || true
+          echo -e "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g" > gradle.properties
+          echo 'pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}
+          dependencyResolutionManagement{repositories{google();mavenCentral()}}
+          include(":app")' > settings.gradle.kts
+          echo 'plugins{id("com.android.application") version "8.5.2" apply false
+          id("org.jetbrains.kotlin.android") version "1.9.24" apply false}' > build.gradle.kts
+          cat > app/build.gradle.kts <<'EOF'
+          plugins{id("com.android.application");id("org.jetbrains.kotlin.android")}
+          android{namespace="app.revive";compileSdk=34
+          defaultConfig{applicationId="app.revive";minSdk=26;targetSdk=30;versionCode=1;versionName="0.1"}
+          compileOptions{sourceCompatibility=JavaVersion.VERSION_17;targetCompatibility=JavaVersion.VERSION_17}
+          kotlinOptions{jvmTarget="17"}
+          lint{abortOnError=false}}
+          dependencies{implementation("dev.rikka.shizuku:api:13.1.5");implementation("dev.rikka.shizuku:provider:13.1.5")}
+          EOF
+          cat > $D/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+          <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+          <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+          <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"/>
+          <application android:label="@string/app_name" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false">
+          <receiver android:name=".DevAdmin" android:permission="android.permission.BIND_DEVICE_ADMIN" android:exported="true"><meta-data android:name="android.app.device_admin" android:resource="@xml/device_admin"/><intent-filter><action android:name="android.app.action.DEVICE_ADMIN_ENABLED"/></intent-filter></receiver>
+          <activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter><meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts"/></activity>
+          <activity android:name=".RunActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay"/>
+          <service android:name=".OverlayService" android:exported="false"/>
+          <receiver android:name=".BootReceiver" android:exported="true"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter></receiver>
+          <provider android:name="rikka.shizuku.ShizukuProvider" android:authorities="app.revive.shizuku" android:multiprocess="false" android:enabled="true" android:exported="true" android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"/>
+          </application></manifest>
+          EOF
+          cat > $D/res/values/strings.xml <<'EOF'
+          <resources><string name="app_name">REVIVE</string><string name="s_boost">Boost</string><string name="s_ov">Overlay</string></resources>
+          EOF
+          cat > $D/res/xml/device_admin.xml <<'EOF'
+          <device-admin xmlns:android="http://schemas.android.com/apk/res/android"><uses-policies><force-lock/><wipe-data/></uses-policies></device-admin>
+          EOF
+          cat > $D/res/xml/shortcuts.xml <<'EOF'
+          <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+          <shortcut android:shortcutId="boost" android:shortcutShortLabel="@string/s_boost"><intent android:action="android.intent.action.VIEW" android:targetPackage="app.revive" android:targetClass="app.revive.RunActivity"><extra android:name="k" android:value="boost"/></intent></shortcut>
+          <shortcut android:shortcutId="ov" android:shortcutShortLabel="@string/s_ov"><intent android:action="android.intent.action.VIEW" android:targetPackage="app.revive" android:targetClass="app.revive.RunActivity"><extra android:name="k" android:value="ov"/></intent></shortcut>
+          </shortcuts>
+          EOF
+          cat > $K/Sh.kt <<'EOF'
+          package app.revive
+          import rikka.shizuku.Shizuku
+          object Sh{
+           fun ok()=try{Shizuku.pingBinder()&&Shizuku.checkSelfPermission()==0}catch(e:Throwable){false}
+           fun run(c:String):String=try{
+            val p:Process=if(ok()){val m=Shizuku::class.java.getDeclaredMethod("newProcess",Array<String>::class.java,Array<String>::class.java,String::class.java);m.isAccessible=true;m.invoke(null,arrayOf("sh","-c",c),null,null) as Process}
+            else Runtime.getRuntime().exec(arrayOf("sh","-c",c))
+            val o=p.inputStream.bufferedReader().readText()+p.errorStream.bufferedReader().readText();p.waitFor();o.trim()
+           }catch(e:Throwable){"ERR "+e.message}
+          }
+          EOF
+          cat > $K/Tw.kt <<'EOF'
+          package app.revive
+          object Tw{
+          val A="for k in window_animation_scale transition_animation_scale animator_duration_scale;do settings put global \$k"
+          val T=listOf(
+          "Anim 0.5x" to "$A 0.5;done","Anim OFF" to "$A 0;done","Anim 1x" to "$A 1;done",
+          "Cached procs 64" to "device_config put activity_manager max_cached_processes 64;settings put global activity_manager_constants max_cached_processes=64",
+          "Kill all bg" to "am kill-all","Trim caches" to "pm trim-caches 999G",
+          "Dexopt speed-profile" to "cmd package compile -m speed-profile -a",
+          "Standby/AdaptiveBatt OFF" to "settings put global app_standby_enabled 0;settings put global adaptive_battery_management_enabled 0",
+          "Doze OFF" to "dumpsys deviceidle disable all",
+          "Res+DPI 75%" to "s=\$(wm size|grep -o '[0-9]*x[0-9]*'|head -1);d=\$(wm density|grep -o '[0-9]*'|head -1);wm size \$(( \${s%x*}*3/4 ))x\$(( \${s#*x}*3/4 ));wm density \$((d*3/4))",
+          "Res+DPI reset" to "wm size reset;wm density reset")
+          val P=listOf(
+          "Force stop" to "am force-stop {p}","Doze whitelist" to "dumpsys deviceidle whitelist +{p}",
+          "Allow BG run" to "cmd appops set {p} RUN_IN_BACKGROUND allow;cmd appops set {p} RUN_ANY_IN_BACKGROUND allow",
+          "Standby ACTIVE" to "am set-standby-bucket {p} active","Disable (user0)" to "pm disable-user --user 0 {p}",
+          "Enable" to "pm enable {p}","Uninstall (user0)" to "pm uninstall -k --user 0 {p}")
+          }
+          EOF
+          cat > $K/DevAdmin.kt <<'EOF'
+          package app.revive
+          import android.app.admin.DeviceAdminReceiver
+          class DevAdmin:DeviceAdminReceiver()
+          EOF
+          cat > $K/Dpm.kt <<'EOF'
+          package app.revive
+          import android.app.admin.DevicePolicyManager
+          import android.content.*
+          import android.content.pm.PackageManager
+          object Dpm{
+           fun dpm(c:Context)=c.getSystemService(DevicePolicyManager::class.java)
+           fun admin(c:Context)=ComponentName(c,DevAdmin::class.java)
+           fun isOwner(c:Context)=try{dpm(c).isDeviceOwnerApp(c.packageName)}catch(e:Throwable){false}
+           fun g(c:Context,f:()->String):String=try{if(!isOwner(c))"not device owner yet" else f()}catch(e:Throwable){"ERR "+e.message}
+           fun global(c:Context,k:String,v:String)=g(c){dpm(c).setGlobalSetting(admin(c),k,v);"ok $k=$v"}
+           fun hide(c:Context,p:String,h:Boolean)=g(c){dpm(c).setApplicationHidden(admin(c),p,h);"ok"}
+           fun suspend(c:Context,p:String,s:Boolean)=g(c){dpm(c).setPackagesSuspended(admin(c),arrayOf(p),s);"ok"}
+           fun grantAll(c:Context,p:String)=g(c){val pi=c.packageManager.getPackageInfo(p,PackageManager.GET_PERMISSIONS)
+            val perms=pi.requestedPermissions?:return@g "no declared perms";var n=0
+            perms.forEach{try{dpm(c).setPermissionGrantState(admin(c),p,it,DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);n++}catch(e:Throwable){}}
+            "granted $n/${perms.size}"}
+           fun restrict(c:Context,r:String,on:Boolean)=g(c){if(on)dpm(c).addUserRestriction(admin(c),r) else dpm(c).clearUserRestriction(admin(c),r);"ok"}
+           fun statusbar(c:Context,off:Boolean)=g(c){dpm(c).setStatusBarDisabled(admin(c),off);"ok"}
+           fun kiosk(c:Context,p:String)=g(c){dpm(c).setLockTaskPackages(admin(c),arrayOf(p,c.packageName));"pinned list set"}
+          }
+          EOF
+          cat > $K/Brain.kt <<'EOF'
+          package app.revive
+          import android.content.*
+          import android.provider.Settings
+          object Brain{
+           fun seed(p:SharedPreferences){if(!p.contains("m_boost"))p.edit().putString("m_boost","boost").apply()}
+           fun run(c:Context,t:String):String{val p=c.getSharedPreferences("p",0)
+            return t.split(";","\n").map{it.trim()}.filter{it.isNotEmpty()}.joinToString("\n"){one(c,p,it,0)}}
+           fun one(c:Context,p:SharedPreferences,s:String,d:Int):String=try{
+            val a=s.lowercase().split(" ");val e=if(a.getOrNull(1)=="off")"disable" else "enable"
+            when(a[0]){
+             "run"->if(d>3)"depth" else (p.getString("m_"+a[1],null)?.split("|")?.joinToString("\n"){one(c,p,it.trim(),d+1)}?:"no macro")
+             "def"->{val i=s.indexOf('=');p.edit().putString("m_"+s.substring(3,i).trim().lowercase(),s.substring(i+1).trim()).apply();"saved"}
+             "boost"->Sh.run("am kill-all;pm trim-caches 999G")
+             "kill"->Sh.run("am force-stop "+a[1])
+             "launch"->Sh.run("monkey -p ${a[1]} -c android.intent.category.LAUNCHER 1")
+             "wifi"->Sh.run("svc wifi $e")
+             "data"->Sh.run("svc data $e")
+             "bt"->Sh.run("svc bluetooth $e")
+             "air"->Sh.run("cmd connectivity airplane-mode $e")
+             "bright"->Sh.run("settings put system screen_brightness_mode 0;settings put system screen_brightness ${a[1].toInt()*255/100}")
+             "tap","swipe"->Sh.run("input $s")
+             "key"->Sh.run("input keyevent ${a[1]}")
+             "type"->Sh.run("input text '${s.substring(5).replace(" ","%s")}'")
+             "shot"->Sh.run("screencap -p /sdcard/revive.png")
+             "sh"->Sh.run(s.substring(3))
+             "dpm"->"device owner: "+Dpm.isOwner(c)
+             "become"->Sh.run("dpm set-device-owner app.revive/.DevAdmin")
+             "gset"->{val i=s.indexOf('=');Dpm.global(c,s.substring(5,i).trim(),s.substring(i+1).trim())}
+             "hide"->Dpm.hide(c,a[1],a.getOrNull(2)!="off")
+             "suspend"->Dpm.suspend(c,a[1],a.getOrNull(2)!="off")
+             "grant"->Dpm.grantAll(c,a[1])
+             "restrict"->Dpm.restrict(c,a[1],a.getOrNull(2)!="off")
+             "statusbar"->Dpm.statusbar(c,e=="enable")
+             "kiosk"->Dpm.kiosk(c,a[1])
+             "overlay"->{val i=Intent(c,OverlayService::class.java)
+              if(a.getOrNull(1)=="off"){p.edit().putBoolean("ov",false).apply();c.stopService(i);"overlay off"}
+              else if(!Settings.canDrawOverlays(c))"need overlay permission"
+              else{p.edit().putBoolean("ov",true).apply();c.startForegroundService(i);"overlay on"}}
+             else->"?? unknown (LLM slot)"
+            }}catch(x:Throwable){"ERR "+x.message}
+          }
+          EOF
+          cat > $K/Misc.kt <<'EOF'
+          package app.revive
+          import android.app.Activity
+          import android.content.*
+          import android.os.Bundle
+          import android.provider.Settings
+          class RunActivity:Activity(){override fun onCreate(b:Bundle?){super.onCreate(b)
+           val c=when(intent.getStringExtra("k")){"boost"->"boost";"ov"->"overlay on";else->null}
+           if(c!=null)Thread{Brain.run(applicationContext,c)}.start();finish()}}
+          class BootReceiver:BroadcastReceiver(){override fun onReceive(c:Context,i:Intent){
+           val p=c.getSharedPreferences("p",0)
+           if(p.getBoolean("ov",false)&&Settings.canDrawOverlays(c))c.startForegroundService(Intent(c,OverlayService::class.java))
+           Thread{Brain.run(c,"run boot")}.start()}}
+          EOF
+          cat > $K/OverlayService.kt <<'EOF'
+          package app.revive
+          import android.app.*
+          import android.content.*
+          import android.graphics.*
+          import android.net.TrafficStats
+          import android.os.*
+          import android.view.*
+          import android.widget.TextView
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.*
+          class OverlayService:Service(){
+           companion object{val F=listOf("CPU","RAM","BAT","TMP","NET","DSK","CLK")}
+           lateinit var wm:WindowManager;lateinit var v:TextView;lateinit var p:SharedPreferences
+           var started=false;var lrx=0L;var ltx=0L;var lt=0L
+           val h=Handler(Looper.getMainLooper())
+           val tf by lazy{try{Typeface.createFromAsset(assets,"m.ttf")}catch(e:Throwable){Typeface.MONOSPACE}}
+           val lp=WindowManager.LayoutParams(-2,-2,WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,PixelFormat.TRANSLUCENT).apply{gravity=Gravity.TOP or Gravity.START}
+           val tick=object:Runnable{override fun run(){try{draw()}catch(e:Throwable){};h.postDelayed(this,(p.getInt("ms",800)+200).toLong())}}
+           override fun onBind(i:Intent?):IBinder?=null
+           fun rd(f:String)=try{File(f).readText()}catch(e:Throwable){null}
+           override fun onStartCommand(i:Intent?,f:Int,s:Int):Int{
+            if(started)return START_STICKY;started=true
+            p=getSharedPreferences("p",0)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("o","overlay",NotificationManager.IMPORTANCE_MIN))
+            startForeground(1,Notification.Builder(this,"o").setSmallIcon(android.R.drawable.stat_sys_warning).setContentTitle("REVIVE overlay").build())
+            wm=getSystemService(WINDOW_SERVICE) as WindowManager
+            v=TextView(this);wm.addView(v,lp)
+            lrx=TrafficStats.getTotalRxBytes();ltx=TrafficStats.getTotalTxBytes();lt=SystemClock.elapsedRealtime()
+            h.post(tick);return START_STICKY}
+           fun draw(){
+            val sb=StringBuilder();fun on(k:String)=p.getBoolean("f_$k",true)
+            val b=registerReceiver(null,IntentFilter(Intent.ACTION_BATTERY_CHANGED))!!
+            val bt=b.getIntExtra("temperature",0)/10f
+            if(on("CPU")){val fr=(0..15).mapNotNull{rd("/sys/devices/system/cpu/cpu$it/cpufreq/scaling_cur_freq")?.trim()?.toLongOrNull()}
+             sb.append("CPU ").append(if(fr.isEmpty())"n/a" else fr.joinToString(" "){"${it/1000}"}+"MHz").append('\n')}
+            if(on("RAM")){val mi=ActivityManager.MemoryInfo();getSystemService(ActivityManager::class.java).getMemoryInfo(mi)
+             sb.append("RAM ${(mi.totalMem-mi.availMem)/1048576}/${mi.totalMem/1048576}MB\n")}
+            if(on("BAT")){val cur=Math.abs(getSystemService(BatteryManager::class.java).getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW))/1000
+             sb.append("BAT ${b.getIntExtra("level",0)}% ${cur}mA ${b.getIntExtra("voltage",0)}mV\n")}
+            if(on("TMP")){val tz=(0..9).mapNotNull{rd("/sys/class/thermal/thermal_zone$it/temp")?.trim()?.toFloatOrNull()}.map{if(it>1000)it/1000 else it}.take(3)
+             sb.append("TMP bat ${bt}C ${tz.joinToString(" "){"%.0f".format(it)}}\n")}
+            val n=SystemClock.elapsedRealtime();val r=TrafficStats.getTotalRxBytes();val x=TrafficStats.getTotalTxBytes();val dt=maxOf(1L,n-lt)
+            if(on("NET"))sb.append("NET v${(r-lrx)*1000/dt/1024} ^${(x-ltx)*1000/dt/1024} KB/s\n")
+            lrx=r;ltx=x;lt=n
+            if(on("DSK")){val st=StatFs(Environment.getDataDirectory().path);sb.append("DSK ${st.availableBytes/1073741824}GB free\n")}
+            if(on("CLK"))sb.append(SimpleDateFormat("HH:mm:ss",Locale.US).format(Date()))
+            val c=p.getInt("oc",0xFF00FFC8.toInt())
+            v.text=sb.toString().trimEnd();v.textSize=(p.getInt("sz",6)+6).toFloat();v.setTextColor(c);v.typeface=tf
+            v.alpha=p.getInt("al",100)/100f;v.setShadowLayer(8f,0f,0f,c);v.setPadding(14,10,14,10)
+            v.setBackgroundColor((p.getInt("bg",60)*255/100) shl 24)
+            val dm=resources.displayMetrics;lp.x=p.getInt("px",2)*dm.widthPixels/100;lp.y=p.getInt("py",2)*dm.heightPixels/100
+            wm.updateViewLayout(v,lp)}
+           override fun onDestroy(){h.removeCallbacks(tick);try{wm.removeView(v)}catch(e:Throwable){};started=false;super.onDestroy()}
+          }
+          EOF
+          cat > $K/MainActivity.kt <<'EOF'
+          package app.revive
+          import android.app.Activity
+          import android.content.*
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.*
+          import android.provider.Settings
+          import android.view.View
+          import android.widget.*
+          import rikka.shizuku.Shizuku
+          class MainActivity:Activity(){
+           lateinit var p:SharedPreferences;lateinit var hf:Typeface;lateinit var mf:Typeface;lateinit var root:LinearLayout;lateinit var out:TextView
+           var ac=0xFF00FFC8.toInt()
+           fun ft(a:String,d:Typeface)=try{Typeface.createFromAsset(assets,a)}catch(e:Throwable){d}
+           fun tv(t:String,s:Int,c:Int,f:Typeface=mf)=TextView(this).apply{text=t;textSize=s.toFloat();setTextColor(c);typeface=f;setPadding(0,12,0,12)}
+           fun add(v:View){root.addView(v)}
+           fun sec(t:String)=add(tv("▌"+t,16,ac,hf))
+           fun toast(s:String)=Toast.makeText(this,s,Toast.LENGTH_SHORT).show()
+           fun btn(t:String,f:()->Unit)=Button(this).apply{text=t;isAllCaps=false;typeface=mf;setTextColor(ac)
+            background=GradientDrawable().apply{setColor(0xFF050505.toInt());setStroke(2,ac);cornerRadius=14f};setOnClickListener{f()}}
+           fun edit(h:String)=EditText(this).apply{hint=h;setTextColor(ac);setHintTextColor(0xFF555555.toInt());typeface=mf}
+           fun sh(c:String){Thread{val r=Sh.run(c);runOnUiThread{out.text="> $c\n$r";toast(r.take(100).ifEmpty{"ok"})}}.start()}
+           fun sh2(c:String){Thread{val r=Brain.run(applicationContext,c);runOnUiThread{out.text="> $c\n$r";toast(r.take(100).ifEmpty{"ok"})}}.start()}
+           fun seek(l:String,k:String,mx:Int,d:Int){add(tv(l,12,0xFF888888.toInt()))
+            add(SeekBar(this).apply{max=mx;progress=p.getInt(k,d);progressTintList=ColorStateList.valueOf(ac);thumbTintList=progressTintList
+             setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
+              override fun onProgressChanged(s:SeekBar?,v:Int,u:Boolean){p.edit().putInt(k,v).apply()}
+              override fun onStartTrackingTouch(s:SeekBar?){};override fun onStopTrackingTouch(s:SeekBar?){}})})}
+           fun hex(l:String,k:String){val e=edit(l);add(e)
+            add(btn("Apply"){try{p.edit().putInt(k,Color.parseColor("#"+e.text.toString().trim().trimStart('#'))).apply();if(k=="ac")recreate()}catch(x:Throwable){toast("bad hex")}})}
+           override fun onCreate(b:Bundle?){super.onCreate(b)
+            p=getSharedPreferences("p",0);hf=ft("o.ttf",Typeface.DEFAULT_BOLD);mf=ft("m.ttf",Typeface.MONOSPACE);ac=p.getInt("ac",ac)
+            window.statusBarColor=0;window.navigationBarColor=0
+            val sv=ScrollView(this).apply{setBackgroundColor(0xFF000000.toInt())}
+            root=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(32,72,32,72)}
+            sv.addView(root);setContentView(sv);out=tv("",12,0xFFAAAAAA.toInt());Brain.seed(p);ui()}
+           fun ui(){
+            add(tv("REVIVE//OS",26,ac,hf));add(tv("Android ${Build.VERSION.RELEASE} | ${Build.MODEL}",12,0xFF888888.toInt()))
+            sec("ACCESS")
+            add(btn("Grant Shizuku permission"){try{if(!Shizuku.pingBinder())toast("Start Shizuku first (wireless debugging)") else Shizuku.requestPermission(1)}catch(e:Throwable){toast("Install/start Shizuku")}})
+            add(btn("Open Shizuku / download"){startActivity(packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")?:Intent(Intent.ACTION_VIEW,Uri.parse("https://shizuku.rikka.app/download/")))})
+            add(btn("Allow overlay permission"){startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:$packageName")))})
+            add(btn("Self-grant WRITE_SECURE_SETTINGS"){sh("pm grant $packageName android.permission.WRITE_SECURE_SETTINGS")})
+            sec("PERF / RAM TWEAKS");Tw.T.forEach{(n,c)->add(btn(n){sh(c)})}
+            val e=edit("package.name");add(e)
+            sec("DEVICE OWNER (max control, non-root)")
+            add(tv("Needs NO Google/work account on device (remove them first, one-time). Grants MDM-grade power: silent global settings, hide/suspend bloat, auto-grant perms, kiosk pin — no shell needed afterward.",11,0xFF777777.toInt()))
+            add(btn("Become Device Owner (via Shizuku)"){sh2("become")})
+            add(btn("Check device-owner status"){sh2("dpm")})
+            val g=edit("global.setting.key=value (e.g. window_animation_scale=0)");add(g)
+            add(btn("Set Settings.Global (DPM, no shell)"){sh2("gset "+g.text.toString().trim())})
+            add(btn("Hide app (reversible, no uninstall)"){sh2("hide "+e.text.toString().trim()+" on")})
+            add(btn("Unhide app"){sh2("hide "+e.text.toString().trim()+" off")})
+            add(btn("Suspend app (freeze)"){sh2("suspend "+e.text.toString().trim()+" on")})
+            add(btn("Unsuspend app"){sh2("suspend "+e.text.toString().trim()+" off")})
+            add(btn("Auto-grant ALL its permissions (no prompts)"){sh2("grant "+e.text.toString().trim())})
+            add(btn("Disable status bar (kiosk)"){sh2("statusbar on")})
+            add(btn("Enable status bar"){sh2("statusbar off")})
+            val rk=edit("restriction key e.g. no_safe_boot, no_uninstall_apps, no_bluetooth");add(rk)
+            add(btn("Apply restriction"){sh2("restrict "+rk.text.toString().trim()+" on")})
+            add(btn("Clear restriction"){sh2("restrict "+rk.text.toString().trim()+" off")})
+            add(btn("Set kiosk pin list to this pkg"){sh2("kiosk "+e.text.toString().trim())})
+            add(btn("Pin now (lock task)"){try{startLockTask()}catch(x:Throwable){toast(x.message?:"fail")}})
+            add(btn("Unpin"){try{stopLockTask()}catch(x:Throwable){}})
+            sec("PACKAGE CONTROL")
+            Tw.P.forEach{(n,c)->add(btn(n){sh(c.replace("{p}",e.text.toString().trim()))})}
+            sec("OVERLAY")
+            add(btn("Overlay ON/OFF"){toast(Brain.one(this,p,"overlay "+(if(p.getBoolean("ov",false))"off" else "on"),0))})
+            OverlayService.F.forEach{f->add(CheckBox(this).apply{text=f;typeface=mf;setTextColor(ac);isChecked=p.getBoolean("f_$f",true)
+             setOnCheckedChangeListener{_,c->p.edit().putBoolean("f_$f",c).apply()}})}
+            seek("text size","sz",34,6);seek("text opacity","al",100,100);seek("bg opacity","bg",100,60)
+            seek("pos X %","px",100,2);seek("pos Y %","py",100,2);seek("refresh ms (+200)","ms",4800,800)
+            hex("overlay color hex e.g. FF00E5","oc");hex("UI accent hex e.g. 39FF14","ac")
+            sec("LOCAL AI / MACROS")
+            add(tv("boost | kill pkg | launch pkg | wifi/data/bt/air on/off | bright 0-100 | tap x y | swipe x1 y1 x2 y2 | key 3 | type hi | shot | overlay on/off | sh <cmd>\nchain with ;  save: def name = cmd|cmd   run: run name   macro 'boot' runs at startup",11,0xFF777777.toInt()))
+            val c=edit("command");add(c)
+            add(btn("EXECUTE"){val t=c.text.toString();Thread{val r=Brain.run(this,t);runOnUiThread{out.text=r}}.start()})
+            add(out)}
+          }
+          EOF
+      - name: build
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: revive-apk
+          path: app/build/outputs/apk/debug/*.apk
