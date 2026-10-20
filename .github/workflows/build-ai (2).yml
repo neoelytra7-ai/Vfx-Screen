@@ -1,0 +1,378 @@
+name: build-revive-ai-apk
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: '8.7'}
+      - name: ndk + cmake
+        run: yes | sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" --sdk_root="$ANDROID_HOME" || true
+      - name: fetch llama.cpp (tracks master — API below matches current llama.h as of Oct 2026)
+        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp app_src_llama
+      - name: scaffold project
+        run: |
+          D=app/src/main; K=$D/java/app/revive2
+          mkdir -p $K $D/res/xml $D/res/values $D/assets $D/cpp
+          cp -r app_src_llama $D/cpp/llama.cpp
+          curl -fsSL -o $D/assets/o.ttf "https://github.com/google/fonts/raw/main/ofl/orbitron/Orbitron%5Bwght%5D.ttf" || true
+          curl -fsSL -o $D/assets/m.ttf "https://github.com/JetBrains/JetBrainsMono/raw/master/fonts/ttf/JetBrainsMono-Bold.ttf" || true
+          echo -e "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g" > gradle.properties
+          echo 'pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}
+          dependencyResolutionManagement{repositories{google();mavenCentral()}}
+          include(":app")' > settings.gradle.kts
+          echo 'plugins{id("com.android.application") version "8.5.2" apply false
+          id("org.jetbrains.kotlin.android") version "1.9.24" apply false}' > build.gradle.kts
+          cat > app/build.gradle.kts <<'EOF'
+          plugins{id("com.android.application");id("org.jetbrains.kotlin.android")}
+          android{namespace="app.revive2";compileSdk=34;ndkVersion="26.1.10909125"
+          defaultConfig{applicationId="app.revive2";minSdk=26;targetSdk=30;versionCode=1;versionName="0.1"
+          ndk{abiFilters+=listOf("arm64-v8a")}
+          externalNativeBuild{cmake{cppFlags+=listOf("-std=c++17");arguments+=listOf("-DANDROID_STL=c++_shared")}}}
+          externalNativeBuild{cmake{path=file("src/main/cpp/CMakeLists.txt");version="3.22.1"}}
+          compileOptions{sourceCompatibility=JavaVersion.VERSION_17;targetCompatibility=JavaVersion.VERSION_17}
+          kotlinOptions{jvmTarget="17"}
+          lint{abortOnError=false}}
+          EOF
+          cat > $D/cpp/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.22)
+          project(revive2native)
+          add_subdirectory(llama.cpp)
+          add_library(revive2 SHARED jni.cpp)
+          target_include_directories(revive2 PRIVATE llama.cpp/include llama.cpp/ggml/include)
+          target_link_libraries(revive2 llama log android)
+          EOF
+          cat > $D/cpp/jni.cpp <<'EOF'
+          #include <jni.h>
+          #include <string>
+          #include <vector>
+          #include "llama.h"
+          static llama_model* g_model=nullptr;
+          static const llama_vocab* g_vocab=nullptr;
+          static llama_context* g_ctx=nullptr;
+          static int g_npast=0;
+          extern "C" JNIEXPORT jboolean JNICALL
+          Java_app_revive2_Native_nativeLoad(JNIEnv* env, jobject, jstring path){
+           const char* p=env->GetStringUTFChars(path,0);
+           llama_backend_init();
+           llama_model_params mp=llama_model_default_params(); mp.n_gpu_layers=0;
+           g_model=llama_model_load_from_file(p,mp);
+           env->ReleaseStringUTFChars(path,p);
+           if(!g_model)return JNI_FALSE;
+           g_vocab=llama_model_get_vocab(g_model);
+           llama_context_params cp=llama_context_default_params(); cp.n_ctx=2048; cp.n_threads=4; cp.n_threads_batch=4;
+           g_ctx=llama_init_from_model(g_model,cp);
+           return g_ctx? JNI_TRUE: JNI_FALSE;
+          }
+          extern "C" JNIEXPORT jboolean JNICALL
+          Java_app_revive2_Native_nativeStart(JNIEnv* env, jobject, jstring prompt){
+           if(!g_ctx)return JNI_FALSE;
+           const char* p=env->GetStringUTFChars(prompt,0); std::string s(p);
+           env->ReleaseStringUTFChars(prompt,p);
+           std::vector<llama_token> toks(s.size()+16);
+           int n=llama_tokenize(g_vocab,s.c_str(),(int)s.size(),toks.data(),(int)toks.size(),true,true);
+           if(n<0)return JNI_FALSE; toks.resize(n);
+           llama_batch b=llama_batch_get_one(toks.data(),(int)toks.size());
+           if(llama_decode(g_ctx,b)!=0)return JNI_FALSE;
+           g_npast=n; return JNI_TRUE;
+          }
+          extern "C" JNIEXPORT jstring JNICALL
+          Java_app_revive2_Native_nativeNext(JNIEnv* env, jobject){
+           if(!g_ctx)return nullptr;
+           int nv=llama_vocab_n_tokens(g_vocab);
+           float* logits=llama_get_logits_ith(g_ctx,-1);
+           int best=0; float bv=logits[0];
+           for(int i=1;i<nv;i++) if(logits[i]>bv){bv=logits[i];best=i;}
+           llama_token tok=(llama_token)best;
+           if(llama_vocab_is_eog(g_vocab,tok))return nullptr;
+           char buf[128]; int len=llama_token_to_piece(g_vocab,tok,buf,sizeof(buf),0,true);
+           if(len<0)return nullptr;
+           llama_batch b=llama_batch_get_one(&tok,1);
+           if(llama_decode(g_ctx,b)!=0)return nullptr;
+           g_npast++;
+           return env->NewStringUTF(std::string(buf,len).c_str());
+          }
+          extern "C" JNIEXPORT void JNICALL
+          Java_app_revive2_Native_nativeFree(JNIEnv*, jobject){
+           if(g_ctx){llama_free(g_ctx);g_ctx=nullptr;}
+           if(g_model){llama_model_free(g_model);g_model=nullptr;}
+           g_vocab=nullptr;
+          }
+          EOF
+          cat > $D/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+          <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+          <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+          <uses-permission android:name="android.permission.INTERNET"/>
+          <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+          <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+          <application android:label="@string/app_name" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:requestLegacyExternalStorage="true">
+          <activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
+          <service android:name=".OverlayService" android:exported="false"/>
+          <service android:name=".ReviveA11y" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:exported="true"><intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter><meta-data android:name="android.accessibilityservice" android:resource="@xml/a11y"/></service>
+          <service android:name=".NListener" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true"><intent-filter><action android:name="android.service.notification.NotificationListenerService"/></intent-filter></service>
+          <receiver android:name=".BootReceiver" android:exported="true"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter></receiver>
+          </application></manifest>
+          EOF
+          cat > $D/res/values/strings.xml <<'EOF'
+          <resources><string name="app_name">REVIVE-AI</string></resources>
+          EOF
+          cat > $D/res/xml/a11y.xml <<'EOF'
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+          android:accessibilityEventTypes="typeAllMask" android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds"
+          android:canRetrieveWindowContent="true" android:canPerformGestures="true" android:notificationTimeout="100"/>
+          EOF
+          cat > $K/Native.kt <<'EOF'
+          package app.revive2
+          object Native{
+           init{try{System.loadLibrary("revive2")}catch(e:Throwable){}}
+           external fun nativeLoad(path:String):Boolean
+           external fun nativeStart(prompt:String):Boolean
+           external fun nativeNext():String?
+           external fun nativeFree()
+          }
+          EOF
+          cat > $K/Ai.kt <<'EOF'
+          package app.revive2
+          import android.content.Context
+          import java.io.File
+          import java.net.URL
+          object Ai{
+           @Volatile var partial=""; @Volatile var busy=false; @Volatile var loaded=false
+           fun file(c:Context)=File(c.filesDir,"model.gguf")
+           fun download(c:Context,url:String):String=try{
+            val f=file(c);val con=URL(url).openConnection();con.connectTimeout=15000;con.connect()
+            val inp=con.getInputStream();val out=f.outputStream();val buf=ByteArray(65536);var read=0L
+            while(true){val n=inp.read(buf);if(n<=0)break;out.write(buf,0,n);read+=n}
+            inp.close();out.close();"downloaded ${read/1048576}MB"}catch(e:Throwable){"ERR "+e.message}
+           fun load(c:Context):String{val f=file(c);if(!f.exists())return "no model file, download first"
+            loaded=Native.nativeLoad(f.absolutePath);return if(loaded)"model loaded" else "load FAILED (check native build / model format)"}
+           fun generate(prompt:String,max:Int=220):String{
+            if(!loaded)return "model not loaded"
+            busy=true;partial="";try{Native.nativeStart(prompt)
+             var n=0;while(n<max){val t=Native.nativeNext()?:break;partial+=t;n++}}catch(e:Throwable){partial+="\n[ERR ${e.message}]"}
+            busy=false;return partial}
+          }
+          EOF
+          cat > $K/Tts.kt <<'EOF'
+          package app.revive2
+          import android.content.Context
+          import android.speech.tts.TextToSpeech
+          import java.util.Locale
+          object Tts{var e:TextToSpeech?=null
+           fun speak(c:Context,t:String){if(t.isBlank())return
+            if(e==null)e=TextToSpeech(c.applicationContext){st->if(st==TextToSpeech.SUCCESS)e?.language=Locale.US;e?.speak(t,TextToSpeech.QUEUE_FLUSH,null,"u")}
+            else e?.speak(t,TextToSpeech.QUEUE_FLUSH,null,"u")}
+          }
+          EOF
+          cat > $K/Rules.kt <<'EOF'
+          package app.revive2
+          import android.content.Context
+          import android.content.SharedPreferences
+          object Rules{lateinit var p:SharedPreferences; var ok=false
+           fun init(c:Context){if(ok)return;p=c.getSharedPreferences("p",0);ok=true}
+           fun all():List<String> = (p.getString("rules","")?:"").split("\n").filter{it.isNotBlank()}
+           fun add(type:String,trig:String,action:String){val l=all().toMutableList();l.add("$type|$trig|$action");p.edit().putString("rules",l.joinToString("\n")).apply()}
+           fun clear(){p.edit().putString("rules","").apply()}
+          }
+          EOF
+          cat > $K/ReviveA11y.kt <<'EOF'
+          package app.revive2
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Path
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          object A11y{@Volatile var inst:ReviveA11y?=null}
+          class ReviveA11y:AccessibilityService(){
+           val lastRun=HashMap<Int,Long>()
+           override fun onServiceConnected(){A11y.inst=this;Rules.init(applicationContext)}
+           override fun onInterrupt(){}
+           override fun onDestroy(){A11y.inst=null;super.onDestroy()}
+           override fun onAccessibilityEvent(e:AccessibilityEvent){try{
+            when(e.eventType){
+             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED->check("pkg",e.packageName?.toString()?:"")
+             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED->check("text",dump())}}catch(x:Throwable){}}
+           fun check(type:String,v:String){Rules.all().forEachIndexed{i,r->val p=r.split("|",limit=3)
+            if(p.size==3&&p[0]==type&&v.contains(p[1],true)){val now=System.currentTimeMillis()
+             if(now-(lastRun[i]?:0)>5000){lastRun[i]=now;Thread{Brain.run(applicationContext,p[2])}.start()}}}}
+           fun dump():String{val r=rootInActiveWindow?:return "";val sb=StringBuilder();walk(r,sb,0);return sb.toString().take(4000)}
+           fun walk(n:AccessibilityNodeInfo?,sb:StringBuilder,d:Int){if(n==null||d>14)return
+            val t=n.text?.toString()?:n.contentDescription?.toString()?:""
+            if(t.isNotBlank())sb.append(t).append('\n')
+            for(i in 0 until n.childCount)walk(n.getChild(i),sb,d+1)}
+           fun click(text:String):Boolean{val r=rootInActiveWindow?:return false;return clickRec(r,text)}
+           fun clickRec(n:AccessibilityNodeInfo?,text:String):Boolean{if(n==null)return false
+            val t=n.text?.toString()?:n.contentDescription?.toString()?:""
+            if(t.contains(text,true)){if(n.isClickable){n.performAction(AccessibilityNodeInfo.ACTION_CLICK);return true}
+             var p=n.parent;while(p!=null){if(p.isClickable){p.performAction(AccessibilityNodeInfo.ACTION_CLICK);return true};p=p.parent}}
+            for(i in 0 until n.childCount)if(clickRec(n.getChild(i),text))return true; return false}
+           fun gesture(x1:Float,y1:Float,x2:Float,y2:Float,ms:Long){val p=Path();p.moveTo(x1,y1);p.lineTo(x2,y2)
+            val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,ms)).build()
+            dispatchGesture(g,null,null)}
+           fun global(a:Int)=performGlobalAction(a)
+          }
+          EOF
+          cat > $K/NListener.kt <<'EOF'
+          package app.revive2
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+          class NListener:NotificationListenerService(){
+           override fun onNotificationPosted(sbn:StatusBarNotification){try{
+            Rules.init(applicationContext)
+            val txt=sbn.notification.extras.getCharSequence("android.text")?.toString()?:""
+            Rules.all().forEach{r->val p=r.split("|",limit=3)
+             if(p.size==3&&p[0]=="notif"&&(sbn.packageName.contains(p[1],true)||txt.contains(p[1],true)))Thread{Brain.run(applicationContext,p[2])}.start()}
+           }catch(x:Throwable){}}
+          }
+          EOF
+          cat > $K/Brain.kt <<'EOF'
+          package app.revive2
+          import android.accessibilityservice.AccessibilityService as AS
+          import android.content.Context
+          object Brain{
+           fun run(c:Context,t:String):String=t.split(";","\n").map{it.trim()}.filter{it.isNotEmpty()}.joinToString("\n"){one(c,it)}
+           fun one(c:Context,s:String):String=try{val a=s.split(" ")
+            when(a[0].lowercase()){
+             "dump"->A11y.inst?.dump()?:"a11y service not running"
+             "click"->if(A11y.inst==null)"a11y not running" else if(A11y.inst!!.click(s.substring(6)))"ok" else "node not found"
+             "back"->{A11y.inst?.global(AS.GLOBAL_ACTION_BACK);"ok"}
+             "home"->{A11y.inst?.global(AS.GLOBAL_ACTION_HOME);"ok"}
+             "recents"->{A11y.inst?.global(AS.GLOBAL_ACTION_RECENTS);"ok"}
+             "notifs"->{A11y.inst?.global(AS.GLOBAL_ACTION_NOTIFICATIONS);"ok"}
+             "gesture"->{val n=a.drop(1).map{it.toFloat()};A11y.inst?.gesture(n[0],n[1],n[2],n[3],300);"ok"}
+             "say"->{Tts.speak(c,s.substring(4));"ok"}
+             "ask"->{val q=s.substring(4);val d=A11y.inst?.dump()?.take(1500)?:""
+              Ai.generate("Screen context:\n$d\nUser question: $q\nAnswer concisely:")}
+             "overlay"->{val i=android.content.Intent(c,OverlayService::class.java)
+              if(a.getOrNull(1)=="off"){c.stopService(i);"overlay off"} else {c.startForegroundService(i);"overlay on"}}
+             else->"?? unknown: ${a[0]}"
+            }}catch(x:Throwable){"ERR "+x.message}
+          }
+          EOF
+          cat > $K/BootReceiver.kt <<'EOF'
+          package app.revive2
+          import android.content.*
+          class BootReceiver:BroadcastReceiver(){override fun onReceive(c:Context,i:Intent){Rules.init(c)}}
+          EOF
+          cat > $K/OverlayService.kt <<'EOF'
+          package app.revive2
+          import android.app.*
+          import android.content.*
+          import android.graphics.*
+          import android.os.*
+          import android.view.*
+          import android.widget.TextView
+          class OverlayService:Service(){
+           lateinit var wm:WindowManager; lateinit var v:TextView; var started=false
+           val h=Handler(Looper.getMainLooper())
+           val tf by lazy{try{Typeface.createFromAsset(assets,"m.ttf")}catch(e:Throwable){Typeface.MONOSPACE}}
+           val lp=WindowManager.LayoutParams(-2,-2,WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT).apply{gravity=Gravity.TOP or Gravity.START;x=24;y=100}
+           val tick=object:Runnable{override fun run(){draw();h.postDelayed(this,300)}}
+           override fun onBind(i:Intent?):IBinder?=null
+           override fun onStartCommand(i:Intent?,f:Int,s:Int):Int{
+            if(started)return START_STICKY; started=true
+            getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("o","overlay",NotificationManager.IMPORTANCE_MIN))
+            startForeground(1,Notification.Builder(this,"o").setSmallIcon(android.R.drawable.ic_menu_mylocation).setContentTitle("REVIVE-AI").build())
+            wm=getSystemService(WINDOW_SERVICE) as WindowManager; v=TextView(this); wm.addView(v,lp); h.post(tick); return START_STICKY}
+           fun draw(){val c=0xFF00FFC8.toInt()
+            val mi=ActivityManager.MemoryInfo(); getSystemService(ActivityManager::class.java).getMemoryInfo(mi)
+            val stat="RAM ${(mi.totalMem-mi.availMem)/1048576}/${mi.totalMem/1048576}MB"
+            val ai=if(Ai.busy||Ai.partial.isNotEmpty())"\n— AI —\n"+Ai.partial.takeLast(500) else ""
+            v.text=stat+ai; v.textSize=12f; v.setTextColor(c); v.typeface=tf; v.alpha=0.95f
+            v.setShadowLayer(8f,0f,0f,c); v.setPadding(16,10,16,10); v.setBackgroundColor(0x99000000.toInt())
+            wm.updateViewLayout(v,lp)}
+           override fun onDestroy(){h.removeCallbacks(tick);try{wm.removeView(v)}catch(e:Throwable){};started=false;super.onDestroy()}
+          }
+          EOF
+          cat > $K/MainActivity.kt <<'EOF'
+          package app.revive2
+          import android.app.Activity
+          import android.content.*
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.*
+          import android.provider.Settings
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.view.View
+          import android.widget.*
+          class MainActivity:Activity(){
+           lateinit var p:SharedPreferences; lateinit var hf:Typeface; lateinit var mf:Typeface; lateinit var root:LinearLayout; lateinit var out:TextView
+           val ac=0xFF00FFC8.toInt()
+           fun ft(a:String,d:Typeface)=try{Typeface.createFromAsset(assets,a)}catch(e:Throwable){d}
+           fun tv(t:String,s:Int,c:Int,f:Typeface=mf)=TextView(this).apply{text=t;textSize=s.toFloat();setTextColor(c);typeface=f;setPadding(0,10,0,10)}
+           fun add(v:View)=root.addView(v)
+           fun sec(t:String)=add(tv("▌"+t,16,ac,hf))
+           fun btn(t:String,f:()->Unit)=Button(this).apply{text=t;isAllCaps=false;typeface=mf;setTextColor(ac)
+            background=GradientDrawable().apply{setColor(0xFF050505.toInt());setStroke(2,ac);cornerRadius=14f};setOnClickListener{f()}}
+           fun edit(h:String)=EditText(this).apply{hint=h;setTextColor(ac);setHintTextColor(0xFF555555.toInt());typeface=mf}
+           fun run2(c:String){Thread{val r=Brain.run(applicationContext,c);runOnUiThread{out.text="> $c\n$r";Toast.makeText(this,r.take(80).ifEmpty{"ok"},Toast.LENGTH_SHORT).show()}}.start()}
+           override fun onCreate(b:Bundle?){super.onCreate(b)
+            p=getSharedPreferences("p",0); Rules.init(this)
+            hf=ft("o.ttf",Typeface.DEFAULT_BOLD); mf=ft("m.ttf",Typeface.MONOSPACE)
+            window.statusBarColor=0; window.navigationBarColor=0
+            val sv=ScrollView(this).apply{setBackgroundColor(0xFF000000.toInt())}
+            root=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(32,72,32,72)}
+            sv.addView(root); setContentView(sv); out=tv("",11,0xFFAAAAAA.toInt()); ui()}
+           override fun onDestroy(){super.onDestroy()}
+           fun ui(){
+            add(tv("REVIVE//AI",26,ac,hf)); add(tv("on-device model + accessibility-level automation",11,0xFF888888.toInt()))
+            sec("1. ENABLE SERVICES (required, one-time)")
+            add(tv("Non-root screen reading/automation uses Android's own Accessibility API — the same mechanism Tasker/AutoInput use. No exploit, no root.",11,0xFF777777.toInt()))
+            add(btn("Open Accessibility settings → enable REVIVE-AI"){startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))})
+            add(btn("Open Notification access settings → enable REVIVE-AI"){startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))})
+            add(btn("Allow overlay permission"){startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:$packageName")))})
+            add(btn("Overlay ON/OFF"){run2("overlay on")})
+            sec("2. LOCAL MODEL")
+            add(tv("Point this at a small instruct GGUF (Q4_K_M, ~0.3-1GB works on old phones). Default below is a tiny example — swap it.",11,0xFF777777.toInt()))
+            val u=edit("model .gguf direct URL"); u.setText("https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf")
+            add(u)
+            add(btn("Download model"){out.text="downloading...";Thread{val r=Ai.download(applicationContext,u.text.toString().trim());runOnUiThread{out.text=r}}.start()})
+            add(btn("Load model into memory"){out.text="loading...";Thread{val r=Ai.load(applicationContext);runOnUiThread{out.text=r}}.start()})
+            sec("3. GRANULAR RULES (trigger -> action)")
+            add(tv("Action script reuses the command language below (chain with ;). trigger type 'pkg'=app opened, 'text'=screen text appears, 'notif'=notification matches.",11,0xFF777777.toInt()))
+            val tt=edit("trigger type: pkg / text / notif")
+            val tval=edit("trigger value (substring match)")
+            val tact=edit("action script e.g. say hello; click OK")
+            add(tt);add(tval);add(tact)
+            add(btn("Add rule"){Rules.add(tt.text.toString().trim(),tval.text.toString().trim(),tact.text.toString().trim());out.text="rule added:\n${Rules.all().joinToString("\n")}"})
+            add(btn("List rules"){out.text=Rules.all().joinToString("\n").ifEmpty{"(none)"}})
+            add(btn("Clear all rules"){Rules.clear();out.text="cleared"})
+            sec("4. TALK TO IT")
+            val q=edit("type a question / command")
+            add(q)
+            add(btn("Ask (text)"){run2("ask "+q.text.toString().trim())})
+            add(btn("Ask (voice)"){voice()})
+            sec("5. RAW CONSOLE")
+            add(tv("dump | click <text> | back | home | recents | notifs | gesture x1 y1 x2 y2 | say <text> | ask <q> | overlay on/off",11,0xFF777777.toInt()))
+            val cc=edit("raw command"); add(cc)
+            add(btn("Execute"){run2(cc.text.toString())})
+            add(out)}
+           fun voice(){try{
+            val sr=SpeechRecognizer.createSpeechRecognizer(this)
+            sr.setRecognitionListener(object:RecognitionListener{
+             override fun onResults(b:Bundle){val r=b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?:"";run2("ask "+r)}
+             override fun onReadyForSpeech(b:Bundle?){}; override fun onBeginningOfSpeech(){}; override fun onRmsChanged(v:Float){}
+             override fun onBufferReceived(b:ByteArray?){}; override fun onEndOfSpeech(){}; override fun onError(e:Int){}
+             override fun onPartialResults(b:Bundle?){}; override fun onEvent(e:Int,b:Bundle?){}})
+            val i=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            sr.startListening(i)}catch(e:Throwable){Toast.makeText(this,"voice unavailable: "+e.message,Toast.LENGTH_SHORT).show()}}
+          }
+          EOF
+      - name: build
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: revive-ai-apk
+          path: app/build/outputs/apk/debug/*.apk
