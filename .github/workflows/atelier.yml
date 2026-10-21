@@ -1,0 +1,1498 @@
+name: Build Atelier
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - name: Write sources
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Atelier"
+          include(":app")
+          EOF
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.atelier.figure"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.atelier.figure"; minSdk = 29; targetSdk = 34; versionCode = 1; versionName = "1.0"; ndk { abiFilters += listOf("arm64-v8a") } }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:glEsVersion="0x00030000" android:required="true"/>
+              <application android:label="Atelier Figure" android:largeHeap="true" android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/atelier/figure/Defs.kt)
+          cat > app/src/main/java/com/atelier/figure/Defs.kt <<'EOF'
+          package com.atelier.figure
+
+          import android.content.Context
+          import java.util.concurrent.ConcurrentHashMap
+
+          class Prm(val k: String, val t: String, val lo: Float, val hi: Float, val d: Float, val sw: Boolean = false)
+
+          object P {
+              val v = ConcurrentHashMap<String, Float>()
+              private var prefs: android.content.SharedPreferences? = null
+              fun g(k: String): Float = v[k] ?: Defs.def[k] ?: 0f
+              fun i(k: String): Int = g(k).toInt()
+              fun s(k: String, x: Float) { v[k] = x; prefs?.edit()?.putFloat(k, x)?.apply() }
+              fun init(c: Context) {
+                  prefs = c.getSharedPreferences("atelier", Context.MODE_PRIVATE)
+                  for ((k, x) in prefs!!.all) if (x is Float) v[k] = x
+              }
+              fun reset(keys: List<String>) { val e = prefs?.edit(); for (k in keys) { v.remove(k); e?.remove(k) }; e?.apply() }
+          }
+
+          object Defs {
+              const val SLIDERS = "abs_def,ankle_th,arm_len,belly,bicep_def,bone_def,brow,bust,bust_h,bust_sep,calf_def,calf_th,cheek,chest_d,chest_w,chin,delt_def,ear_size,eye_h,eye_sep,eye_size,face_len,face_w,fat,finger_len,finger_th,foot_len,foot_w,forearm_def,forearm_len,forearm_th,glute,hair_len,hair_vol,ham_def,hand_size,head_size,height,hip_d,hip_w,jaw_w,knee_sz,lat_def,leg_len,lip_full,lip_w,mouth_h,muscle,neck_len,neck_th,nose_br,nose_len,nose_tip,nose_w,obl_def,pec_def,quad_def,ribcage,shin_len,shoulder_w,thigh_gap,thigh_len,thigh_th,torso_len,trap_def,tricep_def,upperarm_th,waist_d,waist_w,wrist_th"
+              const val BONES = "root,pelvis,spine1,spine2,chest,neck,head,jaw,eyeL,eyeR,clavL,uarmL,farmL,handL,fL_idx0,fL_idx1,fL_idx2,fL_mid0,fL_mid1,fL_mid2,fL_rng0,fL_rng1,fL_rng2,fL_pnk0,fL_pnk1,fL_pnk2,fL_thm0,fL_thm1,fL_thm2,thighL,shinL,footL,toeL,clavR,uarmR,farmR,handR,fR_idx0,fR_idx1,fR_idx2,fR_mid0,fR_mid1,fR_mid2,fR_rng0,fR_rng1,fR_rng2,fR_pnk0,fR_pnk1,fR_pnk2,fR_thm0,fR_thm1,fR_thm2,thighR,shinR,footR,toeR"
+              private fun nice(k: String) = k.replace('_', ' ').replaceFirstChar { it.uppercase() }
+              private fun sl(vararg n: String) = n.map { Prm(it, nice(it), -1f, 1f, 0f) }
+              private fun p(k: String, t: String, lo: Float, hi: Float, d: Float, sw: Boolean = false) = Prm(k, t, lo, hi, d, sw)
+
+              val JOINTS = listOf("pelvis", "spine1", "spine2", "chest", "neck", "head", "clavL", "clavR", "uarmL", "uarmR", "farmL", "farmR", "handL", "handR", "thighL", "thighR", "shinL", "shinR", "footL", "footR", "toeL", "toeR")
+              val FLEX_SIGN = mapOf("uarm" to -1f, "farm" to -1f, "hand" to -1f, "thigh" to -1f, "foot" to -1f, "toe" to -1f)
+              fun jointRange(j: String): FloatArray = when {
+                  j.startsWith("farm") -> floatArrayOf(-10f, 150f, -90f, 90f, -30f, 30f)
+                  j.startsWith("shin") -> floatArrayOf(-10f, 150f, -40f, 40f, -10f, 10f)
+                  j.startsWith("thigh") -> floatArrayOf(-120f, 60f, -60f, 60f, -50f, 60f)
+                  j.startsWith("uarm") -> floatArrayOf(-80f, 180f, -90f, 90f, -30f, 150f)
+                  j.startsWith("hand") -> floatArrayOf(-70f, 70f, -60f, 60f, -40f, 40f)
+                  j.startsWith("foot") -> floatArrayOf(-45f, 45f, -30f, 30f, -30f, 30f)
+                  j.startsWith("toe") -> floatArrayOf(-30f, 60f, -5f, 5f, -10f, 10f)
+                  j.startsWith("clav") -> floatArrayOf(-20f, 20f, -10f, 10f, -20f, 30f)
+                  else -> floatArrayOf(-60f, 60f, -60f, 60f, -45f, 45f)
+              }
+              val POSE_PRESETS: LinkedHashMap<String, Map<String, Float>> = linkedMapOf(
+                  "A-pose" to emptyMap<String, Float>(),
+                  "T-pose" to mapOf("j_uarmL_z" to 72f, "j_uarmR_z" to 72f),
+                  "Contrapposto" to mapOf("j_pelvis_z" to 6f, "j_spine1_z" to -4f, "j_chest_z" to -3f, "j_head_z" to 4f, "j_thighL_x" to 4f, "j_thighL_z" to 4f, "j_shinL_x" to 8f, "j_thighR_z" to -3f, "j_uarmL_z" to 4f, "j_farmL_x" to 25f, "j_farmR_x" to 12f, "root_y" to -0.01f),
+                  "Walk" to mapOf("j_uarmL_x" to 25f, "j_farmL_x" to 35f, "j_uarmR_x" to -20f, "j_farmR_x" to 15f, "j_thighL_x" to 28f, "j_shinL_x" to 10f, "j_thighR_x" to -18f, "j_shinR_x" to 35f, "j_spine1_y" to 6f, "j_chest_y" to -8f, "j_pelvis_y" to -6f, "j_head_y" to 5f),
+                  "Sit" to mapOf("j_thighL_x" to 90f, "j_thighR_x" to 90f, "j_shinL_x" to 90f, "j_shinR_x" to 90f, "root_y" to -0.44f, "j_uarmL_x" to 25f, "j_uarmR_x" to 25f, "j_farmL_x" to 75f, "j_farmR_x" to 75f, "j_spine2_x" to 6f),
+                  "Arms up" to mapOf("j_uarmL_x" to 175f, "j_uarmR_x" to 175f, "j_farmL_x" to 8f, "j_farmR_x" to 8f, "j_head_x" to -10f),
+                  "Dynamic" to mapOf("j_spine1_x" to 14f, "j_chest_y" to 20f, "j_uarmL_x" to 90f, "j_uarmL_z" to 30f, "j_farmL_x" to 50f, "j_uarmR_x" to -40f, "j_thighL_x" to 55f, "j_shinL_x" to 70f, "j_thighR_x" to -25f, "j_shinR_x" to 20f, "root_y" to -0.04f)
+              )
+              val TABS: LinkedHashMap<String, List<Prm>> = linkedMapOf(
+                  "Body" to sl("height", "torso_len", "shoulder_w", "chest_w", "chest_d", "ribcage", "waist_w", "waist_d", "belly", "hip_w", "hip_d", "glute", "bust", "bust_sep", "bust_h", "fat", "neck_len", "neck_th", "arm_len", "forearm_len", "upperarm_th", "forearm_th", "wrist_th", "hand_size", "finger_len", "finger_th", "leg_len", "thigh_len", "shin_len", "thigh_th", "thigh_gap", "calf_th", "knee_sz", "ankle_th", "foot_len", "foot_w"),
+                  "Muscle" to sl("muscle", "delt_def", "pec_def", "trap_def", "lat_def", "abs_def", "obl_def", "bicep_def", "tricep_def", "forearm_def", "quad_def", "ham_def", "calf_def", "bone_def"),
+                  "Face" to sl("head_size", "face_w", "face_len", "jaw_w", "chin", "cheek", "brow", "eye_size", "eye_sep", "eye_h", "nose_len", "nose_w", "nose_tip", "nose_br", "lip_full", "lip_w", "mouth_h", "ear_size") +
+                      listOf(p("jaw_open", "Mouth open", 0f, 30f, 0f), p("gazeX", "Gaze left/right", -30f, 30f, 0f), p("gazeY", "Gaze up/down", -25f, 25f, 0f)),
+                  "Hair" to sl("hair_len", "hair_vol") + listOf(p("hair_h", "Hair hue", 0f, 1f, 0.07f), p("hair_s", "Hair saturation", 0f, 1f, 0.6f), p("hair_v", "Hair value", 0f, 1f, 0.35f), p("hair_gloss", "Hair gloss", 0f, 2f, 1f)),
+                  "Skin" to listOf(p("skin_tone", "Skin tone", 0f, 1f, 0.25f), p("skin_red", "Blush / warmth", 0f, 1f, 0.25f), p("lip_s", "Lip color", 0f, 1f, 0.5f), p("brow_dark", "Brow darkness", 0f, 1f, 0.5f),
+                      p("eyec_h", "Iris hue", 0f, 1f, 0.58f), p("eyec_s", "Iris saturation", 0f, 1f, 0.6f), p("eyec_v", "Iris value", 0f, 1f, 0.55f), p("skin_gloss", "Skin sheen", 0f, 2f, 1f)),
+                  "Outfit" to listOf(
+                      p("top_on", "Top", 0f, 1f, 1f, true), p("top_sleeve", "Sleeve length", 0f, 1.05f, 0.25f), p("top_hem", "Hem height", -0.6f, 1f, 0.12f), p("neckline", "Neckline size", 0.04f, 0.15f, 0.085f), p("neck_drop", "Neckline drop", 0f, 1f, 0.3f),
+                      p("top_loose", "Top looseness", 0f, 0.05f, 0.008f), p("top_h", "Top hue", 0f, 1f, 0.58f), p("top_s", "Top saturation", 0f, 1f, 0.5f), p("top_v", "Top value", 0f, 1f, 0.8f),
+                      p("top_pat", "Top pattern", 0f, 4f, 0f), p("top_pat_sc", "Pattern scale", 0.5f, 3f, 1f), p("top_h2", "Pattern hue", 0f, 1f, 0.08f), p("top_s2", "Pattern saturation", 0f, 1f, 0.3f), p("top_v2", "Pattern value", 0f, 1f, 0.95f),
+                      p("top_sheen", "Top sheen", 0f, 1f, 0.4f), p("top_wr", "Top wrinkles", 0f, 2f, 0.8f),
+                      p("bot_on", "Bottom", 0f, 1f, 1f, true), p("skirt_on", "Skirt instead of pants", 0f, 1f, 0f, true), p("bot_len", "Pants length", 0f, 1.05f, 0.3f), p("bot_loose", "Bottom looseness", 0f, 0.05f, 0.004f),
+                      p("skirt_len", "Skirt length", 0.1f, 0.75f, 0.32f), p("skirt_flare", "Skirt flare", 0f, 0.35f, 0.12f), p("pleat", "Pleats", 0f, 1f, 0.4f),
+                      p("bot_h", "Bottom hue", 0f, 1f, 0.62f), p("bot_s", "Bottom saturation", 0f, 1f, 0.45f), p("bot_v", "Bottom value", 0f, 1f, 0.35f), p("bot_pat", "Bottom pattern", 0f, 4f, 0f), p("bot_sheen", "Bottom sheen", 0f, 1f, 0.2f), p("bot_wr", "Bottom wrinkles", 0f, 2f, 0.8f),
+                      p("shoe_on", "Shoes", 0f, 1f, 0f, true), p("shoe_h", "Shoe hue", 0f, 1f, 0.0f), p("shoe_s", "Shoe saturation", 0f, 1f, 0.05f), p("shoe_v", "Shoe value", 0f, 1f, 0.9f), p("wr_freq", "Fold frequency", 0.5f, 3f, 1f)),
+                  "Light" to listOf(p("key_az", "Key azimuth", -180f, 180f, 35f), p("key_el", "Key elevation", 0f, 90f, 42f), p("key_int", "Key intensity", 0f, 5f, 2.6f), p("fill_az", "Fill azimuth", -180f, 180f, -70f), p("fill_int", "Fill intensity", 0f, 3f, 0.6f),
+                      p("rim_az", "Rim azimuth", -180f, 180f, 160f), p("rim_int", "Rim intensity", 0f, 4f, 1.4f), p("amb", "Ambient", 0f, 1.5f, 0.45f), p("shadow_soft", "Shadow softness (lower = softer)", 2f, 30f, 8f),
+                      p("bg_h", "Background hue", 0f, 1f, 0.6f), p("bg_s", "Background saturation", 0f, 1f, 0.15f), p("bg_v", "Background brightness", 0.02f, 1f, 0.3f), p("ground", "Floor", 0f, 1f, 1f, true)),
+                  "Render" to listOf(p("mode", "Mode: 0 shaded 1 clay 2 anatomy 3 normals 4 toon", 0f, 4f, 0f), p("exposure", "Exposure", -2f, 2f, 0f), p("vignette", "Vignette", 0f, 1f, 0.3f), p("fov", "Field of view", 10f, 60f, 28f),
+                      p("spp", "Max samples (quality)", 4f, 256f, 64f), p("steps", "March steps", 40f, 160f, 110f), p("preview_scale", "Interactive resolution", 0.3f, 1f, 0.5f))
+              )
+              val def: Map<String, Float> = TABS.values.flatten().associate { it.k to it.d }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/atelier/figure/Rig.kt)
+          cat > app/src/main/java/com/atelier/figure/Rig.kt <<'EOF'
+          package com.atelier.figure
+
+          import android.content.Context
+          import android.graphics.Color
+          import kotlin.math.*
+
+          class Built(val tex: FloatArray, val ng: Int, val primBase: Int, val boneBase: Int, val W: Array<FloatArray>)
+
+          class Cloth {
+              val seg = FloatArray(48); val segOn = FloatArray(4)
+              var hem = FloatArray(3); var hemN = FloatArray(3); var waist = FloatArray(3); var neck = FloatArray(3); var neckR = 0.09f
+              val foldP = FloatArray(20); val foldD = FloatArray(15); val shoeP = FloatArray(6); val shoeN = FloatArray(6)
+          }
+
+          class Rig(ctx: Context) {
+              private val sNames = Defs.SLIDERS.split(",")
+              private val sIdx = sNames.withIndex().associate { it.value to it.index }
+              val names = Defs.BONES.split(",")
+              val bi = names.withIndex().associate { it.value to it.index }
+              class B(val parent: Int, val off: FloatArray, val rot: FloatArray, val lx: FloatArray, val ly: FloatArray)
+              class PR(val bone: Int, val group: Int, val mat: Int, val ell: Boolean, val a: FloatArray, val b: FloatArray, val ra: Float, val rb: Float,
+                       val sx: Float, val sz: Float, val k: Float, val m: Array<FloatArray>)
+              private val bones = ArrayList<B>()
+              private val prims = ArrayList<PR>()
+              private val gLayer = ArrayList<Int>()
+              private val gCf = ArrayList<Int>()
+
+              private fun pm(s: String): FloatArray {
+                  if (s == "-") return FloatArray(0)
+                  val o = ArrayList<Float>()
+                  for (t in s.split(';')) { val q = t.split(':'); o.add(q[0].toFloat()); o.add(q[1].toFloat()) }
+                  return o.toFloatArray()
+              }
+
+              init {
+                  for (line in ctx.assets.open("figure.spec").bufferedReader().readLines()) {
+                      val t = line.trim().split(' ')
+                      when (t[0]) {
+                          "B" -> bones.add(B(t[1].toInt(), floatArrayOf(t[2].toFloat(), t[3].toFloat(), t[4].toFloat()), floatArrayOf(t[5].toFloat(), t[6].toFloat(), t[7].toFloat()), pm(t[8]), pm(t[9])))
+                          "G" -> { gLayer.add(t[1].toInt()); gCf.add(t[2].toInt()) }
+                          "P" -> prims.add(PR(t[1].toInt(), t[2].toInt(), t[3].toInt(), t[4] == "1",
+                              floatArrayOf(t[5].toFloat(), t[6].toFloat(), t[7].toFloat()), floatArrayOf(t[8].toFloat(), t[9].toFloat(), t[10].toFloat()),
+                              t[11].toFloat(), t[12].toFloat(), t[13].toFloat(), t[14].toFloat(), t[15].toFloat(),
+                              arrayOf(pm(t[16]), pm(t[17]), pm(t[18]), pm(t[19]), pm(t[20]), pm(t[21]))))
+                      }
+                  }
+                  prims.sortBy { it.group }
+              }
+
+              private fun fac(m: FloatArray, s: FloatArray): Float { var f = 1f; var i = 0; while (i < m.size) { f += m[i + 1] * s[m[i].toInt()]; i += 2 }; return f }
+              private fun rx(a: Float) = floatArrayOf(1f, 0f, 0f, 0f, cos(a), -sin(a), 0f, sin(a), cos(a))
+              private fun ry(a: Float) = floatArrayOf(cos(a), 0f, sin(a), 0f, 1f, 0f, -sin(a), 0f, cos(a))
+              private fun rz(a: Float) = floatArrayOf(cos(a), -sin(a), 0f, sin(a), cos(a), 0f, 0f, 0f, 1f)
+              private fun mm(a: FloatArray, b: FloatArray): FloatArray {
+                  val o = FloatArray(9)
+                  for (i in 0..2) for (j in 0..2) { var s = 0f; for (k in 0..2) s += a[i * 3 + k] * b[k * 3 + j]; o[i * 3 + j] = s }
+                  return o
+              }
+              private fun mv(a: FloatArray, v: FloatArray) = floatArrayOf(a[0] * v[0] + a[1] * v[1] + a[2] * v[2], a[3] * v[0] + a[4] * v[1] + a[5] * v[2], a[6] * v[0] + a[7] * v[1] + a[8] * v[2])
+              private val D2R = (PI / 180.0).toFloat()
+
+              fun poseAngles(): FloatArray {
+                  val a = FloatArray(names.size * 3)
+                  for (j in Defs.JOINTS) {
+                      val b = bi[j] ?: continue
+                      val right = j.endsWith("R")
+                      val base = if (j.endsWith("L") || j.endsWith("R")) j.dropLast(1) else j
+                      val fs = Defs.FLEX_SIGN[base] ?: 1f
+                      a[b * 3] = P.g("j_${j}_x") * fs
+                      a[b * 3 + 1] = P.g("j_${j}_y") * (if (right) -1f else 1f)
+                      a[b * 3 + 2] = P.g("j_${j}_z") * (if (right) -1f else 1f)
+                  }
+                  val fing = mapOf("idx" to 0.8f, "mid" to 0.25f, "rng" to -0.35f, "pnk" to -0.9f)
+                  for (sd in listOf("L", "R")) {
+                      val sg = if (sd == "L") 1f else -1f
+                      val curl = P.g("curl$sd"); val spread = P.g("spread$sd")
+                      for ((fn, sc) in fing) for (s in 0..2) {
+                          val b = bi["f${sd}_$fn$s"] ?: continue
+                          a[b * 3 + 2] = -sg * curl * floatArrayOf(1f, 0.9f, 0.7f)[s]
+                          if (s == 0) a[b * 3] = spread * sc
+                      }
+                      for (s in 0..2) { val b = bi["f${sd}_thm$s"] ?: continue; a[b * 3 + 2] = -sg * curl * 0.35f; if (s == 0) a[b * 3] = -curl * 0.15f }
+                  }
+                  bi["jaw"]?.let { a[it * 3] = P.g("jaw_open") }
+                  for (e in listOf("eyeL", "eyeR")) bi[e]?.let { a[it * 3 + 1] = P.g("gazeX"); a[it * 3] = -P.g("gazeY") }
+                  bi["root"]?.let { a[it * 3 + 1] = P.g("root_ry") }
+                  return a
+              }
+
+              fun build(): Built {
+                  val S = FloatArray(sNames.size) { P.g(sNames[it]) }
+                  val gs = 1f + 0.12f * S[sIdx["height"]!!]
+                  val ang = poseAngles()
+                  val nb = bones.size
+                  val W = Array(nb) { FloatArray(12) }
+                  for (i in 0 until nb) {
+                      val b = bones[i]
+                      var off = floatArrayOf(b.off[0] * fac(b.lx, S) * gs, b.off[1] * fac(b.ly, S) * gs, b.off[2] * gs)
+                      if (i == 0) off = floatArrayOf(P.g("root_x"), P.g("root_y"), P.g("root_z"))
+                      val rr = mm(rz(b.rot[2] * D2R), mm(ry(b.rot[1] * D2R), rx(b.rot[0] * D2R)))
+                      val rp = mm(rz(ang[i * 3 + 2] * D2R), mm(rx(ang[i * 3] * D2R), ry(ang[i * 3 + 1] * D2R)))
+                      val rl = mm(rr, rp)
+                      if (b.parent < 0) { for (k in 0..8) W[i][k] = rl[k]; for (k in 0..2) W[i][9 + k] = off[k] }
+                      else {
+                          val pw = W[b.parent]
+                          val pr = pw.copyOfRange(0, 9)
+                          val o = mv(pr, off)
+                          val r = mm(pr, rl)
+                          for (k in 0..8) W[i][k] = r[k]
+                          for (k in 0..2) W[i][9 + k] = pw[9 + k] + o[k]
+                      }
+                  }
+                  val ng = gLayer.size
+                  val per = Array(ng) { ArrayList<PR>() }
+                  for (p in prims) per[p.group].add(p)
+                  val primTex = ArrayList<Float>()
+                  val gdata = FloatArray(ng * 8)
+                  for (g in 0 until ng) {
+                      val start = primTex.size / 16
+                      var cx = FloatArray(0); val rad = ArrayList<Float>(); val cs = ArrayList<FloatArray>()
+                      for (p in per[g]) {
+                          val fx = fac(p.m[3], S); val fy = fac(p.m[4], S); val fz = fac(p.m[5], S)
+                          val a = floatArrayOf(p.a[0] * fx * gs, p.a[1] * fy * gs, p.a[2] * fz * gs)
+                          val fr = fac(p.m[0], S); val frw = fac(p.m[1], S); val frd = fac(p.m[2], S)
+                          val k = p.k * gs * (1f + 0.5f * S[sIdx["fat"]!!])
+                          val t0: FloatArray; val t1: FloatArray; val t2: FloatArray
+                          val c: FloatArray; val r: Float
+                          if (p.ell) {
+                              val rxx = p.ra * fr * frw * gs; val ryy = p.rb * fr * gs; val rzz = p.sx * fr * frd * gs
+                              t0 = floatArrayOf(a[0], a[1], a[2], rxx); t1 = floatArrayOf(0f, 0f, 0f, ryy); t2 = floatArrayOf(rzz, 0f, k, 1f)
+                              c = a; r = max(rxx, max(ryy, rzz))
+                          } else {
+                              val b = floatArrayOf(p.b[0] * fx * gs, p.b[1] * fy * gs, p.b[2] * fz * gs)
+                              val ra = p.ra * fr * gs; val rb = p.rb * fr * gs; val sx = p.sx * frw; val sz = p.sz * frd
+                              t0 = floatArrayOf(a[0], a[1], a[2], ra); t1 = floatArrayOf(b[0], b[1], b[2], rb); t2 = floatArrayOf(sx, sz, k, 0f)
+                              c = floatArrayOf((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+                              val half = sqrt((a[0] - b[0]).pow(2) + (a[1] - b[1]).pow(2) + (a[2] - b[2]).pow(2)) / 2
+                              r = (half + max(ra, rb)) * max(max(sx, sz), 1f)
+                          }
+                          for (v in t0) primTex.add(v); for (v in t1) primTex.add(v); for (v in t2) primTex.add(v)
+                          primTex.add(p.bone.toFloat()); primTex.add(g.toFloat()); primTex.add(p.mat.toFloat()); primTex.add(0f)
+                          val w = W[p.bone]
+                          cs.add(floatArrayOf(w[9] + w[0] * c[0] + w[1] * c[1] + w[2] * c[2], w[10] + w[3] * c[0] + w[4] * c[1] + w[5] * c[2], w[11] + w[6] * c[0] + w[7] * c[1] + w[8] * c[2]))
+                          rad.add(r + k * 0.5f)
+                      }
+                      var m = floatArrayOf(0f, 0f, 0f); var R = 0f
+                      if (cs.isNotEmpty()) {
+                          m = floatArrayOf(cs.map { it[0] }.average().toFloat(), cs.map { it[1] }.average().toFloat(), cs.map { it[2] }.average().toFloat())
+                          for (i in cs.indices) R = max(R, sqrt((cs[i][0] - m[0]).pow(2) + (cs[i][1] - m[1]).pow(2) + (cs[i][2] - m[2]).pow(2)) + rad[i])
+                      }
+                      gdata[g * 8] = m[0]; gdata[g * 8 + 1] = m[1]; gdata[g * 8 + 2] = m[2]; gdata[g * 8 + 3] = R
+                      gdata[g * 8 + 4] = start.toFloat(); gdata[g * 8 + 5] = per[g].size.toFloat(); gdata[g * 8 + 6] = gLayer[g].toFloat(); gdata[g * 8 + 7] = gCf[g].toFloat()
+                  }
+                  val primBase = ng * 2
+                  val boneBase = primBase + primTex.size / 4
+                  val total = boneBase + nb * 3
+                  val rows = (total + 1023) / 1024
+                  val tex = FloatArray(rows * 1024 * 4)
+                  System.arraycopy(gdata, 0, tex, 0, gdata.size)
+                  for (i in primTex.indices) tex[primBase * 4 + i] = primTex[i]
+                  for (b in 0 until nb) {
+                      val w = W[b]
+                      val ti = floatArrayOf(-(w[0] * w[9] + w[3] * w[10] + w[6] * w[11]), -(w[1] * w[9] + w[4] * w[10] + w[7] * w[11]), -(w[2] * w[9] + w[5] * w[10] + w[8] * w[11]))
+                      for (r in 0..2) {
+                          val o = (boneBase + b * 3 + r) * 4
+                          tex[o] = w[r]; tex[o + 1] = w[3 + r]; tex[o + 2] = w[6 + r]; tex[o + 3] = ti[r]
+                      }
+                  }
+                  return Built(tex, ng, primBase, boneBase, W)
+              }
+
+              // ---------------------------------------------------------------- clothing geometry from the pose
+              private fun p3(B: Built, n: String): FloatArray { val w = B.W[bi[n]!!]; return floatArrayOf(w[9], w[10], w[11]) }
+              private fun sub(a: FloatArray, b: FloatArray) = floatArrayOf(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+              private fun add(a: FloatArray, b: FloatArray, s: Float) = floatArrayOf(a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s)
+              private fun len(a: FloatArray) = sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+              private fun nrm(a: FloatArray): FloatArray { val l = max(len(a), 1e-6f); return floatArrayOf(a[0] / l, a[1] / l, a[2] / l) }
+              private fun dot(a: FloatArray, b: FloatArray) = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+              private fun chain(c: Cloth, idx: Int, s: FloatArray, e: FloatArray, w: FloatArray, t: Float, on: Boolean) {
+                  val u1 = nrm(sub(e, s)); val u2 = nrm(sub(w, e)); val l1 = len(sub(e, s)); val l2 = len(sub(w, e))
+                  c.segOn[idx] = if (on && t < 1f) 1f else 0f
+                  val d = max(0.01f, t * (l1 + l2))
+                  val a0: FloatArray; val b0: FloatArray; val a1: FloatArray; val b1: FloatArray
+                  if (d <= l1) { a0 = add(s, u1, d); b0 = e; a1 = e; b1 = add(w, u2, 0.25f) }
+                  else { a0 = add(e, u2, d - l1); b0 = add(w, u2, 0.25f); a1 = a0; b1 = b0 }
+                  val all = arrayOf(a0, b0, a1, b1)
+                  for (i in 0..3) for (k in 0..2) c.seg[idx * 12 + i * 3 + k] = all[i][k]
+              }
+
+              fun cloth(B: Built): Cloth {
+                  val c = Cloth()
+                  val topOn = P.g("top_on") > 0.5f; val botOn = P.g("bot_on") > 0.5f && P.g("skirt_on") < 0.5f
+                  for ((i, sd) in listOf("L", "R").withIndex()) {
+                      chain(c, i, p3(B, "uarm$sd"), p3(B, "farm$sd"), p3(B, "hand$sd"), P.g("top_sleeve"), topOn)
+                      chain(c, 2 + i, p3(B, "thigh$sd"), p3(B, "shin$sd"), p3(B, "foot$sd"), P.g("bot_len"), botOn)
+                  }
+                  val p0 = p3(B, "pelvis"); val p1 = p3(B, "spine1"); val p2 = p3(B, "spine2"); val p3c = p3(B, "chest")
+                  val n = nrm(sub(p3c, p0)); c.hemN = n
+                  val t = P.g("top_hem")
+                  c.hem = if (t < 0f) add(p0, n, t * 0.35f) else {
+                      val u = min(t, 0.999f) * 3f; val sI = u.toInt(); val f = u - sI
+                      val pts = arrayOf(p0, p1, p2, p3c)
+                      floatArrayOf(pts[sI][0] + (pts[sI + 1][0] - pts[sI][0]) * f, pts[sI][1] + (pts[sI + 1][1] - pts[sI][1]) * f, pts[sI][2] + (pts[sI + 1][2] - pts[sI][2]) * f)
+                  }
+                  c.waist = floatArrayOf(p0[0] + (p1[0] - p0[0]) * 0.65f, p0[1] + (p1[1] - p0[1]) * 0.65f, p0[2] + (p1[2] - p0[2]) * 0.65f)
+                  val drop = P.g("neck_drop"); val cw = B.W[bi["chest"]!!]
+                  val lx = 0f; val ly = 0.15f - 0.09f * drop; val lz = 0.03f + 0.06f * drop
+                  c.neck = floatArrayOf(cw[9] + cw[0] * lx + cw[1] * ly + cw[2] * lz, cw[10] + cw[3] * lx + cw[4] * ly + cw[5] * lz, cw[11] + cw[6] * lx + cw[7] * ly + cw[8] * lz)
+                  c.neckR = P.g("neckline")
+                  var fi = 0
+                  fun fold(pos: FloatArray, d: FloatArray, bend: Float) {
+                      for (k in 0..2) { c.foldP[fi * 4 + k] = pos[k]; c.foldD[fi * 3 + k] = d[k] }
+                      c.foldP[fi * 4 + 3] = bend.coerceIn(0f, 1f); fi++
+                  }
+                  for (sd in listOf("L", "R")) {
+                      val u1 = nrm(sub(p3(B, "farm$sd"), p3(B, "uarm$sd"))); val u2 = nrm(sub(p3(B, "hand$sd"), p3(B, "farm$sd")))
+                      fold(p3(B, "farm$sd"), u1, (1f - dot(u1, u2)) * 1.2f)
+                  }
+                  for (sd in listOf("L", "R")) {
+                      val u1 = nrm(sub(p3(B, "shin$sd"), p3(B, "thigh$sd"))); val u2 = nrm(sub(p3(B, "foot$sd"), p3(B, "shin$sd")))
+                      fold(p3(B, "shin$sd"), u1, (1f - dot(u1, u2)) * 1.2f)
+                  }
+                  fold(p1, n, (1f - dot(nrm(sub(p2, p0)), nrm(sub(p3c, p2)))) * 3f)
+                  for ((i, sd) in listOf("L", "R").withIndex()) {
+                      val up = nrm(sub(p3(B, "shin$sd"), p3(B, "foot$sd")))
+                      val pt = add(p3(B, "foot$sd"), up, 0.05f)
+                      for (k in 0..2) { c.shoeP[i * 3 + k] = pt[k]; c.shoeN[i * 3 + k] = up[k] }
+                  }
+                  return c
+              }
+
+              companion object {
+                  fun lin(h: Float, s: Float, v: Float): FloatArray {
+                      val c = Color.HSVToColor(floatArrayOf((h % 1f) * 360f, s.coerceIn(0f, 1f), v.coerceIn(0f, 1f)))
+                      return floatArrayOf((Color.red(c) / 255f).pow(2.2f), (Color.green(c) / 255f).pow(2.2f), (Color.blue(c) / 255f).pow(2.2f))
+                  }
+              }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/atelier/figure/Fig.kt)
+          cat > app/src/main/java/com/atelier/figure/Fig.kt <<'EOF'
+          package com.atelier.figure
+
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.opengl.GLES30
+          import android.opengl.GLSurfaceView
+          import android.os.SystemClock
+          import android.view.MotionEvent
+          import android.view.ScaleGestureDetector
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.nio.FloatBuffer
+          import java.util.concurrent.CountDownLatch
+          import java.util.concurrent.TimeUnit
+          import javax.microedition.khronos.egl.EGLConfig
+          import javax.microedition.khronos.opengles.GL10
+          import kotlin.math.*
+
+          class FigView(ctx: Context) : GLSurfaceView(ctx) {
+              val r = FigRenderer(this, ctx)
+              var yaw = 0.35f; var pitch = 0.12f; var dist = 3.6f
+              var tx = 0f; var ty = 0.95f; var tz = 0f
+              private var lx = 0f; private var ly = 0f; private var multi = false
+              private val sd = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                  override fun onScale(d: ScaleGestureDetector): Boolean { dist = (dist / d.scaleFactor).coerceIn(0.6f, 8f); dirty(); return true }
+              })
+              init {
+                  setEGLContextClientVersion(3)
+                  setEGLConfigChooser(8, 8, 8, 8, 0, 0)
+                  setRenderer(r)
+                  renderMode = RENDERMODE_WHEN_DIRTY
+                  preserveEGLContextOnPause = true
+              }
+              fun dirty() { r.lastChange = SystemClock.uptimeMillis(); r.resetN = true; requestRender() }
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  sd.onTouchEvent(e)
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> { lx = e.x; ly = e.y; multi = false }
+                      MotionEvent.ACTION_POINTER_DOWN -> { multi = true; lx = (e.getX(0) + e.getX(1)) / 2f; ly = (e.getY(0) + e.getY(1)) / 2f }
+                      MotionEvent.ACTION_MOVE -> {
+                          if (e.pointerCount == 1 && !multi) {
+                              yaw -= (e.x - lx) * 0.008f; pitch = (pitch + (e.y - ly) * 0.006f).coerceIn(-1.4f, 1.4f)
+                              lx = e.x; ly = e.y; dirty()
+                          } else if (e.pointerCount >= 2) {
+                              val cx = (e.getX(0) + e.getX(1)) / 2f; val cy = (e.getY(0) + e.getY(1)) / 2f
+                              val s = dist * 0.0012f
+                              val rx = cos(yaw); val rz = -sin(yaw)
+                              tx -= (cx - lx) * s * rx; tz -= (cx - lx) * s * rz; ty = (ty + (cy - ly) * s).coerceIn(-0.5f, 2f)
+                              lx = cx; ly = cy; dirty()
+                          }
+                      }
+                      MotionEvent.ACTION_POINTER_UP -> { lx = e.x; ly = e.y }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> multi = false
+                  }
+                  return true
+              }
+          }
+
+          class FigRenderer(private val gv: FigView, private val ctx: Context) : GLSurfaceView.Renderer {
+              @Volatile var built: Built? = null
+              @Volatile var cloth: Cloth? = null
+              @Volatile var lastChange = 0L
+              @Volatile var resetN = true
+              @Volatile var onError: ((String) -> Unit)? = null
+              @Volatile var onProgress: ((Int) -> Unit)? = null
+              private var dataDirty = true
+              private var scene = 0; private var blit = 0
+              private val ul = HashMap<String, Int>()
+              private var dataTex = 0; private var vao = 0
+              private val acc = IntArray(2); private val fbo = IntArray(2)
+              private var aw = 0; private var ah = 0; private var cur = 0; private var n = 0
+              private var vw = 1; private var vh = 1
+              private var lastScale = 1f
+              private var pelvisBone = 0; private var eye0 = 0; private var eye1 = 0
+              private lateinit var rig: Rig
+
+              fun setRig(r: Rig) { rig = r; pelvisBone = r.bi["pelvis"]!!; eye0 = r.bi["eyeL"]!!; eye1 = r.bi["eyeR"]!! }
+              fun setBuilt(b: Built, c: Cloth) { built = b; cloth = c; dataDirty = true; gv.dirty() }
+
+              private fun asset(n: String) = ctx.assets.open(n).bufferedReader().readText()
+              private fun err(m: String) { android.util.Log.e("Atelier", m); onError?.invoke(m) }
+              private fun compile(t: Int, s: String): Int {
+                  val h = GLES30.glCreateShader(t); GLES30.glShaderSource(h, s); GLES30.glCompileShader(h)
+                  val ok = IntArray(1); GLES30.glGetShaderiv(h, GLES30.GL_COMPILE_STATUS, ok, 0)
+                  if (ok[0] == 0) { err("Shader: " + GLES30.glGetShaderInfoLog(h)); return 0 }
+                  return h
+              }
+              private fun program(vs: String, fs: String): Int {
+                  val v = compile(GLES30.GL_VERTEX_SHADER, vs); val f = compile(GLES30.GL_FRAGMENT_SHADER, fs)
+                  if (v == 0 || f == 0) return 0
+                  val p = GLES30.glCreateProgram(); GLES30.glAttachShader(p, v); GLES30.glAttachShader(p, f); GLES30.glLinkProgram(p)
+                  val ok = IntArray(1); GLES30.glGetProgramiv(p, GLES30.GL_LINK_STATUS, ok, 0)
+                  if (ok[0] == 0) { err("Link: " + GLES30.glGetProgramInfoLog(p)); return 0 }
+                  return p
+              }
+
+              override fun onSurfaceCreated(g: GL10?, c: EGLConfig?) {
+                  val hdr = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+                  val vs = hdr + "out vec2 vUV;\nvoid main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); vUV = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n"
+                  val data = "uniform sampler2D uData; uniform int uNG; uniform int uNGall; uniform int uPrimBase; uniform int uBoneBase; uniform float uClothK;\n" +
+                      "vec4 D(int i) { return texelFetch(uData, ivec2(i & 1023, i >> 10), 0); }\n#define V3(v) (v).xyz\n"
+                  scene = program(vs, hdr + data + asset("sdf.glsl") + asset("scene.glsl"))
+                  blit = program(vs, hdr + asset("blit.glsl"))
+                  ul.clear()
+                  val t = IntArray(3); GLES30.glGenTextures(3, t, 0); dataTex = t[0]; acc[0] = t[1]; acc[1] = t[2]
+                  val f = IntArray(2); GLES30.glGenFramebuffers(2, f, 0); fbo[0] = f[0]; fbo[1] = f[1]
+                  val v = IntArray(1); GLES30.glGenVertexArrays(1, v, 0); vao = v[0]
+                  aw = 0; ah = 0; dataDirty = true
+              }
+
+              override fun onSurfaceChanged(g: GL10?, w: Int, h: Int) { vw = w; vh = h; resetN = true }
+
+              private fun loc(p: Int, nm: String): Int = ul.getOrPut("$p/$nm") { GLES30.glGetUniformLocation(p, nm) }
+              private fun u1f(p: Int, n: String, v: Float) = GLES30.glUniform1f(loc(p, n), v)
+              private fun u1i(p: Int, n: String, v: Int) = GLES30.glUniform1i(loc(p, n), v)
+              private fun u2f(p: Int, n: String, a: Float, b: Float) = GLES30.glUniform2f(loc(p, n), a, b)
+              private fun u3(p: Int, n: String, a: FloatArray) = GLES30.glUniform3f(loc(p, n), a[0], a[1], a[2])
+              private fun u3v(p: Int, n: String, a: FloatArray) = GLES30.glUniform3fv(loc(p, n), a.size / 3, a, 0)
+              private fun u4v(p: Int, n: String, a: FloatArray) = GLES30.glUniform4fv(loc(p, n), a.size / 4, a, 0)
+
+              private fun uploadData() {
+                  val b = built ?: return
+                  GLES30.glActiveTexture(GLES30.GL_TEXTURE0); GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, dataTex)
+                  val fb: FloatBuffer = ByteBuffer.allocateDirect(b.tex.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+                  fb.put(b.tex); fb.position(0)
+                  GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA32F, 1024, b.tex.size / 4096, 0, GLES30.GL_RGBA, GLES30.GL_FLOAT, fb)
+                  GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_NEAREST)
+                  GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_NEAREST)
+                  dataDirty = false
+              }
+
+              private fun ensureAcc(w: Int, h: Int) {
+                  if (w == aw && h == ah) return
+                  for (i in 0..1) {
+                      GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, acc[i])
+                      GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA16F, w, h, 0, GLES30.GL_RGBA, GLES30.GL_HALF_FLOAT, null)
+                      GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+                      GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+                      GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+                      GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+                      GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo[i])
+                      GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, acc[i], 0)
+                  }
+                  aw = w; ah = h; resetN = true
+              }
+
+              private fun halton(i: Int, b: Int): Float { var f = 1f; var r = 0f; var k = i + 1; while (k > 0) { f /= b; r += f * (k % b); k /= b }; return r }
+
+              private fun setScene(w: Int, h: Int, aspect: Float, nS: Int) {
+                  val p = scene
+                  val b = built ?: return
+                  val cl = cloth ?: return
+                  GLES30.glUseProgram(p)
+                  GLES30.glActiveTexture(GLES30.GL_TEXTURE0); GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, dataTex); u1i(p, "uData", 0)
+                  u1i(p, "uNG", b.ng); u1i(p, "uNGall", b.ng); u1i(p, "uPrimBase", b.primBase); u1i(p, "uBoneBase", b.boneBase); u1f(p, "uClothK", 1.6f)
+                  // camera
+                  val yaw = gv.yaw; val pitch = gv.pitch; val d = gv.dist
+                  val eye = floatArrayOf(gv.tx + d * cos(pitch) * sin(yaw), gv.ty + d * sin(pitch), gv.tz + d * cos(pitch) * cos(yaw))
+                  var fw = floatArrayOf(gv.tx - eye[0], gv.ty - eye[1], gv.tz - eye[2]); val fl = sqrt(fw[0] * fw[0] + fw[1] * fw[1] + fw[2] * fw[2]); fw = floatArrayOf(fw[0] / fl, fw[1] / fl, fw[2] / fl)
+                  var rt = floatArrayOf(fw[2], 0f, -fw[0]); val rl = sqrt(rt[0] * rt[0] + rt[2] * rt[2]); rt = floatArrayOf(rt[0] / rl, 0f, rt[2] / rl)
+                  val up = floatArrayOf(rt[1] * fw[2] - rt[2] * fw[1], rt[2] * fw[0] - rt[0] * fw[2], rt[0] * fw[1] - rt[1] * fw[0])
+                  u3(p, "uEye", eye); u3(p, "uFwd", fw); u3(p, "uRight", rt); u3(p, "uUp", up)
+                  u1f(p, "uTanF", tan(P.g("fov") * 0.5f * (PI.toFloat() / 180f))); u1f(p, "uAspect", aspect)
+                  u2f(p, "uJit", halton(nS, 2) - 0.5f, halton(nS, 3) - 0.5f); u2f(p, "uRes", w.toFloat(), h.toFloat())
+                  u1i(p, "uSteps", P.g("steps").toInt()); u1i(p, "uMode", P.i("mode")); u1i(p, "uGround", if (P.g("ground") > 0.5f) 1 else 0)
+                  u1i(p, "uTopOn", if (P.g("top_on") > 0.5f) 1 else 0); u1i(p, "uBotOn", if (P.g("bot_on") > 0.5f) 1 else 0)
+                  u1i(p, "uShoeOn", if (P.g("shoe_on") > 0.5f) 1 else 0); u1i(p, "uSkirtOn", if (P.g("skirt_on") > 0.5f) 1 else 0)
+                  val root = b.W[0]; u3(p, "uCenter", floatArrayOf(root[9], root[10] + 0.9f, root[11]))
+                  u1i(p, "uPelvisBone", pelvisBone); u1i(p, "uEyeBone0", eye0); u1i(p, "uEyeBone1", eye1)
+                  // materials
+                  val t = P.g("skin_tone")
+                  val l = floatArrayOf(0.95f, 0.78f, 0.68f); val dk = floatArrayOf(0.36f, 0.21f, 0.15f)
+                  val red = P.g("skin_red")
+                  val sk = FloatArray(3) { (( l[it] + (dk[it] - l[it]) * t) * (if (it == 0) 1f + 0.08f * red else if (it == 2) 1f - 0.08f * red else 1f)).coerceIn(0f, 1f).pow(2.2f) }
+                  u3(p, "uSkin", sk)
+                  val lipS = P.g("lip_s"); u3(p, "uLipC", floatArrayOf(sk[0] * (1f - lipS) + 0.62f * lipS, sk[1] * (1f - lipS) + 0.14f * lipS, sk[2] * (1f - lipS) + 0.18f * lipS))
+                  val bd = P.g("brow_dark"); u3(p, "uBrowC", floatArrayOf(sk[0] * (1f - bd) + 0.03f * bd, sk[1] * (1f - bd) + 0.02f * bd, sk[2] * (1f - bd) + 0.015f * bd))
+                  u3(p, "uHairC", Rig.lin(P.g("hair_h"), P.g("hair_s"), P.g("hair_v"))); u3(p, "uEyeC", Rig.lin(P.g("eyec_h"), P.g("eyec_s"), P.g("eyec_v")))
+                  val bg = Rig.lin(P.g("bg_h"), P.g("bg_s"), P.g("bg_v")); u3(p, "uBg1", floatArrayOf(bg[0] * 1.4f, bg[1] * 1.4f, bg[2] * 1.4f)); u3(p, "uBg2", floatArrayOf(bg[0] * 0.5f, bg[1] * 0.5f, bg[2] * 0.5f))
+                  u1f(p, "uGloss", P.g("skin_gloss")); u1f(p, "uAmb", P.g("amb")); u1f(p, "uShadowSoft", P.g("shadow_soft"))
+                  fun dir(az: Float, el: Float): FloatArray { val a = az * PI.toFloat() / 180f; val e = el * PI.toFloat() / 180f; return floatArrayOf(cos(e) * sin(a), sin(e), cos(e) * cos(a)) }
+                  val k = dir(P.g("key_az"), P.g("key_el")); val f = dir(P.g("fill_az"), 15f); val rm = dir(P.g("rim_az"), 35f)
+                  u3v(p, "uLdir[0]", floatArrayOf(k[0], k[1], k[2], f[0], f[1], f[2], rm[0], rm[1], rm[2]))
+                  val ki = P.g("key_int"); val fi = P.g("fill_int"); val ri = P.g("rim_int")
+                  u3v(p, "uLcol[0]", floatArrayOf(1f * ki, 0.94f * ki, 0.86f * ki, 0.7f * fi, 0.8f * fi, 1f * fi, 1f * ri, 1f * ri, 1f * ri))
+                  // cloth
+                  val c0 = Rig.lin(P.g("top_h"), P.g("top_s"), P.g("top_v")); val c1 = Rig.lin(P.g("top_h2"), P.g("top_s2"), P.g("top_v2"))
+                  val b0 = Rig.lin(P.g("bot_h"), P.g("bot_s"), P.g("bot_v")); val b1 = Rig.lin(P.g("top_h2"), P.g("top_s2"), P.g("top_v2"))
+                  val s0 = Rig.lin(P.g("shoe_h"), P.g("shoe_s"), P.g("shoe_v"))
+                  u4v(p, "uCA[0]", floatArrayOf(c0[0], c0[1], c0[2], P.g("top_pat").roundToInt().toFloat(), b0[0], b0[1], b0[2], P.g("bot_pat").roundToInt().toFloat(), s0[0], s0[1], s0[2], 0f))
+                  u4v(p, "uCB[0]", floatArrayOf(c1[0], c1[1], c1[2], P.g("top_pat_sc"), b1[0], b1[1], b1[2], P.g("top_pat_sc"), s0[0], s0[1], s0[2], 1f))
+                  val fr = P.g("wr_freq")
+                  u4v(p, "uCC[0]", floatArrayOf(P.g("top_loose") + 0.004f, P.g("top_wr"), fr, P.g("top_sheen"), P.g("bot_loose") + 0.004f, P.g("bot_wr"), fr, P.g("bot_sheen"), 0.006f, 0f, 1f, 0f))
+                  u3v(p, "uSeg[0]", cl.seg); u1fv(p, "uSegOn[0]", cl.segOn)
+                  u3(p, "uHem", cl.hem); u3(p, "uHemN", cl.hemN); u3(p, "uWaist", cl.waist); u3(p, "uNeck", cl.neck); u1f(p, "uNeckR", cl.neckR)
+                  u4v(p, "uFold[0]", cl.foldP); u3v(p, "uFoldDir[0]", cl.foldD)
+                  GLES30.glUniform4f(loc(p, "uSkirt"), P.g("skirt_len"), P.g("skirt_flare"), P.g("pleat"), 0.004f)
+                  u3v(p, "uShoeP[0]", cl.shoeP); u3v(p, "uShoeN[0]", cl.shoeN)
+              }
+              private fun u1fv(p: Int, n: String, a: FloatArray) = GLES30.glUniform1fv(loc(p, n), a.size, a, 0)
+
+              private fun drawSample(w: Int, h: Int, aspect: Float, nS: Int, from: Int, to: Int, y0: Int, sh: Int) {
+                  GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo[to])
+                  GLES30.glViewport(0, 0, w, h)
+                  setScene(w, h, aspect, nS)
+                  GLES30.glActiveTexture(GLES30.GL_TEXTURE1); GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, acc[from]); u1i(scene, "uPrev", 1)
+                  u1f(scene, "uW", 1f / (nS + 1))
+                  if (sh > 0) { GLES30.glEnable(GLES30.GL_SCISSOR_TEST); GLES30.glScissor(0, y0, w, sh) }
+                  GLES30.glBindVertexArray(vao)
+                  GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+                  if (sh > 0) GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+              }
+
+              private fun blitTo(fb: Int, tex: Int, w: Int, h: Int) {
+                  GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fb); GLES30.glViewport(0, 0, w, h)
+                  GLES30.glUseProgram(blit)
+                  GLES30.glActiveTexture(GLES30.GL_TEXTURE0); GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex); u1i(blit, "uTex", 0)
+                  u1f(blit, "uExp", P.g("exposure")); u1f(blit, "uVig", P.g("vignette"))
+                  GLES30.glBindVertexArray(vao); GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+              }
+
+              override fun onDrawFrame(g: GL10?) {
+                  if (scene == 0 || blit == 0 || built == null) { GLES30.glClearColor(0.05f, 0.06f, 0.08f, 1f); GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT); return }
+                  if (dataDirty) uploadData()
+                  val moving = SystemClock.uptimeMillis() - lastChange < 260
+                  val sc = if (moving) P.g("preview_scale") else 1f
+                  val w = max(64, (vw * sc).toInt()); val h = max(64, (vh * sc).toInt())
+                  ensureAcc(w, h)
+                  if (resetN) { n = 0; resetN = false }
+                  val maxN = P.g("spp").toInt()
+                  if (n < maxN || moving) {
+                      drawSample(w, h, vw.toFloat() / vh, n, cur, 1 - cur, 0, 0)
+                      cur = 1 - cur; n++
+                  }
+                  blitTo(0, acc[cur], vw, vh)
+                  if (n < maxN) gv.requestRender() else if (moving) gv.postDelayed({ gv.requestRender() }, 280)
+              }
+
+              /** Offscreen high-quality render. Runs strips per sample so a single GPU call stays short. */
+              fun export(w: Int, h: Int, spp: Int): Bitmap? {
+                  val latch = CountDownLatch(1); var out: Bitmap? = null
+                  gv.queueEvent {
+                      try {
+                          val t = IntArray(3); val f = IntArray(3)
+                          GLES30.glGenTextures(3, t, 0); GLES30.glGenFramebuffers(3, f, 0)
+                          for (i in 0..1) {
+                              GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, t[i])
+                              GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA16F, w, h, 0, GLES30.GL_RGBA, GLES30.GL_HALF_FLOAT, null)
+                              GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR); GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+                              GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, f[i]); GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, t[i], 0)
+                          }
+                          GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, t[2])
+                          GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+                          GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, f[2]); GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, t[2], 0)
+                          if (dataDirty) uploadData()
+                          // swap internal accumulators for the export ones
+                          val sa = acc.copyOf(); val sf = fbo.copyOf()
+                          acc[0] = t[0]; acc[1] = t[1]; fbo[0] = f[0]; fbo[1] = f[1]
+                          var c = 0
+                          for (s in 0 until spp) {
+                              var y = 0
+                              while (y < h) {
+                                  val sh = min(96, h - y)
+                                  drawSample(w, h, w.toFloat() / h, s, c, 1 - c, y, sh)
+                                  GLES30.glFinish(); y += sh
+                              }
+                              c = 1 - c
+                              onProgress?.invoke((s + 1) * 100 / spp)
+                          }
+                          blitTo(f[2], acc[c], w, h)
+                          val buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
+                          GLES30.glReadPixels(0, 0, w, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+                          val px = IntArray(w * h)
+                          for (yy in 0 until h) { val row = (h - 1 - yy) * w * 4; for (x in 0 until w) { val o = row + x * 4
+                              px[yy * w + x] = (255 shl 24) or ((buf.get(o).toInt() and 255) shl 16) or ((buf.get(o + 1).toInt() and 255) shl 8) or (buf.get(o + 2).toInt() and 255) } }
+                          out = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+                          acc[0] = sa[0]; acc[1] = sa[1]; fbo[0] = sf[0]; fbo[1] = sf[1]
+                          GLES30.glDeleteTextures(3, t, 0); GLES30.glDeleteFramebuffers(3, f, 0)
+                          GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+                          resetN = true
+                      } catch (e: Throwable) { err("Export: ${e.message}") }
+                      latch.countDown()
+                  }
+                  gv.requestRender()
+                  latch.await(600, TimeUnit.SECONDS)
+                  gv.dirty()
+                  return out
+              }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/atelier/figure/MainActivity.kt)
+          cat > app/src/main/java/com/atelier/figure/MainActivity.kt <<'EOF'
+          package com.atelier.figure
+
+          import android.app.Activity
+          import android.content.ContentValues
+          import android.content.res.ColorStateList
+          import android.graphics.Bitmap
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.graphics.drawable.RippleDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.provider.MediaStore
+          import android.view.Gravity
+          import android.view.HapticFeedbackConstants
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.animation.DecelerateInterpolator
+          import android.view.animation.OvershootInterpolator
+          import android.widget.*
+          import kotlin.math.roundToInt
+
+          class MainActivity : Activity() {
+              private val cBg = 0xFF0A0D13.toInt(); private val cCard = 0xFF121823.toInt(); private val cText = 0xFFEAF0F7.toInt()
+              private val cMuted = 0xFF8A97AA.toInt(); private val cAccent = 0xFFFF7AA8.toInt(); private val cAccent2 = 0xFF7AD7FF.toInt(); private val cTrack = 0xFF28313F.toInt()
+              private val MP = ViewGroup.LayoutParams.MATCH_PARENT; private val WC = ViewGroup.LayoutParams.WRAP_CONTENT
+              private lateinit var view: FigView
+              private lateinit var rig: Rig
+              private lateinit var panel: LinearLayout
+              private lateinit var statusTv: TextView
+              private val tabs = listOf("Pose", "Body", "Muscle", "Face", "Hair", "Skin", "Outfit", "Light", "Render", "Export")
+              private val tabChips = LinkedHashMap<String, TextView>()
+              private val refreshers = ArrayList<() -> Unit>()
+              private var cur = "Pose"
+              private var joint = "uarmL"
+              private var lastTick = 0L
+              private val ui = Handler(Looper.getMainLooper())
+              private var expRes = 1; private var expSpp = 1
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  P.init(this)
+                  window.statusBarColor = cBg; window.navigationBarColor = cBg
+                  rig = Rig(this)
+                  view = FigView(this)
+                  view.r.setRig(rig)
+                  view.r.onError = { m -> ui.post { statusTv.text = m } }
+                  view.r.onProgress = { p -> ui.post { statusTv.text = "Rendering $p%" } }
+                  buildUi()
+                  apply()
+              }
+              override fun onPause() { super.onPause(); view.onPause() }
+              override fun onResume() { super.onResume(); view.onResume() }
+
+              private fun apply() { val b = rig.build(); view.r.setBuilt(b, rig.cloth(b)) }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun lp(w: Int, h: Int, wt: Float = 0f) = LinearLayout.LayoutParams(w, h, wt)
+              private fun rr(c: Int, r: Int): GradientDrawable = GradientDrawable().apply { setColor(c); cornerRadius = dp(r).toFloat() }
+              private fun ripple(bg: Drawable?, r: Int) = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), bg, rr(Color.WHITE, r))
+              private fun tv(t: String, s: Float, c: Int = cText, bold: Boolean = false) = TextView(this).apply { text = t; textSize = s; setTextColor(c); if (bold) typeface = Typeface.DEFAULT_BOLD }
+              @Suppress("ClickableViewAccessibility")
+              private fun press(v: View) {
+                  v.setOnTouchListener { x, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> x.animate().scaleX(0.95f).scaleY(0.95f).setDuration(80).start()
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> x.animate().scaleX(1f).scaleY(1f).setDuration(220).setInterpolator(OvershootInterpolator(2.2f)).start()
+                      }
+                      false
+                  }
+              }
+
+              private fun buildUi() {
+                  val root = LinearLayout(this); root.orientation = LinearLayout.VERTICAL; root.setBackgroundColor(cBg)
+                  val bar = LinearLayout(this); bar.gravity = Gravity.CENTER_VERTICAL; bar.setPadding(dp(16), dp(34), dp(12), dp(6))
+                  bar.addView(tv("Atelier", 20f, Color.WHITE, true), lp(0, WC, 1f))
+                  val rs = tv("Reset all", 13f, cMuted).apply { setPadding(dp(12), dp(8), dp(12), dp(8)); background = rr(0x14FFFFFF, 14) }
+                  press(rs)
+                  rs.setOnClickListener { P.reset(P.v.keys.toList()); P.v.clear(); apply(); show(cur) }
+                  bar.addView(rs)
+                  root.addView(bar)
+                  root.addView(view, lp(MP, 0, 1f))
+                  statusTv = tv("Drag to orbit  •  pinch to zoom  •  two fingers to pan", 11.5f, cMuted).apply { setPadding(dp(14), dp(4), dp(14), dp(2)) }
+                  root.addView(statusTv)
+                  val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false
+                  val row = LinearLayout(this); row.setPadding(dp(8), dp(2), dp(8), dp(6))
+                  for (t in tabs) {
+                      val c = tv(t, 13f, cMuted).apply { setPadding(dp(14), dp(8), dp(14), dp(8)) }
+                      press(c); c.setOnClickListener { it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); show(t) }
+                      tabChips[t] = c; row.addView(c, lp(WC, WC).apply { rightMargin = dp(6) })
+                  }
+                  hs.addView(row); root.addView(hs)
+                  val sv = ScrollView(this); sv.overScrollMode = View.OVER_SCROLL_NEVER; sv.background = rr(cCard, 22)
+                  panel = LinearLayout(this); panel.orientation = LinearLayout.VERTICAL; panel.setPadding(dp(16), dp(6), dp(16), dp(24))
+                  sv.addView(panel)
+                  root.addView(sv, lp(MP, (resources.displayMetrics.heightPixels * 0.40f).toInt()))
+                  setContentView(root)
+                  show("Pose")
+              }
+
+              private fun show(t: String) {
+                  cur = t; refreshers.clear(); panel.removeAllViews()
+                  for ((n, c) in tabChips) { val on = n == t; c.background = rr(if (on) cAccent else 0x14FFFFFF, 16); c.setTextColor(if (on) Color.BLACK else cMuted) }
+                  when (t) {
+                      "Pose" -> poseTab()
+                      "Export" -> exportTab()
+                      else -> { header(t, Defs.TABS[t]!!.map { it.k }); for (p in Defs.TABS[t]!!) row(p) }
+                  }
+              }
+
+              private fun header(t: String, keys: List<String>) {
+                  val h = LinearLayout(this); h.gravity = Gravity.CENTER_VERTICAL; h.setPadding(0, dp(10), 0, dp(2))
+                  h.addView(tv(t, 16f, cText, true), lp(0, WC, 1f))
+                  val r = tv("↺ Reset", 13f, cMuted).apply { setPadding(dp(12), dp(6), dp(4), dp(6)) }
+                  r.setOnClickListener { it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); P.reset(keys); keys.forEach { k -> P.v.remove(k) }; apply(); refreshers.forEach { f -> f() } }
+                  h.addView(r); panel.addView(h, lp(MP, WC))
+              }
+
+              private fun chips(items: List<String>, selected: () -> String, onPick: (String) -> Unit): View {
+                  val hs = HorizontalScrollView(this); hs.isHorizontalScrollBarEnabled = false
+                  val row = LinearLayout(this); val list = ArrayList<TextView>()
+                  fun paint() { for (c in list) { val on = c.text.toString() == selected(); c.background = rr(if (on) cAccent2 else 0x14FFFFFF, 14); c.setTextColor(if (on) Color.BLACK else cMuted) } }
+                  for (n in items) {
+                      val c = tv(n, 13f, cMuted).apply { setPadding(dp(13), dp(8), dp(13), dp(8)) }
+                      press(c); c.setOnClickListener { it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); onPick(n); paint() }
+                      list.add(c); row.addView(c, lp(WC, WC).apply { rightMargin = dp(6) })
+                  }
+                  paint(); hs.addView(row); return hs
+              }
+
+              private fun row(p: Prm) {
+                  if (p.sw) { switchRow(p); return }
+                  val wrap = LinearLayout(this); wrap.orientation = LinearLayout.VERTICAL; wrap.setPadding(0, dp(9), 0, dp(1))
+                  val top = LinearLayout(this); top.gravity = Gravity.CENTER_VERTICAL
+                  val pill = tv("", 12f, cAccent2, true).apply { setPadding(dp(9), dp(3), dp(9), dp(3)); background = rr(0x227AD7FF, 10) }
+                  val reset = tv("↺", 19f, cMuted).apply { setPadding(dp(12), 0, dp(2), 0) }
+                  top.addView(tv(p.t, 14f), lp(0, WC, 1f)); top.addView(pill); top.addView(reset)
+                  val sb = SeekBar(this); sb.max = 1000
+                  sb.progressTintList = ColorStateList.valueOf(cAccent); sb.progressBackgroundTintList = ColorStateList.valueOf(cTrack); sb.thumbTintList = ColorStateList.valueOf(Color.WHITE)
+                  fun fmt(v: Float) = if (p.hi - p.lo > 20f) "${v.roundToInt()}" else String.format("%.2f", v)
+                  fun upd() {
+                      val v = P.g(p.k); sb.progress = ((v - p.lo) / (p.hi - p.lo) * 1000f).roundToInt(); pill.text = fmt(v)
+                      val ch = kotlin.math.abs(v - p.d) > 1e-4f; reset.animate().alpha(if (ch) 1f else 0f).setDuration(150).start(); reset.isClickable = ch
+                  }
+                  upd()
+                  sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(b: SeekBar?, v: Int, user: Boolean) {
+                          if (!user) return
+                          var x = p.lo + (p.hi - p.lo) * v / 1000f
+                          if (kotlin.math.abs(x - p.d) < (p.hi - p.lo) * 0.006f) x = p.d
+                          P.s(p.k, x); pill.text = fmt(x)
+                          pill.animate().cancel(); pill.scaleX = 1.12f; pill.scaleY = 1.12f; pill.animate().scaleX(1f).scaleY(1f).setDuration(140).start()
+                          val now = SystemClock.uptimeMillis(); if (now - lastTick > 50) { lastTick = now; b?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
+                          val ch = kotlin.math.abs(x - p.d) > 1e-4f; reset.alpha = if (ch) 1f else 0f; reset.isClickable = ch
+                          apply()
+                      }
+                      override fun onStartTrackingTouch(b: SeekBar?) {}
+                      override fun onStopTrackingTouch(b: SeekBar?) {}
+                  })
+                  refreshers.add { upd() }
+                  reset.setOnClickListener { it.animate().rotationBy(-360f).setDuration(350).setInterpolator(DecelerateInterpolator()).start(); P.s(p.k, p.d); apply(); upd() }
+                  wrap.addView(top, lp(MP, WC)); wrap.addView(sb, lp(MP, WC)); panel.addView(wrap, lp(MP, WC))
+              }
+
+              private fun switchRow(p: Prm) {
+                  val r = LinearLayout(this); r.gravity = Gravity.CENTER_VERTICAL; r.setPadding(0, dp(10), 0, dp(4))
+                  val sw = Switch(this)
+                  val st = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+                  sw.thumbTintList = ColorStateList(st, intArrayOf(cAccent, 0xFFB0BAC8.toInt())); sw.trackTintList = ColorStateList(st, intArrayOf(0x66FF7AA8, 0xFF2A3544.toInt()))
+                  r.addView(tv(p.t, 14f), lp(0, WC, 1f)); r.addView(sw)
+                  var busy = false
+                  sw.isChecked = P.g(p.k) > 0.5f
+                  sw.setOnCheckedChangeListener { v, on -> if (!busy) { P.s(p.k, if (on) 1f else 0f); v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); apply() } }
+                  refreshers.add { busy = true; sw.isChecked = P.g(p.k) > 0.5f; busy = false }
+                  panel.addView(r, lp(MP, WC))
+              }
+
+              private fun btn(t: String, f: () -> Unit): TextView {
+                  val b = tv(t, 14f, cAccent2, true).apply { gravity = Gravity.CENTER; setPadding(0, dp(13), 0, dp(13)); background = ripple(rr(0x147AD7FF, 14), 14) }
+                  press(b); b.setOnClickListener { it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); f() }
+                  return b
+              }
+
+              private fun poseTab() {
+                  panel.addView(tv("Poses", 16f, cText, true).apply { setPadding(0, dp(10), 0, dp(6)) })
+                  panel.addView(chips(Defs.POSE_PRESETS.keys.toList(), { "" }) { n ->
+                      val keep = P.v.filterKeys { !it.startsWith("j_") && !it.startsWith("root") && !it.startsWith("curl") && !it.startsWith("spread") }
+                      P.reset(P.v.keys.filter { it.startsWith("j_") || it.startsWith("root") || it.startsWith("curl") || it.startsWith("spread") })
+                      P.v.keys.filter { it.startsWith("j_") || it.startsWith("root") || it.startsWith("curl") || it.startsWith("spread") }.forEach { P.v.remove(it) }
+                      Defs.POSE_PRESETS[n]!!.forEach { (k, v) -> P.s(k, v) }
+                      apply(); show("Pose")
+                  })
+                  panel.addView(tv("Joint", 16f, cText, true).apply { setPadding(0, dp(14), 0, dp(6)) })
+                  panel.addView(chips(Defs.JOINTS, { joint }) { j -> joint = j; show("Pose") })
+                  val rg = Defs.jointRange(joint)
+                  row(Prm("j_${joint}_x", "Bend / flex", rg[0], rg[1], 0f)); row(Prm("j_${joint}_y", "Twist", rg[2], rg[3], 0f)); row(Prm("j_${joint}_z", "Side / abduct", rg[4], rg[5], 0f))
+                  panel.addView(tv("Hands & body", 16f, cText, true).apply { setPadding(0, dp(14), 0, dp(2)) })
+                  for (s in listOf("L", "R")) { row(Prm("curl$s", "Fingers curl $s", 0f, 90f, 0f)); row(Prm("spread$s", "Fingers spread $s", -15f, 25f, 0f)) }
+                  row(Prm("root_x", "Move left/right", -1f, 1f, 0f)); row(Prm("root_y", "Move up/down", -0.9f, 0.6f, 0f)); row(Prm("root_z", "Move forward/back", -1f, 1f, 0f)); row(Prm("root_ry", "Turn body", -180f, 180f, 0f))
+                  val b = btn("Mirror pose (swap left and right)") {
+                      for (n in Defs.JOINTS) if (n.endsWith("L")) {
+                          val m = n.dropLast(1) + "R"
+                          for (ax in listOf("x", "y", "z")) { val a = P.g("j_${n}_$ax"); val c = P.g("j_${m}_$ax"); P.s("j_${n}_$ax", c); P.s("j_${m}_$ax", a) }
+                      }
+                      for (k in listOf("curl", "spread")) { val a = P.g(k + "L"); P.s(k + "L", P.g(k + "R")); P.s(k + "R", a) }
+                      apply(); show("Pose")
+                  }
+                  panel.addView(b, lp(MP, WC).apply { topMargin = dp(12) })
+              }
+
+              private fun exportTab() {
+                  panel.addView(tv("Export image", 16f, cText, true).apply { setPadding(0, dp(10), 0, dp(6)) })
+                  val sizes = listOf("1080 px", "2048 px", "3072 px", "4096 px"); val spps = listOf("Fast 24", "Good 64", "Max 160")
+                  panel.addView(tv("Size (long side)", 13f, cMuted).apply { setPadding(0, dp(4), 0, dp(4)) })
+                  panel.addView(chips(sizes, { sizes[expRes] }) { expRes = sizes.indexOf(it) })
+                  panel.addView(tv("Quality (samples)", 13f, cMuted).apply { setPadding(0, dp(12), 0, dp(4)) })
+                  panel.addView(chips(spps, { spps[expSpp] }) { expSpp = spps.indexOf(it) })
+                  panel.addView(btn("Render and save PNG") {
+                      val long = intArrayOf(1080, 2048, 3072, 4096)[expRes]; val spp = intArrayOf(24, 64, 160)[expSpp]
+                      val a = view.width.toFloat() / view.height.coerceAtLeast(1)
+                      val w = if (a < 1f) (long * a).toInt() and 1.inv() else long; val h = if (a < 1f) long else (long / a).toInt() and 1.inv()
+                      statusTv.text = "Rendering ${w}x$h …"
+                      Thread {
+                          val bmp = view.r.export(w, h, spp)
+                          val ok = bmp != null && save(bmp)
+                          ui.post { statusTv.text = if (ok) "Saved to Pictures/Atelier" else "Export failed" }
+                      }.start()
+                  }, lp(MP, WC).apply { topMargin = dp(16) })
+                  panel.addView(tv("Tip: set Render > Mode to Clay or Toon first for line-art style references.", 12f, cMuted).apply { setPadding(0, dp(12), 0, 0) })
+              }
+
+              private fun save(b: Bitmap): Boolean {
+                  val cv = ContentValues()
+                  cv.put(MediaStore.MediaColumns.DISPLAY_NAME, "Atelier_${System.currentTimeMillis()}.png"); cv.put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                  cv.put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/Atelier")
+                  val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv) ?: return false
+                  contentResolver.openOutputStream(uri)?.use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                  return true
+              }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/assets/figure.spec)
+          cat > app/src/main/assets/figure.spec <<'EOF'
+          B -1 0 0 0 0 0 0 - -
+          B 0 0 0.92 0 0 0 0 - 43:0.5
+          B 1 0 0.09 0 0 0 0 - 63:0.4
+          B 2 0 0.12 0 0 0 0 - 63:0.5
+          B 3 0 0.13 0 0 0 0 - 63:0.5
+          B 4 0 0.155 -0.005 0 0 0 - 63:0.2
+          B 5 0 0.075 0.012 0 0 0 - 48:0.5
+          B 6 0 0.035 0 0 0 0 - -
+          B 6 0.03 0.093 0.087 0 0 0 19:0.25 -
+          B 6 -0.03 0.093 0.087 0 0 0 19:0.25 -
+          B 4 0.025 0.12 0.03 0 0 0 - -
+          B 10 0.15 0 -0.02 0 0 18 59:0.2 -
+          B 11 0 -0.275 0 0 0 0 - 2:0.25
+          B 12 0 -0.245 0 0 0 0 - 29:0.25
+          B 13 0 -0.095 0.028 0 0 -10 - 24:0.3
+          B 14 0 -0.04 0 0 0 -10 - 24:0.3
+          B 15 0 -0.024 0 0 0 -10 - 24:0.3
+          B 13 0 -0.095 0.01 0 0 -10 - 24:0.3
+          B 17 0 -0.044 0 0 0 -10 - 24:0.3
+          B 18 0 -0.027 0 0 0 -10 - 24:0.3
+          B 13 0 -0.095 -0.008 0 0 -10 - 24:0.3
+          B 20 0 -0.04 0 0 0 -10 - 24:0.3
+          B 21 0 -0.025 0 0 0 -10 - 24:0.3
+          B 13 0 -0.095 -0.024 0 0 -10 - 24:0.3
+          B 23 0 -0.032 0 0 0 -10 - 24:0.3
+          B 24 0 -0.019 0 0 0 -10 - 24:0.3
+          B 13 0 -0.02 0.032 -35 0 0 - -
+          B 26 0 -0.04 0 0 0 -4 - -
+          B 27 0 -0.033 0 0 0 -4 - -
+          B 1 0.088 -0.045 0 0 0 0 39:0.15 -
+          B 29 0 -0.42 0 0 0 0 - 61:0.25
+          B 30 0 -0.39 0 0 0 0 - 58:0.25
+          B 31 0 -0.055 0.14 0 0 0 - -
+          B 4 -0.025 0.12 0.03 0 0 0 - -
+          B 33 -0.15 0 -0.02 0 0 -18 59:0.2 -
+          B 34 0 -0.275 0 0 0 0 - 2:0.25
+          B 35 0 -0.245 0 0 0 0 - 29:0.25
+          B 36 0 -0.095 0.028 0 0 10 - 24:0.3
+          B 37 0 -0.04 0 0 0 10 - 24:0.3
+          B 38 0 -0.024 0 0 0 10 - 24:0.3
+          B 36 0 -0.095 0.01 0 0 10 - 24:0.3
+          B 40 0 -0.044 0 0 0 10 - 24:0.3
+          B 41 0 -0.027 0 0 0 10 - 24:0.3
+          B 36 0 -0.095 -0.008 0 0 10 - 24:0.3
+          B 43 0 -0.04 0 0 0 10 - 24:0.3
+          B 44 0 -0.025 0 0 0 10 - 24:0.3
+          B 36 0 -0.095 -0.024 0 0 10 - 24:0.3
+          B 46 0 -0.032 0 0 0 10 - 24:0.3
+          B 47 0 -0.019 0 0 0 10 - 24:0.3
+          B 36 0 -0.02 0.032 -35 0 0 - -
+          B 49 0 -0.04 0 0 0 4 - -
+          B 50 0 -0.033 0 0 0 4 - -
+          B 1 -0.088 -0.045 0 0 0 0 39:0.15 -
+          B 52 0 -0.42 0 0 0 0 - 61:0.25
+          B 53 0 -0.39 0 0 0 0 - 58:0.25
+          B 54 0 -0.055 0.14 0 0 0 - -
+          G 0 1
+          G 0 3
+          G 0 0
+          G 0 0
+          G 0 1
+          G 0 1
+          G 0 1
+          G 0 1
+          G 0 0
+          G 0 0
+          G 0 2
+          G 0 2
+          G 0 6
+          G 0 6
+          G 0 4
+          G 0 4
+          G 1 0
+          G 2 0
+          P 1 1 0 1 0 -0.035 -0.005 0 0 0 0.142 0.09 0.092 1 0.07 39:0.1;23:0.08 39:0.12 38:0.12 - - -
+          P 1 1 12 1 0.07 -0.062 -0.07 0 0 0 0.07 0.078 0.074 1 0.04 31:0.22;23:0.06 - - 39:0.1 - 31:0.25
+          P 1 1 0 1 0.125 0.015 0 0 0 0 0.032 0.05 0.07 1 0.03 5:0.25 - - - - -
+          P 1 1 12 1 -0.07 -0.062 -0.07 0 0 0 0.07 0.078 0.074 1 0.04 31:0.22;23:0.06 - - 39:0.1 - 31:0.25
+          P 1 1 0 1 -0.125 0.015 0 0 0 0 0.032 0.05 0.07 1 0.03 5:0.25 - - - - -
+          P 1 1 0 1 0 -0.07 0.062 0 0 0 0.085 0.07 0.045 1 0.05 23:0.06 - - - - -
+          P 2 0 0 1 0 0.015 0 0 0 0 0.104 0.088 0.078 1 0.06 - 68:0.28;23:0.04 67:0.3;3:0.18 - - -
+          P 2 0 8 1 0.022 0.05 0.082 0 0 0 0.012 0.009 0.0035 1 0.04 0:1.6;47:1.2 - - - - -
+          P 2 0 8 1 -0.022 0.05 0.082 0 0 0 0.012 0.009 0.0035 1 0.04 0:1.6;47:1.2 - - - - -
+          P 2 0 8 1 0.022 0.012 0.082 0 0 0 0.012 0.009 0.0035 1 0.04 0:1.6;47:1.2 - - - - -
+          P 2 0 8 1 -0.022 0.012 0.082 0 0 0 0.012 0.009 0.0035 1 0.04 0:1.6;47:1.2 - - - - -
+          P 2 0 8 1 0.022 -0.026 0.082 0 0 0 0.012 0.009 0.0035 1 0.04 0:1.6;47:1.2 - - - - -
+          P 2 0 8 1 -0.022 -0.026 0.082 0 0 0 0.012 0.009 0.0035 1 0.04 0:1.6;47:1.2 - - - - -
+          P 2 0 9 1 0.088 0.015 0.01 0 0 0 0.03 0.055 0.045 1 0.05 54:0.5;47:0.3 - - - - -
+          P 2 0 9 1 -0.088 0.015 0.01 0 0 0 0.03 0.055 0.045 1 0.05 54:0.5;47:0.3 - - - - -
+          P 3 0 0 1 0 0.035 0 0 0 0 0.122 0.115 0.092 1 0.07 - 57:0.25;68:0.05 13:0.15 - - -
+          P 3 0 10 1 0.1 0.045 -0.04 0 0 0 0.05 0.095 0.045 1 0.05 42:0.4;47:0.3 - - - - -
+          P 3 0 10 1 -0.1 0.045 -0.04 0 0 0 0.05 0.095 0.045 1 0.05 42:0.4;47:0.3 - - - - -
+          P 4 0 0 1 0 0.04 -0.005 0 0 0 0.14 0.108 0.095 1 0.08 - 14:0.22;59:0.06 13:0.22 - - -
+          P 4 0 6 1 0.06 0.06 0.055 0 0 0 0.06 0.04 0.026 1 0.06 55:0.25;47:0.2 - - - - -
+          P 4 0 7 1 0.078 0 0.086 0 0 0 0.058 0.058 0.054 1 0.05 7:0.55 - 7:0.15 9:0.4 8:0.6 7:0.1
+          P 4 0 11 1 0.04 0.12 -0.035 0 0 0 0.075 0.05 0.045 1 0.05 64:0.3;47:0.2 - - - - -
+          P 4 0 0 1 0.075 0.075 -0.075 0 0 0 0.075 0.07 0.035 1 0.05 47:0.2 - - - - -
+          P 4 0 6 1 -0.06 0.06 0.055 0 0 0 0.06 0.04 0.026 1 0.06 55:0.25;47:0.2 - - - - -
+          P 4 0 7 1 -0.078 0 0.086 0 0 0 0.058 0.058 0.054 1 0.05 7:0.55 - 7:0.15 9:0.4 8:0.6 7:0.1
+          P 4 0 11 1 -0.04 0.12 -0.035 0 0 0 0.075 0.05 0.045 1 0.05 64:0.3;47:0.2 - - - - -
+          P 4 0 0 1 -0.075 0.075 -0.075 0 0 0 0.075 0.07 0.035 1 0.05 47:0.2 - - - - -
+          P 4 0 11 1 0 0.115 -0.045 0 0 0 0.085 0.055 0.04 1 0.05 64:0.3 - - - - -
+          P 5 3 0 0 0 -0.015 0 0 0.088 0.014 0.057 0.049 1 1 0.04 49:0.2;23:0.03 - - - 48:0.5 -
+          P 10 0 19 0 0 0 0.005 0.15 0 -0.018 0.0115 0.0115 1 1 0.02 5:0.7 - - - - -
+          P 33 0 19 0 0 0 0.005 -0.15 0 -0.018 0.0115 0.0115 1 1 0.02 5:0.7 - - - - -
+          P 11 4 5 1 0 0 0 0 0 0 0.045 0.045 0.047 1 0.05 16:0.2;47:0.15 - - - - -
+          P 11 4 5 1 0.01 -0.06 0 0 0 0 0.04 0.085 0.043 1 0.05 16:0.25;66:0.1;47:0.2 - - - - -
+          P 11 4 0 0 0 -0.012 0 0 -0.268 0 0.037 0.03 1 1 0.04 66:0.3;23:0.05 - - - 2:0.25 -
+          P 11 4 16 1 0 -0.12 0.017 0 0 0 0.032 0.075 0.032 1 0.03 4:0.4;47:0.25 - - - 2:0.25 -
+          P 11 4 17 1 0 -0.11 -0.02 0 0 0 0.031 0.08 0.03 1 0.03 65:0.4;47:0.25 - - - 2:0.25 -
+          P 12 6 0 1 0 0 0 0 0 0 0.032 0.035 0.032 1 0.04 30:0.15 - - - - -
+          P 12 6 0 0 0 0 0 0 -0.238 0 0.032 0.022 1 1 0.04 30:0.3;23:0.04 - - - 29:0.25 -
+          P 12 6 18 1 0 -0.06 0.008 0 0 0 0.03 0.08 0.03 1 0.03 28:0.35;47:0.2 - - - 29:0.25 -
+          P 34 4 5 1 0 0 0 0 0 0 0.045 0.045 0.047 1 0.05 16:0.2;47:0.15 - - - - -
+          P 34 5 5 1 -0.01 -0.06 0 0 0 0 0.04 0.085 0.043 1 0.05 16:0.25;66:0.1;47:0.2 - - - - -
+          P 34 5 0 0 0 -0.012 0 0 -0.268 0 0.037 0.03 1 1 0.04 66:0.3;23:0.05 - - - 2:0.25 -
+          P 34 5 16 1 0 -0.12 0.017 0 0 0 0.032 0.075 0.032 1 0.03 4:0.4;47:0.25 - - - 2:0.25 -
+          P 34 5 17 1 0 -0.11 -0.02 0 0 0 0.031 0.08 0.03 1 0.03 65:0.4;47:0.25 - - - 2:0.25 -
+          P 35 7 0 1 0 0 0 0 0 0 0.032 0.035 0.032 1 0.04 30:0.15 - - - - -
+          P 35 7 0 0 0 0 0 0 -0.238 0 0.032 0.022 1 1 0.04 30:0.3;23:0.04 - - - 29:0.25 -
+          P 35 7 18 1 -0 -0.06 0.008 0 0 0 0.03 0.08 0.03 1 0.03 28:0.35;47:0.2 - - - 29:0.25 -
+          P 13 8 0 1 0 -0.002 0 0 0 0 0.026 0.024 0.032 1 0.03 69:0.2;35:0.12 - - - - -
+          P 13 8 0 1 0 -0.052 0.005 0 0 0 0.0165 0.049 0.04 1 0.025 35:0.12 - - - - -
+          P 13 8 0 1 0.004 -0.036 0.036 0 0 0 0.0185 0.03 0.022 1 0.03 35:0.12 - - - - -
+          P 14 8 0 0 0 0 0 0 -0.04 0 0.01 0.0093 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 15 8 0 0 0 0 0 0 -0.024 0 0.0093 0.0086 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 16 8 0 0 0 0 0 0 -0.02 0 0.0086 0.0079 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 17 8 0 0 0 0 0 0 -0.044 0 0.0102 0.009486 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 18 8 0 0 0 0 0 0 -0.027 0 0.009486 0.008772 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 19 8 0 0 0 0 0 0 -0.021 0 0.008772 0.008058 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 20 8 0 0 0 0 0 0 -0.04 0 0.0095 0.008835 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 21 8 0 0 0 0 0 0 -0.025 0 0.008835 0.00817 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 22 8 0 0 0 0 0 0 -0.02 0 0.00817 0.007505 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 23 8 0 0 0 0 0 0 -0.032 0 0.0085 0.007905 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 24 8 0 0 0 0 0 0 -0.019 0 0.007905 0.00731 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 25 8 0 0 0 0 0 0 -0.017 0 0.00731 0.006715 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 26 8 0 0 0 0 0 0 -0.04 0 0.0125 0.011625 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 27 8 0 0 0 0 0 0 -0.033 0 0.0115 0.010695 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 28 8 0 0 0 0 0 0 -0.028 0 0.0105 0.009765 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 36 9 0 1 0 -0.002 0 0 0 0 0.026 0.024 0.032 1 0.03 69:0.2;35:0.12 - - - - -
+          P 36 9 0 1 -0 -0.052 0.005 0 0 0 0.0165 0.049 0.04 1 0.025 35:0.12 - - - - -
+          P 36 9 0 1 -0.004 -0.036 0.036 0 0 0 0.0185 0.03 0.022 1 0.03 35:0.12 - - - - -
+          P 37 9 0 0 0 0 0 0 -0.04 0 0.01 0.0093 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 38 9 0 0 0 0 0 0 -0.024 0 0.0093 0.0086 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 39 9 0 0 0 0 0 0 -0.02 0 0.0086 0.0079 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 40 9 0 0 0 0 0 0 -0.044 0 0.0102 0.009486 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 41 9 0 0 0 0 0 0 -0.027 0 0.009486 0.008772 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 42 9 0 0 0 0 0 0 -0.021 0 0.008772 0.008058 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 43 9 0 0 0 0 0 0 -0.04 0 0.0095 0.008835 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 44 9 0 0 0 0 0 0 -0.025 0 0.008835 0.00817 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 45 9 0 0 0 0 0 0 -0.02 0 0.00817 0.007505 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 46 9 0 0 0 0 0 0 -0.032 0 0.0085 0.007905 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 47 9 0 0 0 0 0 0 -0.019 0 0.007905 0.00731 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 48 9 0 0 0 0 0 0 -0.017 0 0.00731 0.006715 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 49 9 0 0 0 0 0 0 -0.04 0 0.0125 0.011625 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 50 9 0 0 0 0 0 0 -0.033 0 0.0115 0.010695 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 51 9 0 0 0 0 0 0 -0.028 0 0.0105 0.009765 1 1 0.01 25:0.25;35:0.12 - - - 24:0.3;35:0.12 -
+          P 29 10 0 1 0.016 -0.012 0 0 0 0 0.066 0.066 0.07 1 0.05 62:0.12;23:0.06 - - - - -
+          P 29 10 0 0 0 0 0 0 -0.405 0 0.07 0.047 1 1 0.05 62:0.28;23:0.07 - - - 61:0.25 -
+          P 29 10 13 1 0.006 -0.19 0.02 0 0 0 0.058 0.15 0.054 1 0.05 56:0.3;47:0.22;62:0.12 - - - 61:0.25 -
+          P 29 10 14 1 0 -0.18 -0.028 0 0 0 0.054 0.15 0.05 1 0.05 34:0.3;47:0.18;62:0.1 - - - 61:0.25 -
+          P 29 10 0 1 -0.03 -0.15 0.004 0 0 0 0.034 0.13 0.042 1 0.05 62:0.1;60:-0.3 - - 60:-0.3 - -
+          P 30 12 0 1 0 0 0.008 0 0 0 0.046 0.047 0.046 1 0.04 41:0.25;5:0.04 - - - - -
+          P 30 12 0 0 0 0 0 0 -0.37 0 0.045 0.028 1 1 0.04 11:0.18;23:0.04 - - - 58:0.25 -
+          P 30 12 15 1 0.017 -0.105 -0.03 0 0 0 0.031 0.085 0.034 1 0.04 10:0.3;11:0.3;47:0.2 - - - 58:0.25 -
+          P 30 12 15 1 -0.012 -0.105 -0.03 0 0 0 0.031 0.085 0.034 1 0.04 10:0.3;11:0.3;47:0.2 - - - 58:0.25 -
+          P 30 12 0 1 -0.008 -0.14 0.022 0 0 0 0.026 0.11 0.024 1 0.03 11:0.1;47:0.1 - - - 58:0.25 -
+          P 31 14 0 1 0 0 0 0 0 0 0.034 0.04 0.037 1 0.03 1:0.25 - - - - -
+          P 31 14 0 1 0 -0.03 -0.035 0 0 0 0.03 0.032 0.04 1 0.03 1:0.12 - - - - -
+          P 31 14 0 0 0 -0.022 0.02 0 -0.045 0.135 0.036 0.027 1 1 0.03 27:0.12 - - - - 26:0.25
+          P 31 14 0 1 0 -0.043 0.115 0 0 0 0.04 0.021 0.045 1 0.03 27:0.15 - - - - 26:0.25
+          P 32 14 0 0 0.02 0 0 0.02 -0.003 0.04 0.0125 0.01 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 32 14 0 0 0.006 0 0 0.006 -0.003 0.032 0.0095 0.0076 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 32 14 0 0 -0.007 0 0 -0.007 -0.003 0.03 0.0092 0.00736 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 32 14 0 0 -0.019 0 0 -0.019 -0.003 0.026 0.0085 0.0068 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 32 14 0 0 -0.03 0 0 -0.03 -0.003 0.022 0.0078 0.00624 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 52 11 0 1 -0.016 -0.012 0 0 0 0 0.066 0.066 0.07 1 0.05 62:0.12;23:0.06 - - - - -
+          P 52 11 0 0 0 0 0 0 -0.405 0 0.07 0.047 1 1 0.05 62:0.28;23:0.07 - - - 61:0.25 -
+          P 52 11 13 1 -0.006 -0.19 0.02 0 0 0 0.058 0.15 0.054 1 0.05 56:0.3;47:0.22;62:0.12 - - - 61:0.25 -
+          P 52 11 14 1 -0 -0.18 -0.028 0 0 0 0.054 0.15 0.05 1 0.05 34:0.3;47:0.18;62:0.1 - - - 61:0.25 -
+          P 52 11 0 1 0.03 -0.15 0.004 0 0 0 0.034 0.13 0.042 1 0.05 62:0.1;60:-0.3 - - 60:-0.3 - -
+          P 53 13 0 1 0 0 0.008 0 0 0 0.046 0.047 0.046 1 0.04 41:0.25;5:0.04 - - - - -
+          P 53 13 0 0 0 0 0 0 -0.37 0 0.045 0.028 1 1 0.04 11:0.18;23:0.04 - - - 58:0.25 -
+          P 53 13 15 1 -0.017 -0.105 -0.03 0 0 0 0.031 0.085 0.034 1 0.04 10:0.3;11:0.3;47:0.2 - - - 58:0.25 -
+          P 53 13 15 1 0.012 -0.105 -0.03 0 0 0 0.031 0.085 0.034 1 0.04 10:0.3;11:0.3;47:0.2 - - - 58:0.25 -
+          P 53 13 0 1 0.008 -0.14 0.022 0 0 0 0.026 0.11 0.024 1 0.03 11:0.1;47:0.1 - - - 58:0.25 -
+          P 54 15 0 1 0 0 0 0 0 0 0.034 0.04 0.037 1 0.03 1:0.25 - - - - -
+          P 54 15 0 1 0 -0.03 -0.035 0 0 0 0.03 0.032 0.04 1 0.03 1:0.12 - - - - -
+          P 54 15 0 0 0 -0.022 0.02 0 -0.045 0.135 0.036 0.027 1 1 0.03 27:0.12 - - - - 26:0.25
+          P 54 15 0 1 0 -0.043 0.115 0 0 0 0.04 0.021 0.045 1 0.03 27:0.15 - - - - 26:0.25
+          P 55 15 0 0 -0.02 0 0 -0.02 -0.003 0.04 0.0125 0.01 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 55 15 0 0 -0.006 0 0 -0.006 -0.003 0.032 0.0095 0.0076 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 55 15 0 0 0.007 0 0 0.007 -0.003 0.03 0.0092 0.00736 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 55 15 0 0 0.019 0 0 0.019 -0.003 0.026 0.0085 0.0068 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 55 15 0 0 0.03 0 0 0.03 -0.003 0.022 0.0078 0.00624 1 1 0.008 27:0.1 - - - - 26:0.25
+          P 6 2 0 1 0 0.105 -0.012 0 0 0 0.07 0.098 0.098 1 0.05 36:0.1 22:0.1;36:0.1 - - - -
+          P 6 2 0 1 0 0.05 0.03 0 0 0 0.06 0.075 0.064 1 0.05 - 22:0.12 21:0 - 21:0.15 -
+          P 7 2 0 1 0 0 0.026 0 0 0 0.05 0.04 0.054 1 0.04 - 40:0.25;22:0.1 - - - -
+          P 7 2 0 1 0 -0.02 0.066 0 0 0 0.02 0.019 0.02 1 0.03 15:0.3 - - - 15:-0.15 15:0.15
+          P 6 2 0 1 0.04 0.045 0.066 0 0 0 0.024 0.026 0.02 1 0.04 12:0.4 - - 22:0.1 - -
+          P 6 2 4 1 0.03 0.111 0.088 0 0 0 0.026 0.0045 0.009 1 0.02 6:0.4 - - - - -
+          P 6 2 0 1 0.03 0.102 0.09 0 0 0 0.0175 0.0055 0.012 1 0.01 20:0.25 - - 19:0.25 18:0.05 -
+          P 6 2 0 1 0.03 0.082 0.09 0 0 0 0.0165 0.0045 0.011 1 0.01 20:0.25 - - 19:0.25 18:0.05 -
+          P 6 2 0 1 0.07 0.072 -0.006 0 0 0 0.0085 0.028 0.019 1 0.02 17:0.35 - - - - -
+          P 6 2 0 1 0.011 0.032 0.092 0 0 0 0.0065 0.0075 0.0075 1 0.015 53:0.35 - - 53:0.3 - -
+          P 8 17 2 1 0 0 0 0 0 0 0.0135 0.0135 0.0135 1 0 20:0.28 - - - - -
+          P 6 2 0 1 -0.04 0.045 0.066 0 0 0 0.024 0.026 0.02 1 0.04 12:0.4 - - 22:0.1 - -
+          P 6 2 4 1 -0.03 0.111 0.088 0 0 0 0.026 0.0045 0.009 1 0.02 6:0.4 - - - - -
+          P 6 2 0 1 -0.03 0.102 0.09 0 0 0 0.0175 0.0055 0.012 1 0.01 20:0.25 - - 19:0.25 18:0.05 -
+          P 6 2 0 1 -0.03 0.082 0.09 0 0 0 0.0165 0.0045 0.011 1 0.01 20:0.25 - - 19:0.25 18:0.05 -
+          P 6 2 0 1 -0.07 0.072 -0.006 0 0 0 0.0085 0.028 0.019 1 0.02 17:0.35 - - - - -
+          P 6 2 0 1 -0.011 0.032 0.092 0 0 0 0.0065 0.0075 0.0075 1 0.015 53:0.35 - - 53:0.3 - -
+          P 9 17 2 1 0 0 0 0 0 0 0.0135 0.0135 0.0135 1 0 20:0.28 - - - - -
+          P 6 2 0 0 0 0.088 0.082 0 0.05 0.096 0.0062 0.0085 1 1 0.02 50:0.3;53:0.15 - - - 51:-0.2 51:0.1
+          P 6 2 0 1 0 0.035 0.101 0 0 0 0.0092 0.0085 0.0095 1 0.02 52:0.3;53:0.15 - - - - 51:0.15
+          P 6 2 3 1 0 0.0235 0.0885 0 0 0 0.0155 0.0058 0.0068 1 0.01 44:0.4 45:0.3 - - 46:0.1 -
+          P 7 2 3 1 0 0.0138 0.087 0 0 0 0.0145 0.0068 0.0072 1 0.01 44:0.45 45:0.3 - - 46:0.1 -
+          P 6 16 1 1 0 0.125 -0.04 0 0 0 0.086 0.096 0.095 1 0.03 33:0.25 - - - - -
+          P 6 16 1 1 0 0.166 0.03 0 0 0 0.07 0.03 0.048 1 0.03 33:0.25 - - - - -
+          P 6 16 1 1 0 -0.075 -0.09 0 0 0 0.075 0.19 0.048 1 0.04 33:0.3 - - - 32:0.9 -
+          P 6 16 1 0 0.07 0.1 -0.02 0.078 -0.11 -0.02 0.022 0.02 1 1 0.03 33:0.2 - - - 32:0.6 -
+          P 6 16 1 0 -0.07 0.1 -0.02 -0.078 -0.11 -0.02 0.022 0.02 1 1 0.03 33:0.2 - - - 32:0.6 -
+          EOF
+          mkdir -p $(dirname app/src/main/assets/sdf.glsl)
+          cat > app/src/main/assets/sdf.glsl <<'EOF'
+          // ---- shared between GLSL (app) and C++ (verifier). Restricted subset: no swizzles except via V3().
+          struct Hit { float skin; float hair; float eye; float top; float bot; float shoe; float idSkin; float idTop; };
+
+          float smin(float a, float b, float k) {
+              if (k <= 0.0) return min(a, b);
+              float h = max(k - abs(a - b), 0.0) / k;
+              return min(a, b) - h * h * k * 0.25;
+          }
+
+          float sdRoundCone(vec3 p, vec3 a, vec3 b, float r1, float r2) {
+              vec3 ba = b - a;
+              float l2 = dot(ba, ba);
+              float rr = r1 - r2;
+              float a2 = l2 - rr * rr;
+              float il2 = 1.0 / l2;
+              vec3 pa = p - a;
+              float y = dot(pa, ba);
+              float z = y - l2;
+              vec3 xx = pa * l2 - ba * y;
+              float x2 = dot(xx, xx);
+              float y2 = y * y * l2;
+              float z2 = z * z * l2;
+              float k = sign(rr) * rr * rr * x2;
+              if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - r2;
+              if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - r1;
+              return (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
+          }
+
+          float sdEllipsoid(vec3 p, vec3 r) {
+              float k0 = length(vec3(p.x / r.x, p.y / r.y, p.z / r.z));
+              float k1 = length(vec3(p.x / (r.x * r.x), p.y / (r.y * r.y), p.z / (r.z * r.z)));
+              return k0 * (k0 - 1.0) / max(k1, 1e-6);
+          }
+
+          vec4 fetchGroup(int g, int k) { return D(g * 2 + k); }
+          vec4 fetchPrim(int i, int k) { return D(uPrimBase + i * 4 + k); }
+          vec4 fetchBone(int b, int k) { return D(uBoneBase + b * 3 + k); }
+
+          vec3 toLocal(vec3 p, int b) {
+              vec4 r0 = fetchBone(b, 0);
+              vec4 r1 = fetchBone(b, 1);
+              vec4 r2 = fetchBone(b, 2);
+              return vec3(dot(V3(r0), p) + r0.w, dot(V3(r1), p) + r1.w, dot(V3(r2), p) + r2.w);
+          }
+
+          float evalPrim(vec3 q, vec4 t0, vec4 t1, vec4 t2) {
+              if (t2.w < 0.5) {
+                  float sx = t2.x;
+                  float sz = t2.y;
+                  vec3 a = vec3(t0.x / sx, t0.y, t0.z / sz);
+                  vec3 b = vec3(t1.x / sx, t1.y, t1.z / sz);
+                  vec3 qs = vec3(q.x / sx, q.y, q.z / sz);
+                  return sdRoundCone(qs, a, b, t0.w, t1.w) * min(min(sx, sz), 1.0);
+              }
+              vec3 c = V3(t0);
+              return sdEllipsoid(q - c, vec3(t0.w, t1.w, t2.x));
+          }
+
+          Hit evalBody(vec3 p) {
+              Hit h;
+              h.skin = 1000.0; h.hair = 1000.0; h.eye = 1000.0; h.top = 1000.0; h.bot = 1000.0; h.shoe = 1000.0;
+              h.idSkin = 0.0; h.idTop = 0.0;
+              float bestS = 1000.0;
+              for (int g = 0; g < uNG; g++) {
+                  vec4 gb = fetchGroup(g, 0);
+                  vec4 gi = fetchGroup(g, 1);
+                  float dg = length(p - V3(gb)) - gb.w;
+                  int layer = int(gi.z + 0.5);
+                  int cf = int(gi.w + 0.5);
+                  if (dg > 0.10) {
+                      if (layer == 0) {
+                          h.skin = min(h.skin, dg);
+                          if ((cf & 1) != 0) h.top = min(h.top, dg);
+                          if ((cf & 2) != 0) h.bot = min(h.bot, dg);
+                          if ((cf & 4) != 0) h.shoe = min(h.shoe, dg);
+                      } else if (layer == 1) {
+                          h.hair = min(h.hair, dg);
+                      } else {
+                          h.eye = min(h.eye, dg);
+                      }
+                      continue;
+                  }
+                  int start = int(gi.x + 0.5);
+                  int cnt = int(gi.y + 0.5);
+                  for (int j = 0; j < cnt; j++) {
+                      int pi = start + j;
+                      vec4 t0 = fetchPrim(pi, 0);
+                      vec4 t1 = fetchPrim(pi, 1);
+                      vec4 t2 = fetchPrim(pi, 2);
+                      vec4 t3 = fetchPrim(pi, 3);
+                      vec3 q = toLocal(p, int(t3.x + 0.5));
+                      float d = evalPrim(q, t0, t1, t2);
+                      float k = t2.z;
+                      if (layer == 0) {
+                          h.skin = smin(h.skin, d, k);
+                          if (d < bestS) { bestS = d; h.idSkin = t3.z; }
+                          if ((cf & 1) != 0) h.top = smin(h.top, d, k * uClothK);
+                          if ((cf & 2) != 0) h.bot = smin(h.bot, d, k * uClothK);
+                          if ((cf & 4) != 0) h.shoe = smin(h.shoe, d, k * uClothK);
+                      } else if (layer == 1) {
+                          h.hair = smin(h.hair, d, k);
+                      } else {
+                          h.eye = min(h.eye, d);
+                      }
+                  }
+              }
+              return h;
+          }
+
+          float evalBones(vec3 p) {
+              float d = 1000.0;
+              for (int g = uNG; g < uNGall; g++) {
+                  vec4 gb = fetchGroup(g, 0);
+                  vec4 gi = fetchGroup(g, 1);
+                  float dg = length(p - V3(gb)) - gb.w;
+                  if (dg > 0.06) { d = min(d, dg); continue; }
+                  int start = int(gi.x + 0.5);
+                  int cnt = int(gi.y + 0.5);
+                  for (int j = 0; j < cnt; j++) {
+                      int pi = start + j;
+                      vec4 t0 = fetchPrim(pi, 0);
+                      vec4 t1 = fetchPrim(pi, 1);
+                      vec4 t2 = fetchPrim(pi, 2);
+                      vec4 t3 = fetchPrim(pi, 3);
+                      d = smin(d, evalPrim(toLocal(p, int(t3.x + 0.5)), t0, t1, t2), t2.z);
+                  }
+              }
+              return d;
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/assets/scene.glsl)
+          cat > app/src/main/assets/scene.glsl <<'EOF'
+          uniform vec3 uEye; uniform vec3 uRight; uniform vec3 uUp; uniform vec3 uFwd;
+          uniform float uTanF; uniform float uAspect; uniform vec2 uJit; uniform vec2 uRes;
+          uniform int uSteps; uniform int uMode; uniform int uGround; uniform int uTopOn; uniform int uBotOn; uniform int uShoeOn; uniform int uSkirtOn;
+          uniform sampler2D uPrev; uniform float uW; uniform vec3 uCenter; uniform int uPelvisBone; uniform int uEyeBone0; uniform int uEyeBone1;
+          uniform vec3 uSkin; uniform vec3 uLipC; uniform vec3 uBrowC; uniform vec3 uHairC; uniform vec3 uEyeC; uniform vec3 uBg1; uniform vec3 uBg2;
+          uniform vec3 uLdir[3]; uniform vec3 uLcol[3]; uniform float uAmb; uniform float uShadowSoft; uniform float uGloss;
+          uniform vec4 uCA[3]; uniform vec4 uCB[3]; uniform vec4 uCC[3];
+          uniform vec3 uSeg[16]; uniform float uSegOn[4];
+          uniform vec3 uHem; uniform vec3 uHemN; uniform vec3 uWaist; uniform vec3 uNeck; uniform float uNeckR;
+          uniform vec4 uFold[5]; uniform vec3 uFoldDir[5];
+          uniform vec4 uSkirt; uniform vec3 uShoeP[2]; uniform vec3 uShoeN[2];
+          out vec4 fragColor;
+
+          float hash13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+          float sdCap(vec3 p, vec3 a, vec3 b, float r) { vec3 pa = p - a; vec3 ba = b - a; float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0); return length(pa - ba * h) - r; }
+          float remTube(vec3 p, int i, float r) {
+              if (uSegOn[i] < 0.5) return 1000.0;
+              vec3 a0 = uSeg[4 * i]; vec3 b0 = uSeg[4 * i + 1]; vec3 a1 = uSeg[4 * i + 2]; vec3 b1 = uSeg[4 * i + 3];
+              float r0 = max(sdCap(p, a0, b0, r), -dot(p - a0, normalize(b0 - a0)));
+              float r1 = max(sdCap(p, a1, b1, r), -dot(p - a1, normalize(b1 - a1)));
+              return min(r0, r1);
+          }
+          float wrinkle(vec3 p, int idx) {
+              float amp = uCC[idx].y; float fr = uCC[idx].z;
+              if (amp <= 0.0) return 0.0;
+              float w = amp * 0.0022 * sin(dot(p, vec3(37.0, 53.0, 41.0)) * fr * 0.1) * sin(dot(p, vec3(-43.0, 29.0, 47.0)) * fr * 0.1);
+              for (int i = 0; i < 5; i++) {
+                  float m = uFold[i].w * smoothstep(0.15, 0.0, length(p - uFold[i].xyz));
+                  w += amp * 0.006 * m * sin(dot(p - uFold[i].xyz, uFoldDir[i]) * fr * 2.2 + float(i));
+              }
+              return w;
+          }
+          float topD(vec3 p, float dt) {
+              float d = dt - uCC[0].x - wrinkle(p, 0);
+              d = max(d, -dot(p - uHem, uHemN));
+              d = max(d, -(length((p - uNeck) * vec3(1.0, 1.0, 0.85)) - uNeckR));
+              d = max(d, -remTube(p, 0, 0.07));
+              d = max(d, -remTube(p, 1, 0.07));
+              return d;
+          }
+          float botD(vec3 p, float db) {
+              float d = db - uCC[1].x - wrinkle(p, 1);
+              d = max(d, dot(p - uWaist, uHemN));
+              d = max(d, -remTube(p, 2, 0.095));
+              d = max(d, -remTube(p, 3, 0.095));
+              return d;
+          }
+          float skirtD(vec3 p) {
+              vec3 q = toLocal(p, uPelvisBone);
+              float L = uSkirt.x; float yy = 0.075 - q.y; float t = clamp(yy / L, 0.0, 1.0);
+              float rho = length(vec3(q.x, 0.0, q.z)); float ang = atan(q.x, q.z);
+              float R = 0.16 + uCC[1].x + uSkirt.y * t * t + uSkirt.z * 0.012 * sin(ang * 16.0) * t;
+              float d = abs(rho - R) - uSkirt.w;
+              d = max(d, max(-yy, yy - L));
+              return d - wrinkle(p, 1);
+          }
+          float shoeD(vec3 p, float ds) {
+              float d = ds - uCC[2].x;
+              float d0 = length(p - uShoeP[0]); float d1 = length(p - uShoeP[1]);
+              if (d0 < d1) d = max(d, dot(p - uShoeP[0], uShoeN[0])); else d = max(d, dot(p - uShoeP[1], uShoeN[1]));
+              return d;
+          }
+          float mapAll(vec3 p) {
+              Hit h = evalBody(p);
+              float d = min(h.skin, min(h.hair, h.eye));
+              if (uTopOn > 0) d = min(d, topD(p, h.top));
+              if (uBotOn > 0) { if (uSkirtOn > 0) d = min(d, skirtD(p)); else d = min(d, botD(p, h.bot)); }
+              if (uShoeOn > 0) d = min(d, shoeD(p, h.shoe));
+              return d;
+          }
+          vec3 calcN(vec3 p) {
+              vec2 e = vec2(1.0, -1.0) * 0.0006;
+              return normalize(e.xyy * mapAll(p + e.xyy) + e.yyx * mapAll(p + e.yyx) + e.yxy * mapAll(p + e.yxy) + e.xxx * mapAll(p + e.xxx));
+          }
+          float softShadow(vec3 ro, vec3 rd, float k) {
+              float res = 1.0; float t = 0.02;
+              for (int i = 0; i < 28; i++) {
+                  float h = mapAll(ro + rd * t);
+                  res = min(res, k * h / t);
+                  t += clamp(h, 0.01, 0.12);
+                  if (res < 0.001 || t > 2.5) break;
+              }
+              return clamp(res, 0.0, 1.0);
+          }
+          float calcAO(vec3 p, vec3 n) {
+              float occ = 0.0; float sc = 1.0;
+              for (int i = 1; i <= 5; i++) { float h = 0.012 * float(i) * float(i) * 0.6; occ += (h - mapAll(p + n * h)) * sc; sc *= 0.7; }
+              return clamp(1.0 - 3.2 * occ, 0.0, 1.0);
+          }
+          vec3 hsv(float h, float s, float v) { vec3 k = abs(fract(vec3(h) + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0); return v * mix(vec3(1.0), clamp(k - 1.0, 0.0, 1.0), s); }
+          vec3 clothCol(int i, vec3 p) {
+              vec3 c1 = uCA[i].xyz; vec3 c2 = uCB[i].xyz; float sc = uCB[i].w; int pat = int(uCA[i].w + 0.5); float m = 0.0;
+              vec3 q = p * sc;
+              if (pat == 1) m = step(0.5, fract(q.y * 6.0));
+              else if (pat == 2) m = step(0.5, fract(q.x * 6.0 + q.z * 6.0));
+              else if (pat == 3) m = abs(step(0.5, fract(q.x * 5.0)) - step(0.5, fract(q.y * 5.0)));
+              else if (pat == 4) { vec2 g = fract(vec2(q.x + q.z, q.y) * 6.0) - 0.5; m = step(length(g), 0.22); }
+              return mix(c1, c2, m);
+          }
+          vec3 lightAll(vec3 p, vec3 n, vec3 rd, vec3 alb, float spec, float shin, float sss, float ao, float shadowOn) {
+              vec3 col = alb * uAmb * mix(vec3(0.55, 0.6, 0.7), vec3(1.0), n.y * 0.5 + 0.5) * ao;
+              for (int i = 0; i < 3; i++) {
+                  vec3 l = normalize(uLdir[i]);
+                  float nl = dot(n, l);
+                  float wrap = sss;
+                  float dif = clamp((nl + wrap) / (1.0 + wrap), 0.0, 1.0);
+                  float sh = 1.0;
+                  if (i == 0 && shadowOn > 0.5) sh = softShadow(p + n * 0.004, l, uShadowSoft);
+                  vec3 h = normalize(l - rd);
+                  float sp = pow(clamp(dot(n, h), 0.0, 1.0), shin) * spec * step(0.0, nl);
+                  float fr = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 4.0);
+                  vec3 sc = vec3(1.0, 0.35, 0.25) * sss * pow(clamp(1.0 - abs(nl), 0.0, 1.0), 3.0) * 0.5;
+                  col += uLcol[i] * (alb * (dif + sc) * sh * (0.5 + 0.5 * ao) + sp * sh) + uLcol[i] * fr * spec * 0.15 * ao;
+              }
+              return col;
+          }
+          vec3 shadeSurf(vec3 p, vec3 rd, out float ok) {
+              ok = 1.0;
+              Hit h = evalBody(p);
+              float dSk = min(h.skin, min(h.hair, h.eye));
+              float dT = uTopOn > 0 ? topD(p, h.top) : 1000.0;
+              float dB = 1000.0;
+              if (uBotOn > 0) dB = (uSkirtOn > 0) ? skirtD(p) : botD(p, h.bot);
+              float dS = uShoeOn > 0 ? shoeD(p, h.shoe) : 1000.0;
+              float dm = min(min(dSk, dT), min(dB, dS));
+              vec3 n = calcN(p);
+              float ao = calcAO(p, n);
+              if (uMode == 3) return n * 0.5 + 0.5;
+              vec3 col;
+              if (dm == dT) {
+                  vec3 alb = clothCol(0, p);
+                  float wv = 0.5 + 0.5 * sin(p.x * 900.0) * sin(p.y * 900.0);
+                  n = normalize(n + 0.08 * vec3(sin(p.y * 700.0), sin(p.z * 700.0), sin(p.x * 700.0)) * wv);
+                  col = lightAll(p, n, rd, alb * (0.95 + 0.05 * wv), 0.15 * uCC[0].w, 20.0, 0.1, ao, 1.0);
+                  col += uCC[0].w * pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0) * alb * 0.35;
+              } else if (dm == dB) {
+                  vec3 alb = clothCol(1, p);
+                  n = normalize(n + 0.06 * vec3(sin(p.y * 700.0), sin(p.z * 700.0), sin(p.x * 700.0)));
+                  col = lightAll(p, n, rd, alb, 0.12 * uCC[1].w, 20.0, 0.1, ao, 1.0);
+                  col += uCC[1].w * pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0) * alb * 0.35;
+              } else if (dm == dS) {
+                  vec3 alb = clothCol(2, p);
+                  col = lightAll(p, n, rd, alb, 0.3, 30.0, 0.05, ao, 1.0);
+              } else if (dm == h.hair) {
+                  vec3 T = normalize(vec3(0.0, -1.0, 0.0) - n * dot(n, vec3(0.0, -1.0, 0.0)));
+                  col = vec3(0.0);
+                  for (int i = 0; i < 3; i++) {
+                      vec3 l = normalize(uLdir[i]); vec3 hh = normalize(l - rd);
+                      float th = dot(T, hh); float sp = pow(sqrt(max(1.0 - th * th, 0.0)), 60.0) * uGloss;
+                      col += uLcol[i] * (uHairC * max(dot(n, l) * 0.6 + 0.4, 0.0) + vec3(sp) * 0.6 * uHairC + vec3(sp) * 0.15);
+                  }
+                  col += uHairC * uAmb * ao;
+              } else if (dm == h.eye) {
+                  vec3 q0 = toLocal(p, uEyeBone0); vec3 q1 = toLocal(p, uEyeBone1);
+                  vec3 q = length(q0) < length(q1) ? q0 : q1;
+                  vec3 dq = normalize(q); float a = acos(clamp(dq.z, -1.0, 1.0));
+                  vec3 alb = vec3(0.93, 0.92, 0.9);
+                  float ir = smoothstep(0.62, 0.55, a); float pu = smoothstep(0.26, 0.22, a);
+                  vec3 ic = uEyeC * (0.55 + 0.45 * sin(atan(dq.y, dq.x) * 18.0) * 0.5 + 0.2) * mix(0.6, 1.2, smoothstep(0.55, 0.3, a));
+                  alb = mix(alb, ic, ir); alb = mix(alb, vec3(0.02), pu);
+                  col = lightAll(p, normalize(n), rd, alb, 1.4, 90.0, 0.0, ao, 0.0);
+              } else {
+                  int id = int(h.idSkin + 0.5);
+                  vec3 alb = uSkin;
+                  float lipm = float(id == 3);
+                  alb = mix(alb, uLipC, lipm);
+                  alb = mix(alb, uBrowC, float(id == 4));
+                  if (uMode == 2) alb = id < 5 ? vec3(0.8) : hsv(float(id) * 0.137, 0.55, 0.85);
+                  float pore = hash13(floor(p * 900.0)) - 0.5;
+                  n = normalize(n + 0.025 * vec3(pore, hash13(floor(p * 900.0) + 7.0) - 0.5, hash13(floor(p * 900.0) + 13.0) - 0.5));
+                  col = lightAll(p, n, rd, alb, mix(0.35, 1.1, lipm) * uGloss, mix(28.0, 60.0, lipm), uMode == 1 ? 0.0 : 0.45, ao, 1.0);
+                  if (uMode == 1) col = lightAll(p, n, rd, vec3(0.72), 0.05, 10.0, 0.0, ao, 1.0);
+              }
+              if (uMode == 4) { col = floor(col * 3.0) / 3.0; if (dot(n, -rd) < 0.22) col *= 0.12; }
+              return col;
+          }
+          vec3 background(vec2 uv) { return mix(uBg2, uBg1, clamp(uv.y * 0.5 + 0.5, 0.0, 1.0)); }
+          void main() {
+              vec2 uv = (gl_FragCoord.xy + uJit) / uRes * 2.0 - 1.0;
+              vec3 rd = normalize(uFwd + uRight * (uv.x * uTanF * uAspect) + uUp * (uv.y * uTanF));
+              vec3 ro = uEye;
+              vec3 col = background(uv);
+              float tg = 1e9;
+              if (uGround > 0 && rd.y < -0.0001) tg = -ro.y / rd.y;
+              // bounding sphere
+              vec3 oc = ro - uCenter; float b = dot(oc, rd); float c = dot(oc, oc) - 2.6;
+              float disc = b * b - c;
+              float t = 0.0; bool hit = false;
+              if (disc > 0.0) {
+                  t = max(-b - sqrt(disc), 0.0);
+                  float tmax = -b + sqrt(disc);
+                  for (int i = 0; i < 160; i++) {
+                      if (i >= uSteps) break;
+                      vec3 p = ro + rd * t;
+                      float d = mapAll(p);
+                      if (d < 0.0003 + 0.0002 * t) { hit = true; break; }
+                      t += d * 0.85;
+                      if (t > tmax) break;
+                  }
+              }
+              if (hit && t < tg) {
+                  float ok; col = shadeSurf(ro + rd * t, rd, ok);
+              } else if (tg < 1e8) {
+                  vec3 gp = ro + rd * tg;
+                  float fade = exp(-length(gp.xz) * 0.55);
+                  vec3 gc = mix(uBg2, uBg1, 0.35) * 0.8;
+                  float sh = softShadow(gp + vec3(0.0, 0.003, 0.0), normalize(uLdir[0]), uShadowSoft);
+                  float ao = clamp(1.0 - exp(-mapAll(gp + vec3(0.0, 0.18, 0.0)) * 5.0) * 0.0, 0.0, 1.0);
+                  float occ = clamp(mapAll(gp + vec3(0.0, 0.12, 0.0)) / 0.12, 0.0, 1.0);
+                  vec3 lit = gc * (uAmb * 0.8 + 0.7 * sh * max(normalize(uLdir[0]).y, 0.0)) * mix(0.55, 1.0, occ);
+                  col = mix(col, lit, fade * 0.95 + 0.05);
+              }
+              vec3 prev = texelFetch(uPrev, ivec2(gl_FragCoord.xy), 0).rgb;
+              fragColor = vec4(mix(prev, col, uW), 1.0);
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/assets/blit.glsl)
+          cat > app/src/main/assets/blit.glsl <<'EOF'
+          uniform sampler2D uTex; uniform vec2 uRes; uniform float uExp; uniform float uVig;
+          in vec2 vUV; out vec4 fragColor;
+          vec3 aces(vec3 x) { return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+          void main() {
+              vec3 c = texture(uTex, vUV).rgb * exp2(uExp);
+              c = aces(c);
+              c = pow(c, vec3(1.0 / 2.2));
+              vec2 q = vUV - 0.5; c *= 1.0 - uVig * dot(q, q) * 1.6;
+              fragColor = vec4(c, 1.0);
+          }
+          EOF
+      - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with: { name: Atelier-apk, path: app/build/outputs/apk/debug/*.apk }
