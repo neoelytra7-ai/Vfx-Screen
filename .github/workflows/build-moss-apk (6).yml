@@ -1,24 +1,3 @@
-# Save as: .github/workflows/build-moss-apk.yml
-#
-# MossLocal: Android app that runs diffusion models on-device via stable-diffusion.cpp
-# (Adreno GPU through OpenCL, CPU NEON/i8mm fallback). Built-in one-tap model downloads:
-# DreamShaper-7 LCM, SD-Turbo, SD 1.5 (Q4_0/Q8_0). 'Custom' slot is kept for MOSS-Image GGUFs.
-# UI: live OpenGL forest (waving grass, flowing river with reflections, fireflies, touch ripples)
-# plus a procedurally synthesized forest soundscape. No extra assets or downloads.
-#
-# NO SECRETS NEEDED. The signing key is created on the first run and kept in the repo cache.
-# A weekly keep-alive job touches that cache so GitHub never evicts it (7-day rule).
-# If the key were ever lost, the build STOPS instead of silently making a new one
-# (a new key would block in-place updates). Override with allow_new_key=true.
-#
-# Optional: set KEYSTORE_B64 / KEYSTORE_PASSWORD / KEY_ALIAS secrets to use your own key.
-#
-# UPDATES: same applicationId + same key + increasing versionCode (= run number) => Android
-# installs the new APK OVER the old one. Models are stored outside the APK and survive updates.
-# (Uninstalling the app deletes them.) The app's "Update app" button reads the latest Release,
-# verifies its SHA-256, then hands it to Android's installer.
-# NOTE: the in-app updater needs a PUBLIC repo (private repos return 404 to anonymous requests).
-
 name: Build MossLocal APK
 
 on:
