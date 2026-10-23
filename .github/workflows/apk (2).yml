@@ -1,0 +1,1158 @@
+# Single-file pipeline: this YAML contains the whole Android app (Kotlin) + build + sign + release.
+# Edit the source blocks in the 'src' step and push: every push builds an updatable APK.
+name: apk
+on:
+  push: {branches: [main], tags: ['v*']}
+  workflow_dispatch:
+concurrency: {group: "apk-${{github.ref}}", cancel-in-progress: true}
+permissions: {contents: write}
+env: {N: Canvas}
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: 17}
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: 8.10.2}
+      - name: src
+        run: |
+          cat > settings.gradle.kts <<'EOF_SRC'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Canvas"
+          include(":app")
+          EOF_SRC
+          cat > build.gradle.kts <<'EOF_SRC'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          EOF_SRC
+          cat > gradle.properties <<'EOF_SRC'
+          org.gradle.jvmargs=-Xmx4g
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.configuration-cache=true
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF_SRC
+          cat > .gitignore <<'EOF_SRC'
+          build/
+          .gradle/
+          local.properties
+          *.jks
+          EOF_SRC
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_SRC'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+          android {
+              namespace = "dev.canvas"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "dev.canvas"; minSdk = 24; targetSdk = 35
+                  versionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
+                  versionName = findProperty("versionName") as String? ?: "dev"
+              }
+              buildTypes { release { isMinifyEnabled = true; isShrinkResources = true
+                  proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt")) } }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+          }
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.3")
+          }
+          EOF_SRC
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_SRC'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:glEsVersion="0x00030000" android:required="true"/>
+              <application android:label="Canvas" android:allowBackup="false" android:theme="@android:style/Theme.Black.NoTitleBar">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_SRC
+          mkdir -p app/src/main/kotlin/dev/canvas
+          cat > app/src/main/kotlin/dev/canvas/MainActivity.kt <<'EOF_SRC'
+          package dev.canvas
+
+          import android.app.ActivityManager
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.core.view.WindowInsetsControllerCompat
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  WindowCompat.setDecorFitsSystemWindows(window, false)
+                  WindowInsetsControllerCompat(window, window.decorView).apply {
+                      hide(WindowInsetsCompat.Type.systemBars())
+                      systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                  }
+                  T.load(getSharedPreferences("t", 0))
+                  // canvas size adapts to device memory: low-end stays smooth, hi-end gets 2K
+                  val mc = (getSystemService(ACTIVITY_SERVICE) as ActivityManager).memoryClass
+                  val e = Engine(when { mc >= 256 -> 2048; mc >= 128 -> 1536; else -> 1024 })
+                  setContent { App(e) }
+              }
+          }
+          EOF_SRC
+          mkdir -p app/src/main/kotlin/dev/canvas
+          cat > app/src/main/kotlin/dev/canvas/Engine.kt <<'EOF_SRC'
+          package dev.canvas
+
+          import android.graphics.Bitmap
+          import android.graphics.Matrix
+          import android.opengl.GLES30 as G
+          import android.opengl.GLSurfaceView
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.setValue
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.nio.IntBuffer
+          import javax.microedition.khronos.egl.EGLConfig
+          import javax.microedition.khronos.opengles.GL10
+          import kotlin.math.*
+          import kotlin.random.Random
+
+          enum class Tool(val code: String) {
+              BRUSH("BR"), ERASER("ER"), SMUDGE("SM"), BLUR("BL"), DODGE("DG"), BURN("BN"), LIQUIFY("LQ"),
+              FILL("FL"), GRAD("GR"), LINE("LN"), RECT("RC"), OVAL("OV"), PICK("PK"), MOVE("MV")
+          }
+
+          class Pen {
+              var size = 24f; var opacity = 1f; var hardness = .8f; var spacing = .08f
+              var round = 1f; var angle = 0f; var follow = false
+              var scatter = 0f; var sizeJit = 0f; var opJit = 0f
+              var grain = 0f; var grainScale = 2f; var smooth = .2f
+              var pCurve = 1f; var pSize = .7f; var pOp = 0f
+              var blurR = 2f; var tol = 24f
+              var color = -1; var color2 = 0xFF000000.toInt()
+              fun load(v: FloatArray) {
+                  size = v[0]; opacity = v[1]; hardness = v[2]; spacing = v[3]; round = v[4]; angle = v[5]; scatter = v[6]
+                  sizeJit = v[7]; opJit = v[8]; grain = v[9]; grainScale = v[10]; smooth = v[11]; pSize = v[12]; pOp = v[13]
+              }
+          }
+
+          class LI(val show: Boolean, val alpha: Float, val blend: Int)
+          class Layer(val tex: Int, val fbo: Int) { var show = true; var alpha = 1f; var blend = 0 }
+
+          private class P(val id: Int) {
+              private val m = HashMap<String, Int>()
+              fun u(n: String) = m.getOrPut(n) { G.glGetUniformLocation(id, n) }
+          }
+          private class Step(val l: Layer) { val t = HashMap<Int, Int>() }
+
+          private const val PIF = 3.1415927f
+          private const val TS = 256        // undo tile size (copy-on-write, only touched tiles are stored)
+          private const val BUDGET = 160    // max stored tiles (~40 MB) across the undo stack
+
+          private const val VS = """#version 300 es
+          uniform vec4 uR;out vec2 vP,vU;
+          void main(){vec2 p=vec2(float(gl_VertexID&1),float(gl_VertexID>>1))*2.-1.;vP=p;vU=p*.5+.5;gl_Position=vec4(uR.xy+p*uR.zw,0,1);}"""
+
+          // stamp: hardness, roundness, angle, grain (canvas-fixed noise), kind (0 paint, 1 dodge/burn)
+          private const val FS_B = """#version 300 es
+          precision highp float;in vec2 vP;uniform vec4 uC,uQ;uniform vec2 uG;out vec4 o;
+          float hs(vec2 p){p=fract(p*vec2(.1031,.1030));p+=dot(p,p.yx+33.33);return fract((p.x+p.y)*p.x);}
+          void main(){float c=cos(uQ.z),s=sin(uQ.z);vec2 q=vec2(c*vP.x+s*vP.y,-s*vP.x+c*vP.y);q.y/=uQ.y;
+          float a=(1.-smoothstep(uQ.x,1.,length(q)))*uC.a;a*=1.-uQ.w*hs(floor(gl_FragCoord.xy/uG.x));
+          o=uG.y<.5?vec4(uC.rgb*a,a):vec4(vec3(a*.3),0.);}"""
+
+          // smudge (mode 0) / blur (mode 1) reading a scratch copy of the layer
+          private const val FS_S = """#version 300 es
+          precision highp float;in vec2 vP;uniform sampler2D uT;uniform vec2 uSz,uD;uniform vec4 uQ;uniform float uM,uS,uBr;out vec4 o;
+          void main(){vec2 uv=gl_FragCoord.xy/uSz;vec4 src=texture(uT,uv);float a=(1.-smoothstep(uQ.x,1.,length(vP)))*uS;vec4 r;
+          if(uM<.5)r=texture(uT,uv-uD/uSz);else{r=vec4(0.);for(int i=-1;i<=1;i++)for(int j=-1;j<=1;j++)r+=texture(uT,uv+vec2(float(i),float(j))*uBr/uSz);r/=9.;}
+          o=mix(src,r,a);}"""
+
+          private const val FS_G = """#version 300 es
+          precision highp float;uniform vec2 uA,uB;uniform vec4 uC1,uC2;out vec4 o;
+          void main(){vec2 d=uB-uA;float t=clamp(dot(gl_FragCoord.xy-uA,d)/dot(d,d),0.,1.);o=mix(uC1,uC2,t);}"""
+
+          // composite: layer sampled through shared 16-bit displacement map + optional move offset
+          private const val FS_C = """#version 300 es
+          precision highp float;in vec2 vU;uniform sampler2D uL,uD;uniform vec2 uSz,uO;uniform float uA,uW,uRng;out vec4 o;
+          vec2 dec(vec4 t){vec4 b=t*255.;return(vec2(b.r*256.+b.g,b.b*256.+b.a)/65535.-.5)*2.*uRng;}
+          void main(){vec2 uv=vU-uO/uSz;if(uW>0.)uv+=dec(texture(uD,vU))/uSz;
+          if(uv.x<0.||uv.y<0.||uv.x>1.||uv.y>1.){o=vec4(0.);return;}o=texture(uL,uv)*uA;}"""
+
+          // liquify: mode 0 push, 1 pinch, 2 bloat, 3 swirl
+          private const val FS_L = """#version 300 es
+          precision highp float;uniform sampler2D uD;uniform vec2 uSz,uC,uV;uniform float uRad,uS,uRng,uM;out vec4 o;
+          vec2 dec(vec4 t){vec4 b=t*255.;return(vec2(b.r*256.+b.g,b.b*256.+b.a)/65535.-.5)*2.*uRng;}
+          vec4 enc(vec2 v){vec2 q=floor((clamp(v/uRng,-1.,1.)*.5+.5)*65535.+.5);vec2 h=floor(q/256.);vec2 l=q-h*256.;return vec4(h.x,l.x,h.y,l.y)/255.;}
+          void main(){vec2 c=dec(texture(uD,gl_FragCoord.xy/uSz));vec2 dr=gl_FragCoord.xy-uC;float L=length(dr);float d=L/uRad;float f=max(1.-d*d,0.);f*=f;
+          vec2 n=L>0.?dr/L:vec2(0.);float k=length(uV);vec2 dd;
+          if(uM<.5)dd=-uV;else if(uM<1.5)dd=n*k;else if(uM<2.5)dd=-n*k;else dd=vec2(-n.y,n.x)*k;
+          o=enc(c+dd*f*uS);}"""
+
+          class Engine(val W: Int, val H: Int = W) : GLSurfaceView.Renderer {
+              @JvmField var tool = Tool.BRUSH
+              val pen = Pen()
+              @JvmField var liqMode = 0
+              @JvmField var liqR = 140f
+              @JvmField var liqS = 1f
+              @JvmField var symMode = 0
+              @JvmField var symN = 6
+              @JvmField var cur = 0
+              @JvmField var onPick: ((Int) -> Unit)? = null
+              @Volatile var bgv = 0f
+              @Volatile var vw = 1
+              @Volatile var vh = 1
+              @Volatile var zoom = 1f
+              @Volatile var px = 0f
+              @Volatile var py = 0f
+
+              // UI-observable state (written on the GL thread, read by Compose)
+              var info by mutableStateOf(listOf<LI>())
+              var curUi by mutableIntStateOf(0)
+              var canUndo by mutableStateOf(false)
+              var canRedo by mutableStateOf(false)
+
+              private val layers = ArrayList<Layer>()
+              private val uStack = ArrayDeque<Step>()
+              private val rStack = ArrayDeque<Step>()
+              private var step: Step? = null
+              private var tiles = 0
+              private var warped = false
+              private lateinit var pB: P; private lateinit var pS: P; private lateinit var pG: P
+              private lateinit var pC: P; private lateinit var pL: P
+              private lateinit var map: Layer
+              private var dTex = 0; private var dFbo = 0; private var sTex = 0; private var sFbo = 0; private var tFbo = 0
+              private val rng = 128f
+              private var lx = 0f; private var ly = 0f; private var acc = 0f
+              private var sx = 0f; private var sy = 0f; private var x0 = 0f; private var y0 = 0f
+              private var pdx = 0f; private var pdy = 0f; private var mox = 0f; private var moy = 0f
+
+              private fun sync() {
+                  info = layers.map { LI(it.show, it.alpha, it.blend) }; curUi = cur
+                  canUndo = uStack.isNotEmpty(); canRedo = rStack.isNotEmpty()
+              }
+
+              // ---------- GL helpers ----------
+              private fun tex(f: Int, w: Int = W, h: Int = H): Int {
+                  val t = IntArray(1); G.glGenTextures(1, t, 0); G.glBindTexture(G.GL_TEXTURE_2D, t[0])
+                  G.glTexImage2D(G.GL_TEXTURE_2D, 0, G.GL_RGBA8, w, h, 0, G.GL_RGBA, G.GL_UNSIGNED_BYTE, null)
+                  G.glTexParameteri(G.GL_TEXTURE_2D, G.GL_TEXTURE_MIN_FILTER, f)
+                  G.glTexParameteri(G.GL_TEXTURE_2D, G.GL_TEXTURE_MAG_FILTER, f)
+                  G.glTexParameteri(G.GL_TEXTURE_2D, G.GL_TEXTURE_WRAP_S, G.GL_CLAMP_TO_EDGE)
+                  G.glTexParameteri(G.GL_TEXTURE_2D, G.GL_TEXTURE_WRAP_T, G.GL_CLAMP_TO_EDGE)
+                  return t[0]
+              }
+              private fun fbo(t: Int): Int {
+                  val f = IntArray(1); G.glGenFramebuffers(1, f, 0); G.glBindFramebuffer(G.GL_FRAMEBUFFER, f[0])
+                  G.glFramebufferTexture2D(G.GL_FRAMEBUFFER, G.GL_COLOR_ATTACHMENT0, G.GL_TEXTURE_2D, t, 0)
+                  return f[0]
+              }
+              private fun delTex(t: Int) = G.glDeleteTextures(1, intArrayOf(t), 0)
+              private fun prog(fs: String): P {
+                  fun sh(t: Int, s: String): Int {
+                      val h = G.glCreateShader(t); G.glShaderSource(h, s); G.glCompileShader(h)
+                      val ok = IntArray(1); G.glGetShaderiv(h, G.GL_COMPILE_STATUS, ok, 0)
+                      if (ok[0] == 0) throw RuntimeException(G.glGetShaderInfoLog(h))
+                      return h
+                  }
+                  val p = G.glCreateProgram()
+                  G.glAttachShader(p, sh(G.GL_VERTEX_SHADER, VS)); G.glAttachShader(p, sh(G.GL_FRAGMENT_SHADER, fs))
+                  G.glLinkProgram(p); return P(p)
+              }
+              private fun quad() = G.glDrawArrays(G.GL_TRIANGLE_STRIP, 0, 4)
+              private fun ch(c: Int, s: Int) = ((c shr s) and 255) / 255f
+              private fun blend(m: Int) {
+                  when (m) {
+                      1 -> G.glBlendFuncSeparate(G.GL_DST_COLOR, G.GL_ONE_MINUS_SRC_ALPHA, G.GL_ONE, G.GL_ONE_MINUS_SRC_ALPHA)
+                      2 -> G.glBlendFuncSeparate(G.GL_ONE, G.GL_ONE_MINUS_SRC_COLOR, G.GL_ONE, G.GL_ONE_MINUS_SRC_ALPHA)
+                      3 -> G.glBlendFuncSeparate(G.GL_ONE, G.GL_ONE, G.GL_ONE, G.GL_ONE_MINUS_SRC_ALPHA)
+                      else -> G.glBlendFunc(G.GL_ONE, G.GL_ONE_MINUS_SRC_ALPHA)
+                  }
+              }
+              private fun clearMap() {
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, dFbo)
+                  G.glClearColor(128 / 255f, 0f, 128 / 255f, 0f); G.glClear(G.GL_COLOR_BUFFER_BIT)
+              }
+              private fun pm(p: P, n: String, c: Int) {
+                  val a = pen.opacity; G.glUniform4f(p.u(n), ch(c, 16) * a, ch(c, 8) * a, ch(c, 0) * a, a)
+              }
+
+              // ---------- undo: tile copy-on-write ----------
+              private fun beginStep(l: Layer) { step = Step(l) }
+              private fun touch(x0: Int, y0: Int, x1: Int, y1: Int) {
+                  val s = step ?: return
+                  val nx = W / TS
+                  for (ty in (y0 / TS)..((y1 - 1) / TS)) for (tx in (x0 / TS)..((x1 - 1) / TS)) {
+                      val k = ty * nx + tx
+                      if (s.t.containsKey(k)) continue
+                      val t = tex(G.GL_NEAREST, TS, TS)
+                      G.glBindFramebuffer(G.GL_FRAMEBUFFER, s.l.fbo)
+                      G.glCopyTexSubImage2D(G.GL_TEXTURE_2D, 0, 0, 0, tx * TS, ty * TS, TS, TS)
+                      s.t[k] = t; tiles++
+                  }
+              }
+              private fun dropTiles(s: Step) { for (t in s.t.values) delTex(t); tiles -= s.t.size }
+              private fun commitStep() {
+                  val s = step ?: return
+                  step = null
+                  if (s.t.isEmpty()) return
+                  uStack.addLast(s)
+                  for (r in rStack) dropTiles(r)
+                  rStack.clear()
+                  while (tiles > BUDGET && uStack.size > 1) dropTiles(uStack.removeFirst())
+                  sync()
+              }
+              private fun swap(s: Step): Step {
+                  val r = Step(s.l); val nx = W / TS
+                  for ((k, t) in s.t) {
+                      val tx = k % nx; val ty = k / nx
+                      val n = tex(G.GL_NEAREST, TS, TS)
+                      G.glBindFramebuffer(G.GL_FRAMEBUFFER, s.l.fbo)
+                      G.glCopyTexSubImage2D(G.GL_TEXTURE_2D, 0, 0, 0, tx * TS, ty * TS, TS, TS)
+                      r.t[k] = n
+                      G.glBindFramebuffer(G.GL_FRAMEBUFFER, tFbo)
+                      G.glFramebufferTexture2D(G.GL_FRAMEBUFFER, G.GL_COLOR_ATTACHMENT0, G.GL_TEXTURE_2D, t, 0)
+                      G.glBindTexture(G.GL_TEXTURE_2D, s.l.tex)
+                      G.glCopyTexSubImage2D(G.GL_TEXTURE_2D, 0, tx * TS, ty * TS, 0, 0, TS, TS)
+                      delTex(t)
+                  }
+                  if (s.l === map) warped = true
+                  return r
+              }
+              fun undo() { val s = uStack.removeLastOrNull() ?: return; rStack.addLast(swap(s)); sync() }
+              fun redo() { val s = rStack.removeLastOrNull() ?: return; uStack.addLast(swap(s)); sync() }
+              private fun clearHistory() {
+                  for (s in uStack) dropTiles(s); for (s in rStack) dropTiles(s)
+                  uStack.clear(); rStack.clear(); sync()
+              }
+
+              // ---------- layers ----------
+              fun addLayer(fill: Boolean = false) {
+                  if (layers.size >= 24) return
+                  val t = tex(G.GL_LINEAR); val f = fbo(t)
+                  if (fill) G.glClearColor(1f, 1f, 1f, 1f) else G.glClearColor(0f, 0f, 0f, 0f)
+                  G.glClear(G.GL_COLOR_BUFFER_BIT)
+                  val at = if (layers.isEmpty()) 0 else cur + 1
+                  layers.add(at, Layer(t, f)); cur = at; sync()
+              }
+              private fun blit(s: Layer, d: Layer, a: Float, bm: Int) {
+                  compUniforms(0f)
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, d.fbo); G.glViewport(0, 0, W, H); G.glUniform1f(pC.u("uA"), a)
+                  if (bm < 0) G.glDisable(G.GL_BLEND) else { G.glEnable(G.GL_BLEND); blend(bm) }
+                  G.glBindTexture(G.GL_TEXTURE_2D, s.tex); quad(); G.glDisable(G.GL_BLEND)
+              }
+              private fun delGl(l: Layer) { delTex(l.tex); G.glDeleteFramebuffers(1, intArrayOf(l.fbo), 0) }
+              fun select(i: Int) { if (i in layers.indices) { cur = i; sync() } }
+              fun setShow(i: Int, b: Boolean) { layers.getOrNull(i)?.show = b; sync() }
+              fun setAlpha(i: Int, a: Float) { layers.getOrNull(i)?.alpha = a; sync() }
+              fun setBlend(i: Int, m: Int) { layers.getOrNull(i)?.blend = m; sync() }
+              fun delLayer() {
+                  if (layers.size <= 1) return
+                  val l = layers.removeAt(cur)
+                  for (q in arrayOf(uStack, rStack)) q.removeAll { if (it.l === l) { dropTiles(it); true } else false }
+                  delGl(l); cur = min(cur, layers.size - 1); sync()
+              }
+              fun dupLayer() {
+                  if (layers.size >= 24) return
+                  val s = layers[cur]; addLayer(); val d = layers[cur]
+                  blit(s, d, 1f, -1); d.alpha = s.alpha; d.blend = s.blend; d.show = s.show; sync()
+              }
+              fun mergeDown() {
+                  if (cur <= 0) return
+                  val s = layers[cur]; blit(s, layers[cur - 1], s.alpha, s.blend)
+                  layers.removeAt(cur); delGl(s); cur--; clearHistory()
+              }
+              fun moveLayer(dir: Int) {
+                  val j = cur + dir
+                  if (j !in layers.indices) return
+                  java.util.Collections.swap(layers, cur, j); cur = j; sync()
+              }
+              fun clearLayer() {
+                  val l = layers[cur]; beginStep(l); touch(0, 0, W, H)
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, l.fbo); G.glClearColor(0f, 0f, 0f, 0f); G.glClear(G.GL_COLOR_BUFFER_BIT)
+                  commitStep()
+              }
+
+              // ---------- view transform ----------
+              private fun sc() = min(vw.toFloat() / W, vh.toFloat() / H) * zoom
+              private fun lf(s: Float) = (vw - W * s) / 2 + px
+              private fun tp(s: Float) = (vh - H * s) / 2 + py
+              fun cx(t: Float): Float { val s = sc(); return (t - lf(s)) / s }
+              fun cy(t: Float): Float { val s = sc(); return H - (t - tp(s)) / s }
+              fun zoomAt(mx: Float, my: Float, f: Float) {
+                  val s0 = sc(); val a = (mx - lf(s0)) / s0; val b = (my - tp(s0)) / s0
+                  zoom = (zoom * f).coerceIn(.1f, 32f); val s1 = sc()
+                  px = mx - a * s1 - (vw - W * s1) / 2; py = my - b * s1 - (vh - H * s1) / 2
+              }
+
+              // ---------- renderer ----------
+              override fun onSurfaceCreated(g: GL10?, c: EGLConfig?) {
+                  val a = IntArray(1); G.glGenVertexArrays(1, a, 0); G.glBindVertexArray(a[0])
+                  pB = prog(FS_B); pS = prog(FS_S); pG = prog(FS_G); pC = prog(FS_C); pL = prog(FS_L)
+                  dTex = tex(G.GL_NEAREST); dFbo = fbo(dTex); sTex = tex(G.GL_LINEAR); sFbo = fbo(sTex)
+                  G.glGenFramebuffers(1, a, 0); tFbo = a[0]
+                  map = Layer(dTex, dFbo); clearMap()
+                  layers.clear(); uStack.clear(); rStack.clear(); tiles = 0; step = null; warped = false; cur = 0
+                  addLayer(true); addLayer()
+              }
+              override fun onSurfaceChanged(g: GL10?, w: Int, h: Int) { vw = w; vh = h; zoom = 1f; px = 0f; py = 0f }
+
+              private fun compUniforms(w: Float) {
+                  G.glUseProgram(pC.id); G.glUniform1i(pC.u("uL"), 0); G.glUniform1i(pC.u("uD"), 1)
+                  G.glUniform2f(pC.u("uSz"), W.toFloat(), H.toFloat()); G.glUniform1f(pC.u("uRng"), rng)
+                  G.glUniform1f(pC.u("uW"), w); G.glUniform1f(pC.u("uA"), 1f); G.glUniform2f(pC.u("uO"), 0f, 0f)
+                  G.glUniform4f(pC.u("uR"), 0f, 0f, 1f, 1f)
+                  G.glActiveTexture(G.GL_TEXTURE1); G.glBindTexture(G.GL_TEXTURE_2D, dTex); G.glActiveTexture(G.GL_TEXTURE0)
+              }
+              private fun drawLayers() {
+                  G.glEnable(G.GL_BLEND)
+                  for ((i, l) in layers.withIndex()) if (l.show) {
+                      blend(l.blend); G.glBindTexture(G.GL_TEXTURE_2D, l.tex); G.glUniform1f(pC.u("uA"), l.alpha)
+                      val mv = tool == Tool.MOVE && i == cur
+                      G.glUniform2f(pC.u("uO"), if (mv) mox else 0f, if (mv) moy else 0f); quad()
+                  }
+                  G.glDisable(G.GL_BLEND)
+              }
+              private fun composite() {
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, sFbo); G.glViewport(0, 0, W, H)
+                  G.glClearColor(0f, 0f, 0f, 0f); G.glClear(G.GL_COLOR_BUFFER_BIT)
+                  compUniforms(if (warped) 1f else 0f); drawLayers()
+              }
+              override fun onDrawFrame(g: GL10?) {
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, 0); G.glViewport(0, 0, vw, vh)
+                  val b = bgv; G.glClearColor(b, b, b, 1f); G.glClear(G.GL_COLOR_BUFFER_BIT)
+                  val s = sc()
+                  G.glViewport(lf(s).roundToInt(), (vh - tp(s) - H * s).roundToInt(), (W * s).roundToInt(), (H * s).roundToInt())
+                  compUniforms(if (warped) 1f else 0f); drawLayers()
+              }
+
+              // ---------- input (GL thread; x,y canvas px, y up) ----------
+              private inline fun sym(x: Float, y: Float, a: Float, f: (Float, Float, Float) -> Unit) {
+                  f(x, y, a)
+                  when (symMode) {
+                      1 -> f(W - x, y, PIF - a)
+                      2 -> f(x, H - y, -a)
+                      3 -> { f(W - x, y, PIF - a); f(x, H - y, -a); f(W - x, H - y, PIF + a) }
+                      4 -> {
+                          val cx = W / 2f; val cy = H / 2f
+                          for (k in 1 until symN) {
+                              val t = 2.0 * PI * k / symN; val c = cos(t).toFloat(); val s = sin(t).toFloat()
+                              f(cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c, a + t.toFloat())
+                          }
+                      }
+                  }
+              }
+
+              fun begin(x: Float, y: Float, p: Float) {
+                  commitStep()
+                  x0 = x; y0 = y; sx = x; sy = y; lx = x; ly = y; acc = 0f; pdx = x; pdy = y
+                  when (tool) {
+                      Tool.FILL -> fill(x.toInt(), y.toInt())
+                      Tool.PICK -> pick(x.toInt(), y.toInt())
+                      Tool.LIQUIFY -> beginStep(map)
+                      Tool.MOVE -> { beginStep(layers[cur]); mox = 0f; moy = 0f }
+                      Tool.GRAD, Tool.LINE, Tool.RECT, Tool.OVAL -> beginStep(layers[cur])
+                      else -> { beginStep(layers[cur]); dab(x, y, p, pen.angle * PIF / 180f) }
+                  }
+              }
+
+              fun move(x: Float, y: Float, p: Float) {
+                  when (tool) {
+                      Tool.FILL -> {}
+                      Tool.PICK -> pick(x.toInt(), y.toInt())
+                      Tool.LIQUIFY -> { val dx = x - lx; val dy = y - ly; if (hypot(dx, dy) >= .5f) { push(x, y, dx, dy); lx = x; ly = y } }
+                      Tool.MOVE -> { mox = (x - x0).roundToInt().toFloat(); moy = (y - y0).roundToInt().toFloat() }
+                      Tool.GRAD, Tool.LINE, Tool.RECT, Tool.OVAL -> { sx = x; sy = y }
+                      else -> {
+                          val k = pen.smooth.coerceIn(0f, .95f)
+                          sx += (x - sx) * (1f - k); sy += (y - sy) * (1f - k); seg(sx, sy, p)
+                      }
+                  }
+              }
+
+              fun end() {
+                  when (tool) {
+                      Tool.GRAD -> gradient(x0, y0, sx, sy)
+                      Tool.LINE -> { lx = x0; ly = y0; acc = 0f; seg(sx, sy, 1f) }
+                      Tool.RECT -> { lx = x0; ly = y0; acc = 0f; seg(sx, y0, 1f); seg(sx, sy, 1f); seg(x0, sy, 1f); seg(x0, y0, 1f) }
+                      Tool.OVAL -> {
+                          val cx = (x0 + sx) / 2f; val cy = (y0 + sy) / 2f; val rx = abs(sx - x0) / 2f; val ry = abs(sy - y0) / 2f
+                          lx = cx + rx; ly = cy; acc = 0f
+                          for (i in 1..72) { val t = i * 2f * PIF / 72f; seg(cx + rx * cos(t), cy + ry * sin(t), 1f) }
+                      }
+                      Tool.MOVE -> commitMove()
+                      else -> {}
+                  }
+                  commitStep()
+              }
+
+              private fun seg(x: Float, y: Float, p: Float) {
+                  val dx = x - lx; val dy = y - ly; val d = hypot(dx, dy)
+                  if (d < .01f) return
+                  val ang = if (pen.follow) atan2(dy, dx) else pen.angle * PIF / 180f
+                  val st = max(1f, pen.size * pen.spacing); var t = st - acc
+                  while (t <= d) { dab(lx + dx * t / d, ly + dy * t / d, p, ang); t += st }
+                  acc = d - (t - st); lx = x; ly = y
+              }
+
+              private fun dab(x: Float, y: Float, p: Float, a: Float) {
+                  if (tool == Tool.SMUDGE) { stamp(x, y, p, a); return }
+                  sym(x, y, a) { xx, yy, aa -> stamp(xx, yy, p, aa) }
+              }
+
+              private fun stamp(x: Float, y: Float, p: Float, a: Float) {
+                  val l = layers[cur]
+                  val pp = p.coerceIn(0f, 1f).pow(max(.05f, pen.pCurve))
+                  val r = max(.5f, pen.size / 2f * (1f - pen.pSize + pen.pSize * pp) * (1f - pen.sizeJit * Random.nextFloat()))
+                  val op = pen.opacity * (1f - pen.pOp + pen.pOp * pp) * (1f - pen.opJit * Random.nextFloat())
+                  var cx = x; var cy = y
+                  if (pen.scatter > 0f) {
+                      val t = Random.nextFloat() * 2f * PIF; val q = Random.nextFloat() * pen.scatter * r * 2f
+                      cx += cos(t) * q; cy += sin(t) * q
+                  }
+                  val flt = tool == Tool.SMUDGE || tool == Tool.BLUR
+                  val fd = if (tool == Tool.SMUDGE) hypot(cx - pdx, cy - pdy) else if (flt) pen.blurR else 0f
+                  val pad = ceil(r + fd).toInt() + 3
+                  val bx0 = max(0, floor(cx).toInt() - pad); val bx1 = min(W, ceil(cx).toInt() + pad)
+                  val by0 = max(0, floor(cy).toInt() - pad); val by1 = min(H, ceil(cy).toInt() + pad)
+                  if (bx1 <= bx0 || by1 <= by0) return
+                  touch(bx0, by0, bx1, by1)
+                  G.glActiveTexture(G.GL_TEXTURE0)
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, l.fbo); G.glViewport(0, 0, W, H)
+                  val rx = cx * 2f / W - 1f; val ry = cy * 2f / H - 1f; val rw = 2f * r / W; val rh = 2f * r / H
+                  if (flt) {
+                      G.glBindTexture(G.GL_TEXTURE_2D, sTex)
+                      G.glCopyTexSubImage2D(G.GL_TEXTURE_2D, 0, bx0, by0, bx0, by0, bx1 - bx0, by1 - by0)
+                      G.glUseProgram(pS.id); G.glUniform1i(pS.u("uT"), 0); G.glUniform4f(pS.u("uR"), rx, ry, rw, rh)
+                      G.glUniform2f(pS.u("uSz"), W.toFloat(), H.toFloat()); G.glUniform2f(pS.u("uD"), cx - pdx, cy - pdy)
+                      G.glUniform4f(pS.u("uQ"), min(pen.hardness, .98f), 0f, 0f, 0f)
+                      G.glUniform1f(pS.u("uM"), if (tool == Tool.SMUDGE) 0f else 1f)
+                      G.glUniform1f(pS.u("uS"), op); G.glUniform1f(pS.u("uBr"), pen.blurR)
+                      G.glDisable(G.GL_BLEND); quad(); pdx = cx; pdy = cy
+                  } else {
+                      G.glUseProgram(pB.id); G.glUniform4f(pB.u("uR"), rx, ry, rw, rh)
+                      G.glUniform4f(pB.u("uC"), ch(pen.color, 16), ch(pen.color, 8), ch(pen.color, 0), op)
+                      G.glUniform4f(pB.u("uQ"), min(pen.hardness, .98f), pen.round.coerceIn(.05f, 1f), a, pen.grain)
+                      G.glUniform2f(pB.u("uG"), max(1f, pen.grainScale), if (tool == Tool.DODGE || tool == Tool.BURN) 1f else 0f)
+                      G.glEnable(G.GL_BLEND)
+                      when (tool) {
+                          Tool.ERASER -> G.glBlendFunc(G.GL_ZERO, G.GL_ONE_MINUS_SRC_ALPHA)
+                          Tool.DODGE -> G.glBlendFuncSeparate(G.GL_ONE, G.GL_ONE, G.GL_ZERO, G.GL_ONE)
+                          Tool.BURN -> G.glBlendFuncSeparate(G.GL_ZERO, G.GL_ONE_MINUS_SRC_COLOR, G.GL_ZERO, G.GL_ONE)
+                          else -> G.glBlendFunc(G.GL_ONE, G.GL_ONE_MINUS_SRC_ALPHA)
+                      }
+                      quad(); G.glDisable(G.GL_BLEND)
+                  }
+              }
+
+              private fun gradient(ax: Float, ay: Float, ex: Float, ey: Float) {
+                  if (hypot(ex - ax, ey - ay) < 1f) return
+                  val l = layers[cur]; touch(0, 0, W, H)
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, l.fbo); G.glViewport(0, 0, W, H); G.glUseProgram(pG.id)
+                  G.glUniform2f(pG.u("uA"), ax, ay); G.glUniform2f(pG.u("uB"), ex, ey); G.glUniform4f(pG.u("uR"), 0f, 0f, 1f, 1f)
+                  pm(pG, "uC1", pen.color); pm(pG, "uC2", pen.color2)
+                  G.glEnable(G.GL_BLEND); blend(0); quad(); G.glDisable(G.GL_BLEND)
+              }
+
+              private fun push(x: Float, y: Float, dx: Float, dy: Float) {
+                  val r = liqR
+                  val bx0 = max(0, floor(x - r).toInt()); val bx1 = min(W, ceil(x + r).toInt())
+                  val by0 = max(0, floor(y - r).toInt()); val by1 = min(H, ceil(y + r).toInt())
+                  if (bx1 <= bx0 || by1 <= by0) return
+                  touch(bx0, by0, bx1, by1)
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, sFbo); G.glViewport(0, 0, W, H); G.glUseProgram(pL.id)
+                  G.glActiveTexture(G.GL_TEXTURE0); G.glBindTexture(G.GL_TEXTURE_2D, dTex); G.glUniform1i(pL.u("uD"), 0)
+                  G.glUniform4f(pL.u("uR"), (bx0 + bx1) / W.toFloat() - 1f, (by0 + by1) / H.toFloat() - 1f, (bx1 - bx0) / W.toFloat(), (by1 - by0) / H.toFloat())
+                  G.glUniform2f(pL.u("uSz"), W.toFloat(), H.toFloat()); G.glUniform2f(pL.u("uC"), x, y); G.glUniform2f(pL.u("uV"), dx, dy)
+                  G.glUniform1f(pL.u("uRad"), r); G.glUniform1f(pL.u("uS"), liqS); G.glUniform1f(pL.u("uRng"), rng)
+                  G.glUniform1f(pL.u("uM"), liqMode.toFloat())
+                  G.glDisable(G.GL_BLEND); quad()
+                  G.glCopyTexSubImage2D(G.GL_TEXTURE_2D, 0, bx0, by0, bx0, by0, bx1 - bx0, by1 - by0)
+                  warped = true
+              }
+
+              /** Resample every layer ONCE through the map (keeps detail sharp), reset the map. Clears history. */
+              fun bake() {
+                  if (!warped) return
+                  for (l in layers) {
+                      compUniforms(1f); G.glDisable(G.GL_BLEND)
+                      G.glBindFramebuffer(G.GL_FRAMEBUFFER, sFbo); G.glViewport(0, 0, W, H)
+                      G.glBindTexture(G.GL_TEXTURE_2D, l.tex); quad()
+                      G.glCopyTexSubImage2D(G.GL_TEXTURE_2D, 0, 0, 0, 0, 0, W, H)
+                  }
+                  clearMap(); warped = false; clearHistory()
+              }
+
+              private fun commitMove() {
+                  val dx = mox; val dy = moy; mox = 0f; moy = 0f
+                  if (dx == 0f && dy == 0f) return
+                  val l = layers[cur]; touch(0, 0, W, H)
+                  compUniforms(0f); G.glUniform2f(pC.u("uO"), dx, dy); G.glDisable(G.GL_BLEND)
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, sFbo); G.glViewport(0, 0, W, H)
+                  G.glBindTexture(G.GL_TEXTURE_2D, l.tex); quad()
+                  G.glCopyTexSubImage2D(G.GL_TEXTURE_2D, 0, 0, 0, 0, 0, W, H)
+              }
+
+              private fun pick(x: Int, y: Int) {
+                  if (x !in 0 until W || y !in 0 until H) return
+                  composite()
+                  val bb = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+                  G.glReadPixels(x, y, 1, 1, G.GL_RGBA, G.GL_UNSIGNED_BYTE, bb)
+                  val r = bb.get(0).toInt() and 255; val g = bb.get(1).toInt() and 255
+                  val b = bb.get(2).toInt() and 255; val a = bb.get(3).toInt() and 255
+                  if (a == 0) return
+                  val c = (255 shl 24) or (min(255, r * 255 / a) shl 16) or (min(255, g * 255 / a) shl 8) or min(255, b * 255 / a)
+                  pen.color = c; onPick?.invoke(c)
+              }
+
+              private fun near(p: Int, t: Int, tol: Int): Boolean {
+                  var s = 0
+                  while (s < 32) { if (abs(((p shr s) and 255) - ((t shr s) and 255)) > tol) return false; s += 8 }
+                  return true
+              }
+
+              private fun fill(sx0: Int, sy0: Int) {
+                  if (sx0 !in 0 until W || sy0 !in 0 until H) return
+                  val l = layers[cur]
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, l.fbo)
+                  val bb = ByteBuffer.allocateDirect(W * H * 4).order(ByteOrder.nativeOrder())
+                  G.glReadPixels(0, 0, W, H, G.GL_RGBA, G.GL_UNSIGNED_BYTE, bb)
+                  val a = IntArray(W * H); bb.asIntBuffer().get(a)
+                  val o = pen.opacity
+                  val fc = ((255 * o).toInt() shl 24) or ((ch(pen.color, 0) * o * 255).toInt() shl 16) or
+                      ((ch(pen.color, 8) * o * 255).toInt() shl 8) or (ch(pen.color, 16) * o * 255).toInt()
+                  val t = a[sy0 * W + sx0]; val tol = pen.tol.toInt()
+                  if (t == fc) return
+                  val vis = BooleanArray(W * H); var st = IntArray(1024); var sp = 0
+                  var mnx = W; var mxx = 0; var mny = H; var mxy = 0
+                  st[sp++] = sy0 * W + sx0
+                  while (sp > 0) {
+                      val p = st[--sp]; val y = p / W; val x = p - y * W; val rb = y * W
+                      if (vis[p] || !near(a[p], t, tol)) continue
+                      var l2 = x; while (l2 > 0 && !vis[rb + l2 - 1] && near(a[rb + l2 - 1], t, tol)) l2--
+                      var r2 = x; while (r2 < W - 1 && !vis[rb + r2 + 1] && near(a[rb + r2 + 1], t, tol)) r2++
+                      for (i in l2..r2) { vis[rb + i] = true; a[rb + i] = fc }
+                      mnx = min(mnx, l2); mxx = max(mxx, r2); mny = min(mny, y); mxy = max(mxy, y)
+                      for (ny in intArrayOf(y - 1, y + 1)) {
+                          if (ny < 0 || ny >= H) continue
+                          val nb = ny * W; var i = l2
+                          while (i <= r2) {
+                              if (!vis[nb + i] && near(a[nb + i], t, tol)) {
+                                  if (sp == st.size) st = st.copyOf(sp * 2)
+                                  st[sp++] = nb + i
+                                  while (i <= r2 && !vis[nb + i] && near(a[nb + i], t, tol)) i++
+                              } else i++
+                          }
+                      }
+                  }
+                  beginStep(l); touch(mnx, mny, mxx + 1, mxy + 1)
+                  G.glBindTexture(G.GL_TEXTURE_2D, l.tex)
+                  G.glTexSubImage2D(G.GL_TEXTURE_2D, 0, 0, 0, W, H, G.GL_RGBA, G.GL_UNSIGNED_BYTE, IntBuffer.wrap(a))
+                  commitStep()
+              }
+
+              fun snapshot(): Bitmap {
+                  composite()
+                  val bb = ByteBuffer.allocateDirect(W * H * 4).order(ByteOrder.nativeOrder())
+                  G.glReadPixels(0, 0, W, H, G.GL_RGBA, G.GL_UNSIGNED_BYTE, bb); bb.rewind()
+                  val b = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888); b.copyPixelsFromBuffer(bb)
+                  val m = Matrix(); m.preScale(1f, -1f)
+                  return Bitmap.createBitmap(b, 0, 0, W, H, m, false)
+              }
+          }
+          EOF_SRC
+          mkdir -p app/src/main/kotlin/dev/canvas
+          cat > app/src/main/kotlin/dev/canvas/CanvasView.kt <<'EOF_SRC'
+          package dev.canvas
+
+          import android.content.Context
+          import android.opengl.GLSurfaceView
+          import android.view.MotionEvent
+          import kotlin.math.abs
+          import kotlin.math.hypot
+
+          class CanvasView(c: Context, private val e: Engine) : GLSurfaceView(c) {
+              private var draw = false
+              private var pan = false
+              private var moved = false
+              private var t0 = 0L
+              private var mx = 0f; private var my = 0f; private var md = 1f
+
+              init {
+                  setEGLContextClientVersion(3)
+                  setEGLConfigChooser(8, 8, 8, 0, 0, 0) // no depth/stencil/alpha: less memory
+                  preserveEGLContextOnPause = true
+                  setRenderer(e)
+                  renderMode = RENDERMODE_WHEN_DIRTY    // zero idle GPU cost
+              }
+
+              fun gl(f: () -> Unit) { queueEvent(Runnable { f() }); requestRender() }
+
+              private fun send(a: Int, x: Float, y: Float, p: Float) {
+                  val cx = e.cx(x); val cy = e.cy(y)
+                  queueEvent(Runnable { if (a == 0) e.begin(cx, cy, p) else e.move(cx, cy, p) })
+              }
+              private fun press(t: MotionEvent, v: Float) = if (t.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) v else 1f
+
+              private fun sync(t: MotionEvent) {
+                  mx = (t.getX(0) + t.getX(1)) / 2; my = (t.getY(0) + t.getY(1)) / 2
+                  md = hypot(t.getX(0) - t.getX(1), t.getY(0) - t.getY(1)).coerceAtLeast(1f)
+              }
+
+              override fun onTouchEvent(t: MotionEvent): Boolean {
+                  when (t.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> { draw = true; moved = false; send(0, t.x, t.y, press(t, t.pressure)) }
+                      MotionEvent.ACTION_POINTER_DOWN -> {
+                          if (draw) { draw = false; queueEvent(Runnable { e.end() }) }
+                          pan = true; sync(t); t0 = t.eventTime
+                      }
+                      MotionEvent.ACTION_MOVE ->
+                          if (pan && t.pointerCount > 1) {
+                              val x = (t.getX(0) + t.getX(1)) / 2; val y = (t.getY(0) + t.getY(1)) / 2
+                              val d = hypot(t.getX(0) - t.getX(1), t.getY(0) - t.getY(1)).coerceAtLeast(1f)
+                              if (abs(x - mx) + abs(y - my) + abs(d - md) > 14f) moved = true
+                              if (moved) { e.px += x - mx; e.py += y - my; e.zoomAt(x, y, d / md); mx = x; my = y; md = d }
+                          } else if (draw) {
+                              for (h in 0 until t.historySize)
+                                  send(1, t.getHistoricalX(h), t.getHistoricalY(h), press(t, t.getHistoricalPressure(h)))
+                              send(1, t.x, t.y, press(t, t.pressure))
+                          }
+                      MotionEvent.ACTION_POINTER_UP -> {
+                          // quick 2-finger tap = undo, 3-finger tap = redo
+                          if (!moved && t0 > 0 && t.eventTime - t0 < 260) {
+                              if (t.pointerCount == 2) gl { e.undo() } else if (t.pointerCount == 3) gl { e.redo() }
+                              t0 = 0
+                          }
+                          if (t.pointerCount <= 2) pan = false
+                      }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                          if (draw) queueEvent(Runnable { e.end() })
+                          draw = false; pan = false
+                      }
+                  }
+                  requestRender(); return true
+              }
+          }
+          EOF_SRC
+          mkdir -p app/src/main/kotlin/dev/canvas
+          cat > app/src/main/kotlin/dev/canvas/Ui.kt <<'EOF_SRC'
+          package dev.canvas
+
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.SharedPreferences
+          import android.graphics.Bitmap
+          import android.os.Build
+          import android.os.Environment
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.MediaStore
+          import android.widget.Toast
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.alpha
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.drawBehind
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.toArgb
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import kotlin.math.ln
+          import kotlin.math.pow
+
+          /** Every UI token is a live state: the Theme panel edits these and they persist. */
+          object T {
+              var ah by mutableFloatStateOf(165f)
+              var sat by mutableFloatStateOf(1f)
+              var av by mutableFloatStateOf(1f)
+              var pa by mutableFloatStateOf(.78f)
+              var rad by mutableFloatStateOf(12f)
+              var sc by mutableFloatStateOf(1f)
+              var fs by mutableFloatStateOf(11f)
+              var bgv by mutableFloatStateOf(0f)
+              var left by mutableStateOf(false)
+              val ac: Color get() = Color(android.graphics.Color.HSVToColor(floatArrayOf(ah, sat, av)))
+              val panel: Color get() = Color(0xFF0E0F12).copy(alpha = pa)
+              val ink = Color(0xFFE6E8EB)
+              fun load(p: SharedPreferences) {
+                  ah = p.getFloat("ah", ah); sat = p.getFloat("sat", sat); av = p.getFloat("av", av); pa = p.getFloat("pa", pa)
+                  rad = p.getFloat("rad", rad); sc = p.getFloat("sc", sc); fs = p.getFloat("fs", fs); bgv = p.getFloat("bgv", bgv)
+                  left = p.getBoolean("left", left)
+              }
+              fun save(p: SharedPreferences) {
+                  p.edit().putFloat("ah", ah).putFloat("sat", sat).putFloat("av", av).putFloat("pa", pa).putFloat("rad", rad)
+                      .putFloat("sc", sc).putFloat("fs", fs).putFloat("bgv", bgv).putBoolean("left", left).apply()
+              }
+          }
+
+          object U {
+              var rev by mutableIntStateOf(0)
+              var hh by mutableFloatStateOf(0f)
+              var ss by mutableFloatStateOf(0f)
+              var bb by mutableFloatStateOf(1f)
+              var tgt by mutableIntStateOf(0)
+              fun bump() { rev++ }
+              fun col(): Int = android.graphics.Color.HSVToColor(floatArrayOf(hh, ss, bb))
+              fun from(c: Int) { val a = FloatArray(3); android.graphics.Color.colorToHSV(c, a); hh = a[0]; ss = a[1]; bb = a[2] }
+          }
+
+          fun d(x: Float): Dp = (x * T.sc).dp
+          val BL = listOf("NRM", "MUL", "SCR", "ADD")
+          val SYM = listOf("OFF", "X", "Y", "XY", "RAD")
+          val PRESETS = listOf(
+              "PEN" to floatArrayOf(12f, 1f, .95f, .05f, 1f, 0f, 0f, 0f, 0f, 0f, 2f, .3f, .7f, 0f),
+              "SOFT" to floatArrayOf(60f, .6f, .1f, .08f, 1f, 0f, 0f, 0f, 0f, 0f, 2f, .2f, .4f, .4f),
+              "AIR" to floatArrayOf(120f, .25f, 0f, .04f, 1f, 0f, .1f, 0f, .1f, .2f, 2f, .1f, 0f, .6f),
+              "MRK" to floatArrayOf(40f, .9f, .9f, .06f, .35f, 40f, 0f, 0f, 0f, 0f, 2f, .2f, .3f, 0f),
+              "CHK" to floatArrayOf(36f, .85f, .6f, .15f, .8f, 0f, .35f, .2f, .3f, .7f, 3f, 0f, .5f, .3f),
+              "INK" to floatArrayOf(8f, 1f, 1f, .03f, 1f, 0f, 0f, 0f, 0f, 0f, 2f, .7f, .9f, 0f),
+          )
+
+          class PP(val n: String, val lo: Float, val hi: Float, val st: Float, val log: Boolean, val g: () -> Float, val s: (Float) -> Unit)
+
+          fun penParams(e: Engine): List<PP> {
+              val p = e.pen
+              return listOf(
+                  PP("SIZE", 1f, 1000f, 1f, true, { p.size }, { p.size = it }),
+                  PP("OPACITY", .01f, 1f, .01f, false, { p.opacity }, { p.opacity = it }),
+                  PP("HARDNESS", 0f, 1f, .01f, false, { p.hardness }, { p.hardness = it }),
+                  PP("SPACING", .005f, 2f, .005f, true, { p.spacing }, { p.spacing = it }),
+                  PP("ROUND", .05f, 1f, .01f, false, { p.round }, { p.round = it }),
+                  PP("ANGLE", 0f, 360f, 1f, false, { p.angle }, { p.angle = it }),
+                  PP("SCATTER", 0f, 2f, .01f, false, { p.scatter }, { p.scatter = it }),
+                  PP("SIZE JIT", 0f, 1f, .01f, false, { p.sizeJit }, { p.sizeJit = it }),
+                  PP("OPAC JIT", 0f, 1f, .01f, false, { p.opJit }, { p.opJit = it }),
+                  PP("GRAIN", 0f, 1f, .01f, false, { p.grain }, { p.grain = it }),
+                  PP("GRAIN SZ", 1f, 32f, 1f, false, { p.grainScale }, { p.grainScale = it }),
+                  PP("SMOOTH", 0f, .95f, .01f, false, { p.smooth }, { p.smooth = it }),
+                  PP("P CURVE", .2f, 4f, .05f, false, { p.pCurve }, { p.pCurve = it }),
+                  PP("P>SIZE", 0f, 1f, .01f, false, { p.pSize }, { p.pSize = it }),
+                  PP("P>OPAC", 0f, 1f, .01f, false, { p.pOp }, { p.pOp = it }),
+                  PP("BLUR R", 1f, 32f, .5f, false, { p.blurR }, { p.blurR = it }),
+                  PP("FILL TOL", 0f, 255f, 1f, false, { p.tol }, { p.tol = it }),
+                  PP("SYM N", 2f, 16f, 1f, false, { e.symN.toFloat() }, { e.symN = it.toInt() }),
+                  PP("LIQ STR", .05f, 3f, .05f, false, { e.liqS }, { e.liqS = it }),
+              )
+          }
+
+          fun themeParams() = listOf(
+              PP("ACC HUE", 0f, 360f, 1f, false, { T.ah }, { T.ah = it }),
+              PP("ACC SAT", 0f, 1f, .01f, false, { T.sat }, { T.sat = it }),
+              PP("ACC VAL", .3f, 1f, .01f, false, { T.av }, { T.av = it }),
+              PP("PANEL A", .1f, 1f, .01f, false, { T.pa }, { T.pa = it }),
+              PP("RADIUS", 0f, 28f, 1f, false, { T.rad }, { T.rad = it }),
+              PP("UI SCALE", .7f, 1.6f, .05f, false, { T.sc }, { T.sc = it }),
+              PP("FONT", 8f, 18f, .5f, false, { T.fs }, { T.fs = it }),
+              PP("CANVAS BG", 0f, .25f, .01f, false, { T.bgv }, { T.bgv = it }),
+          )
+
+          @Composable
+          fun Modifier.touch(f: (Float, Float) -> Unit): Modifier {
+              val u by rememberUpdatedState(f)
+              return pointerInput(Unit) {
+                  awaitPointerEventScope {
+                      while (true) {
+                          val c = awaitPointerEvent().changes[0]
+                          if (c.pressed) {
+                              u((c.position.x / size.width).coerceIn(0f, 1f), (c.position.y / size.height).coerceIn(0f, 1f))
+                              c.consume()
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun Tx(s: String, c: Color = T.ink, mod: Modifier = Modifier, sz: Float = T.fs) =
+              Text(s, modifier = mod, color = c, fontSize = sz.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+
+          @Composable
+          fun Btn(s: String, on: Boolean = false, w: Float = 40f, en: Boolean = true, f: () -> Unit) {
+              Box(
+                  Modifier.alpha(if (en) 1f else .3f).size(d(w), d(38f)).clip(RoundedCornerShape(d(T.rad)))
+                      .background(if (on) T.ac else T.panel).clickable(enabled = en, onClick = f),
+                  contentAlignment = Alignment.Center
+              ) { Tx(s, if (on) Color.Black else T.ac) }
+          }
+
+          @Composable
+          fun HS(t: Float, mod: Modifier = Modifier, on: (Float) -> Unit) {
+              Box(Modifier.then(mod).height(d(24f)).clip(RoundedCornerShape(d(12f))).background(T.panel).touch { x, _ -> on(x) }) {
+                  Box(Modifier.fillMaxWidth(t.coerceIn(.02f, 1f)).fillMaxHeight().background(T.ac.copy(alpha = .8f)))
+              }
+          }
+
+          @Composable
+          fun R2(p: PP) {
+              val rv = U.rev
+              val v = p.g()
+              val t = if (p.log) ln(v / p.lo) / ln(p.hi / p.lo) else (v - p.lo) / (p.hi - p.lo)
+              fun set(x: Float) { p.s(x.coerceIn(p.lo, p.hi)); U.bump() }
+              Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(d(5f))) {
+                  Tx(p.n, mod = Modifier.width(d(66f)))
+                  Btn("-", w = 30f) { set(v - p.st) }
+                  HS(t, Modifier.weight(1f)) { x -> set(if (p.log) p.lo * (p.hi / p.lo).pow(x) else p.lo + x * (p.hi - p.lo)) }
+                  Btn("+", w = 30f) { set(v + p.st) }
+                  Tx("%.2f".format(v), mod = Modifier.width(d(54f)))
+              }
+          }
+
+          @Composable
+          fun BrushPanel(e: Engine) {
+              Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(d(6f))) {
+                  PRESETS.forEach { (n, vals) -> Btn(n, w = 50f) { e.pen.load(vals); U.bump() } }
+              }
+              Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(d(6f))) {
+                  Btn("FOLLOW", e.pen.follow, 66f) { e.pen.follow = !e.pen.follow; U.bump() }
+                  SYM.forEachIndexed { i, s -> Btn(s, e.symMode == i, 44f) { e.symMode = i; U.bump() } }
+              }
+              penParams(e).forEach { R2(it) }
+          }
+
+          @Composable
+          fun ColorPanel(e: Engine) {
+              val rv = U.rev
+              val hc = Color(android.graphics.Color.HSVToColor(floatArrayOf(U.hh, 1f, 1f)))
+              fun ap() { val c = U.col(); if (U.tgt == 0) e.pen.color = c else e.pen.color2 = c; U.bump() }
+              Row(horizontalArrangement = Arrangement.spacedBy(d(6f)), verticalAlignment = Alignment.CenterVertically) {
+                  Btn("FG", U.tgt == 0, 36f) { U.tgt = 0; U.from(e.pen.color) }
+                  Btn("BG", U.tgt == 1, 36f) { U.tgt = 1; U.from(e.pen.color2) }
+                  Btn("SWAP", w = 52f) {
+                      val t = e.pen.color; e.pen.color = e.pen.color2; e.pen.color2 = t
+                      U.from(if (U.tgt == 0) e.pen.color else e.pen.color2); U.bump()
+                  }
+                  Tx("#%06X".format(U.col() and 0xFFFFFF))
+              }
+              Box(
+                  Modifier.fillMaxWidth().height(d(150f)).clip(RoundedCornerShape(d(T.rad))).drawBehind {
+                      drawRect(Brush.horizontalGradient(listOf(Color.White, hc)))
+                      drawRect(Brush.verticalGradient(listOf(Color.Transparent, Color.Black)))
+                      drawCircle(Color.White, radius = 9f, center = Offset(U.ss * size.width, (1f - U.bb) * size.height), style = Stroke(3f))
+                  }.touch { x, y -> U.ss = x; U.bb = 1f - y; ap() }
+              )
+              Box(
+                  Modifier.fillMaxWidth().height(d(26f)).clip(RoundedCornerShape(d(T.rad))).drawBehind {
+                      drawRect(Brush.horizontalGradient(listOf(Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue, Color.Magenta, Color.Red)))
+                      drawRect(Color.White, topLeft = Offset(U.hh / 360f * size.width - 2f, 0f), size = Size(4f, size.height))
+                  }.touch { x, _ -> U.hh = x * 360f; ap() }
+              )
+              val pal = listOf(0xFFFFFFFF, 0xFF000000, 0xFFFF3B5C, 0xFFFFB300, 0xFF00E676, 0xFF00B0FF, 0xFF7C4DFF, 0xFFFF4081)
+              Row(horizontalArrangement = Arrangement.spacedBy(d(8f))) {
+                  pal.forEach { c ->
+                      Box(Modifier.size(d(28f)).clip(CircleShape).background(Color(c)).clickable {
+                          U.from(Color(c).toArgb()); ap()
+                      })
+                  }
+              }
+          }
+
+          @Composable
+          fun LayerPanel(e: Engine, v: CanvasView) {
+              Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(d(6f))) {
+                  Btn("+", w = 36f) { v.gl { e.addLayer() } }
+                  Btn("DUP", w = 42f) { v.gl { e.dupLayer() } }
+                  Btn("DEL", w = 42f) { v.gl { e.delLayer() } }
+                  Btn("UP", w = 38f) { v.gl { e.moveLayer(1) } }
+                  Btn("DN", w = 38f) { v.gl { e.moveLayer(-1) } }
+                  Btn("MRG", w = 42f) { v.gl { e.mergeDown() } }
+                  Btn("CLR", w = 42f) { v.gl { e.clearLayer() } }
+              }
+              e.info.indices.reversed().forEach { i ->
+                  val l = e.info[i]
+                  Row(
+                      Modifier.fillMaxWidth().clickable { v.gl { e.select(i) } },
+                      verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(d(6f))
+                  ) {
+                      Tx("L${i + 1}", if (i == e.curUi) T.ac else T.ink, Modifier.width(d(34f)))
+                      Btn(if (l.show) "ON" else "--", l.show, 36f) { v.gl { e.setShow(i, !l.show) } }
+                      Btn(BL[l.blend], w = 44f) { v.gl { e.setBlend(i, (l.blend + 1) % 4) } }
+                      HS(l.alpha, Modifier.weight(1f)) { x -> v.gl { e.setAlpha(i, x) } }
+                  }
+              }
+          }
+
+          @Composable
+          fun ThemePanel(done: () -> Unit) {
+              Row(horizontalArrangement = Arrangement.spacedBy(d(6f))) {
+                  Btn("RAIL " + if (T.left) "L" else "R", w = 66f) { T.left = !T.left }
+                  Btn("DONE", w = 50f, f = done)
+              }
+              themeParams().forEach { R2(it) }
+          }
+
+          fun saveBmp(ctx: Context, b: Bitmap) {
+              val n = "Canvas_" + System.currentTimeMillis() + ".png"
+              var ok = true
+              try {
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      val cv = ContentValues()
+                      cv.put(MediaStore.Images.Media.DISPLAY_NAME, n)
+                      cv.put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                      cv.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Canvas")
+                      val u = ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)!!
+                      ctx.contentResolver.openOutputStream(u)!!.use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                  } else {
+                      val f = java.io.File(ctx.getExternalFilesDir(Environment.DIRECTORY_PICTURES), n)
+                      f.outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                  }
+              } catch (x: Exception) { ok = false }
+              Handler(Looper.getMainLooper()).post {
+                  Toast.makeText(ctx, if (ok) "saved " + n else "save failed", Toast.LENGTH_LONG).show()
+              }
+          }
+
+          @Composable
+          fun App(e: Engine) {
+              val ctx = LocalContext.current
+              val v = remember { CanvasView(ctx, e) }
+              val rv = U.rev
+              val bg = T.bgv
+              var tool by remember { mutableStateOf(Tool.BRUSH) }
+              var panel by remember { mutableIntStateOf(0) }
+              var hud by remember { mutableStateOf(true) }
+              SideEffect { e.bgv = bg; v.requestRender() }
+              LaunchedEffect(Unit) { e.onPick = { c -> U.tgt = 0; U.from(c); U.bump() } }
+
+              Box(Modifier.fillMaxSize().background(Color(bg, bg, bg))) {
+                  AndroidView({ v }, Modifier.fillMaxSize())
+                  if (!hud) {
+                      Box(Modifier.align(Alignment.BottomEnd).padding(d(8f))) { Btn("UI", w = 44f) { hud = true } }
+                  } else {
+                      // ---- top bar ----
+                      Row(
+                          Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(d(8f)),
+                          horizontalArrangement = Arrangement.spacedBy(d(8f)), verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Btn("UN", en = e.canUndo) { v.gl { e.undo() } }
+                          Btn("RE", en = e.canRedo) { v.gl { e.redo() } }
+                          Spacer(Modifier.weight(1f))
+                          Btn("SYM:" + SYM[e.symMode], e.symMode != 0, 76f) { e.symMode = (e.symMode + 1) % 5; U.bump() }
+                          Btn("SAVE", w = 52f) { v.gl { val b = e.snapshot(); Thread { saveBmp(ctx, b) }.start() } }
+                      }
+                      // ---- tool rail ----
+                      Column(
+                          Modifier.align(if (T.left) Alignment.CenterStart else Alignment.CenterEnd).padding(d(4f)).fillMaxHeight(.62f)
+                              .clip(RoundedCornerShape(d(T.rad + 6f))).background(T.panel).verticalScroll(rememberScrollState()).padding(d(4f)),
+                          verticalArrangement = Arrangement.spacedBy(d(4f))
+                      ) {
+                          Tool.values().forEach { t -> Btn(t.code, tool == t, 40f) { tool = t; e.tool = t; U.bump() } }
+                      }
+                      // ---- bottom stack ----
+                      val side = if (panel != 0) d(54f) else 0.dp
+                      Column(
+                          Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding()
+                              .padding(start = if (T.left) side else 0.dp, end = if (T.left) 0.dp else side).padding(d(6f)),
+                          verticalArrangement = Arrangement.spacedBy(d(5f))
+                      ) {
+                          if (panel != 0) {
+                              Column(
+                                  Modifier.fillMaxWidth().heightIn(max = d(330f)).clip(RoundedCornerShape(d(T.rad + 4f))).background(T.panel)
+                                      .verticalScroll(rememberScrollState()).padding(d(8f)),
+                                  verticalArrangement = Arrangement.spacedBy(d(6f))
+                              ) {
+                                  when (panel) {
+                                      1 -> BrushPanel(e)
+                                      2 -> ColorPanel(e)
+                                      3 -> LayerPanel(e, v)
+                                      else -> ThemePanel { T.save(ctx.getSharedPreferences("t", 0)); panel = 0 }
+                                  }
+                              }
+                          }
+                          if (tool == Tool.LIQUIFY) {
+                              Row(horizontalArrangement = Arrangement.spacedBy(d(6f))) {
+                                  listOf("PUSH", "PINCH", "BLOAT", "SWIRL").forEachIndexed { i, s ->
+                                      Btn(s, e.liqMode == i, 60f) { e.liqMode = i; U.bump() }
+                                  }
+                                  Btn("APPLY", w = 60f) { v.gl { e.bake() } }
+                              }
+                          }
+                          if (tool == Tool.LIQUIFY) R2(PP("RADIUS", 10f, 500f, 5f, true, { e.liqR }, { e.liqR = it }))
+                          else R2(PP("SIZE", 1f, 1000f, 1f, true, { e.pen.size }, { e.pen.size = it }))
+                          R2(PP("OPACITY", .01f, 1f, .01f, false, { e.pen.opacity }, { e.pen.opacity = it }))
+                          Row(
+                              Modifier.fillMaxWidth().clip(RoundedCornerShape(d(T.rad + 4f))).background(T.panel).padding(d(6f)),
+                              horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Btn(if (tool == Tool.ERASER) "BR" else "ER", w = 44f) {
+                                  tool = if (tool == Tool.ERASER) Tool.BRUSH else Tool.ERASER; e.tool = tool; U.bump()
+                              }
+                              Box(
+                                  Modifier.size(d(46f)).clip(CircleShape).background(T.panel).clickable { panel = if (panel == 1) 0 else 1 },
+                                  contentAlignment = Alignment.Center
+                              ) {
+                                  Canvas(Modifier.size(d(40f))) {
+                                      drawCircle(Brush.radialGradient(0f to T.ink, e.pen.hardness.coerceIn(0f, .97f) to T.ink, 1f to T.ink.copy(alpha = 0f)))
+                                  }
+                              }
+                              Box(
+                                  Modifier.size(d(44f)).clip(RoundedCornerShape(d(T.rad))).background(Color(e.pen.color2))
+                                      .clickable { panel = if (panel == 2) 0 else 2; U.from(if (U.tgt == 0) e.pen.color else e.pen.color2) },
+                                  contentAlignment = Alignment.Center
+                              ) { Box(Modifier.size(d(26f)).background(Color(e.pen.color))) }
+                              Btn("HUD", w = 44f) { hud = false }
+                              Btn("L" + (e.curUi + 1) + "/" + e.info.size, panel == 3, 64f) { panel = if (panel == 3) 0 else 3 }
+                              Btn("CFG", panel == 4, 44f) { panel = if (panel == 4) 0 else 4 }
+                          }
+                      }
+                  }
+              }
+          }
+          EOF_SRC
+      - uses: actions/cache@v4
+        with: {path: ~/ks, key: "ks-${{github.repository}}"}
+      - env:
+          B: ${{secrets.KS_B64}}
+          P: ${{secrets.KS_PASS || 'ci-dev-key'}}
+          A: ${{secrets.KS_ALIAS || 'k'}}
+        run: |
+          V=0.$(date -u +%y%m%d).$GITHUB_RUN_NUMBER
+          gradle -q :app:assembleRelease -PversionCode=$((1000+GITHUB_RUN_NUMBER)) -PversionName=$V
+          mkdir -p ~/ks dist; K=~/ks/k.jks
+          [ -n "$B" ] && echo "$B"|base64 -d >$K
+          [ -f $K ] || keytool -genkeypair -keystore $K -alias $A -keyalg RSA -keysize 3072 -validity 36500 -storepass "$P" -keypass "$P" -dname CN=$N
+          T=$(ls -d $ANDROID_HOME/build-tools/*|sort -V|tail -1)
+          $T/zipalign -fp 4 app/build/outputs/apk/release/*.apk a.apk
+          $T/apksigner sign --ks $K --ks-key-alias $A --ks-pass env:P --key-pass env:P --out dist/$N-$V.apk a.apk
+          echo "V=$V" >>$GITHUB_ENV
+      - if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
+        env: {GH_TOKEN: "${{github.token}}"}
+        run: |
+          R=nightly F=-p; [ $GITHUB_REF_TYPE = tag ] && R=$GITHUB_REF_NAME F=
+          [ $R = nightly ] && gh release delete nightly --cleanup-tag -y || true
+          gh release create $R dist/* -t "$N $V" -n "build $GITHUB_RUN_NUMBER" --target $GITHUB_SHA $F
