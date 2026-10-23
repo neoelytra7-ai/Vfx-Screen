@@ -1,0 +1,567 @@
+name: Build LiquidArt APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/build-liquidart.yml']
+concurrency:
+  group: liquidart
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+          cache-cleanup: on-success
+      - name: Write project
+        run: |
+          mkdir -p liquidart && cd liquidart
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF_0'
+          pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}
+          dependencyResolutionManagement{repositories{google();mavenCentral()}}
+          rootProject.name="LiquidArt"
+          include(":app")
+          EOF_0
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF_1'
+          plugins{
+           id("com.android.application") version "8.5.2" apply false
+           id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+           id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+          }
+          EOF_1
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF_2'
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          android.defaults.buildfeatures.buildconfig=false
+          org.gradle.jvmargs=-Xmx4g -XX:+UseParallelGC
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          kotlin.incremental=true
+          kotlin.daemon.jvmargs=-Xmx3g
+          EOF_2
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF_3'
+          plugins{id("com.android.application");id("org.jetbrains.kotlin.android");id("org.jetbrains.kotlin.plugin.compose")}
+          android{namespace="art.liquid";compileSdk=34
+           defaultConfig{applicationId="art.liquid";minSdk=29;targetSdk=34;versionCode=1;versionName="1.0"}
+           compileOptions{sourceCompatibility=JavaVersion.VERSION_17;targetCompatibility=JavaVersion.VERSION_17}
+           kotlinOptions{jvmTarget="17"}
+           buildFeatures{compose=true}}
+          dependencies{
+           implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+           implementation("androidx.compose.ui:ui");implementation("androidx.compose.foundation:foundation");implementation("androidx.compose.material3:material3")
+           implementation("androidx.activity:activity-compose:1.9.2")}
+          EOF_3
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+           <uses-feature android:glEsVersion="0x00030000" android:required="true"/>
+           <application android:label="LiquidArt" android:theme="@android:style/Theme.DeviceDefault.NoActionBar" android:hardwareAccelerated="true">
+            <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|density">
+             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+            </activity>
+           </application>
+          </manifest>
+          EOF_4
+          mkdir -p $(dirname app/src/main/java/art/liquid/Engine.kt)
+          cat > app/src/main/java/art/liquid/Engine.kt <<'EOF_5'
+          package art.liquid
+          import android.content.Context
+          import android.graphics.Color
+          import android.opengl.GLES30 as G
+          import android.opengl.GLSurfaceView
+          import android.os.SystemClock
+          import android.view.MotionEvent
+          import androidx.compose.runtime.*
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.util.concurrent.ConcurrentHashMap
+          import java.util.concurrent.ConcurrentLinkedQueue
+          import javax.microedition.khronos.egl.EGLConfig
+          import javax.microedition.khronos.opengles.GL10
+          import kotlin.math.*
+          import kotlin.random.Random
+
+          // ---- Blend registry: add a mode = add one line (GLSL expr over backdrop b, source s) ----
+          val BLENDS = listOf(
+          "Normal" to "s","Dissolve" to "s","Darken" to "min(b,s)","Multiply" to "b*s",
+          "Color Burn" to "1.0-min(vec3(1.0),(1.0-b)/max(s,vec3(1e-4)))","Linear Burn" to "max(b+s-1.0,vec3(0.0))",
+          "Darker Color" to "mix(b,s,step(lum(s),lum(b)))","Lighten" to "max(b,s)","Screen" to "b+s-b*s",
+          "Color Dodge" to "min(vec3(1.0),b/max(1.0-s,vec3(1e-4)))","Linear Dodge (Add)" to "min(b+s,vec3(1.0))",
+          "Lighter Color" to "mix(b,s,step(lum(b),lum(s)))","Overlay" to "mix(2.0*b*s,1.0-2.0*(1.0-b)*(1.0-s),step(0.5,b))",
+          "Soft Light" to "mix(b-(1.0-2.0*s)*b*(1.0-b),b+(2.0*s-1.0)*(mix(sqrt(b),((16.0*b-12.0)*b+4.0)*b,step(b,vec3(0.25)))-b),step(0.5,s))",
+          "Hard Light" to "mix(2.0*b*s,1.0-2.0*(1.0-b)*(1.0-s),step(0.5,s))",
+          "Vivid Light" to "mix(1.0-(1.0-b)/max(2.0*s,vec3(1e-4)),b/max(2.0*(1.0-s),vec3(1e-4)),step(0.5,s))",
+          "Linear Light" to "b+2.0*s-1.0","Pin Light" to "mix(min(b,2.0*s),max(b,2.0*s-1.0),step(0.5,s))",
+          "Hard Mix" to "step(vec3(1.0),b+s)","Difference" to "abs(b-s)","Exclusion" to "b+s-2.0*b*s",
+          "Subtract" to "max(b-s,vec3(0.0))","Divide" to "b/max(s,vec3(1e-4))",
+          "Hue" to "setLum(setSat(s,sat(b)),lum(b))","Saturation" to "setLum(setSat(b,sat(s)),lum(b))",
+          "Color" to "setLum(s,lum(b))","Luminosity" to "setLum(b,lum(s))",
+          "Glow" to "min(vec3(1.0),s*s/max(1.0-b,vec3(1e-4)))","Reflect" to "min(vec3(1.0),b*b/max(1.0-s,vec3(1e-4)))",
+          "Heat" to "1.0-min(vec3(1.0),(1.0-s)*(1.0-s)/max(b,vec3(1e-4)))","Freeze" to "1.0-min(vec3(1.0),(1.0-b)*(1.0-b)/max(s,vec3(1e-4)))",
+          "Phoenix" to "min(b,s)-max(b,s)+1.0","Negation" to "1.0-abs(1.0-b-s)","Average" to "(b+s)*0.5",
+          "Grain Extract" to "b-s+0.5","Grain Merge" to "b+s-0.5","Pegtop Soft Light" to "(1.0-2.0*s)*b*b+2.0*s*b",
+          "Interpolation" to "0.5-0.25*cos(3.14159*s)-0.25*cos(3.14159*b)","Contrast Mask" to "(b-0.5)*(0.5+s*1.5)+0.5",
+          "Threshold" to "step(s,b)","Hard Reflect" to "mix(min(vec3(1.0),b*b/max(1.0-s,vec3(1e-4))),s,step(vec3(0.999),s))")
+
+          class PD(val k:String,val n:String,val g:String,val lo:Float,val hi:Float,val d:Float)
+          val DEFS = listOf(
+          PD("size","Size","Shape",1f,400f,28f),PD("minSize","Min size","Shape",0f,1f,.15f),PD("hard","Hardness","Shape",0f,1f,.8f),
+          PD("round","Roundness","Shape",.05f,1f,1f),PD("angle","Angle","Shape",0f,360f,0f),PD("angJ","Angle jitter","Shape",0f,1f,0f),
+          PD("sizeJ","Size jitter","Shape",0f,1f,0f),PD("spacing","Spacing","Shape",.01f,1.5f,.08f),PD("scatter","Scatter","Shape",0f,4f,0f),
+          PD("count","Dabs/step","Shape",1f,6f,1f),
+          PD("opacity","Stroke opacity","Flow",0f,1f,1f),PD("flow","Flow","Flow",.02f,1f,.8f),PD("flowJ","Flow jitter","Flow",0f,1f,0f),
+          PD("pSize","Pressure>size","Dynamics",0f,1f,.7f),PD("pFlow","Pressure>flow","Dynamics",0f,1f,.3f),PD("pGamma","Pressure curve","Dynamics",.2f,3f,1f),
+          PD("vSize","Speed>size","Dynamics",-1f,1f,0f),PD("vFlow","Speed>flow","Dynamics",-1f,1f,0f),PD("tAng","Tilt>angle","Dynamics",0f,1f,0f),
+          PD("tRound","Tilt>squash","Dynamics",0f,1f,0f),PD("follow","Follow stroke","Dynamics",0f,1f,0f),
+          PD("stab","Stabilizer","Stroke",0f,1f,.35f),PD("taper","Entry taper px","Stroke",0f,300f,0f),
+          PD("grain","Grain","Texture",0f,1f,0f),PD("gScale","Grain scale","Texture",.1f,8f,1f),PD("gMove","Grain moves","Texture",0f,1f,0f),
+          PD("gCon","Grain softness","Texture",.02f,.5f,.2f),PD("edge","Wet edge","Texture",0f,1f,0f),
+          PD("hueJ","Hue jitter","Color",0f,1f,0f),PD("satJ","Sat jitter","Color",0f,1f,0f),PD("valJ","Value jitter","Color",0f,1f,0f),
+          PD("lqR","Radius","Liquify",8f,600f,160f),PD("lqK","Strength","Liquify",.05f,1f,.5f),PD("lqH","Hardness","Liquify",0f,1f,.3f))
+
+          val THEME=listOf(PD("blur","Blur","Glass",0f,5f,1.6f),PD("ref","Refraction","Glass",0f,90f,46f),PD("disp","Dispersion","Glass",0f,.3f,.07f),
+          PD("tint","Tint amount","Glass",0f,.95f,.08f),PD("tintL","Tint brightness","Glass",0f,1f,1f),PD("rim","Edge highlight","Glass",0f,1.5f,1f),
+          PD("shadow","Shadow","Glass",0f,1f,.3f),PD("wob","Edge wobble","Glass",0f,6f,0f),PD("melt","Liquid merge","Glass",0f,60f,30f),
+          PD("rad","Corner radius","Glass",4f,60f,34f),PD("bounce","Spring bounce","Glass",0f,1f,.5f))
+          val PRESETS=linkedMapOf("Liquid" to listOf(1.6f,46f,.07f,.08f,1f,1f,.3f,0f,30f,34f,.5f),"Frosted" to listOf(4f,6f,0f,.22f,.9f,.5f,.25f,0f,12f,28f,.2f),
+          "Clear" to listOf(.3f,60f,.12f,.02f,1f,1.2f,.2f,0f,30f,40f,.6f),"Smoke" to listOf(3f,14f,.02f,.55f,0f,.6f,.4f,0f,20f,30f,.3f),
+          "Flat" to listOf(5f,0f,0f,.85f,.1f,0f,.15f,0f,0f,20f,0f),"Jelly" to listOf(1.2f,52f,.08f,.1f,1f,1f,.3f,3f,45f,40f,1f))
+          class Layer(n:String){
+           var name by mutableStateOf(n); var op by mutableFloatStateOf(1f); var mode by mutableIntStateOf(0)
+           var vis by mutableStateOf(true); var lock by mutableStateOf(false); var liq by mutableStateOf(false)
+           var white=false; var t=0; var f=0; var dt=0; var df=0; var has=false }
+          object Glass{ val m=ConcurrentHashMap<Int,FloatArray>(); val light=mutableStateMapOf<Int,Boolean>() }
+          object Cur{
+           val layers=mutableStateListOf<Layer>(); var sel by mutableIntStateOf(1); var tool by mutableIntStateOf(0); var lq by mutableIntStateOf(0)
+           var ls by mutableIntStateOf(0); var lm by mutableIntStateOf(0)
+           val th=mutableStateMapOf<String,Float>().apply{THEME.forEach{put(it.k,it.d)}}
+           var hue by mutableFloatStateOf(220f); var sat by mutableFloatStateOf(.8f); var vl by mutableFloatStateOf(.9f)
+           val b=mutableStateMapOf<String,Float>().apply{DEFS.forEach{put(it.k,it.d)}}
+           @Volatile var px=0f; @Volatile var py=0f; @Volatile var sc=.4f; @Volatile var rot=0f; @Volatile var vd=true
+           @Volatile var lx=0f; @Volatile var ly=-1f
+           var r:Eng?=null; var view:CanvasView?=null
+           fun q(a:()->Unit){view?.queueEvent{a()}}
+           fun col()=Color.HSVToColor(floatArrayOf(hue,sat,vl)) }
+
+          const val HDR="#version 300 es\nprecision highp float;precision highp int;precision highp sampler2D;\n"
+          const val FSV=HDR+"out vec2 uv;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);uv=p;gl_Position=vec4(p*2.-1.,0,1);}"
+          // Catmull-Rom bicubic in 5 bilinear taps: keeps displaced/zoomed layers sharp
+          const val CR="""vec4 cr(sampler2D t,vec2 uv,vec2 sz){vec2 sp=uv*sz;vec2 tc=floor(sp-.5)+.5;vec2 f=sp-tc;vec2 f2=f*f,f3=f2*f;
+          vec2 w0=f2-.5*(f3+f);vec2 w1=1.5*f3-2.5*f2+1.;vec2 w3=.5*(f3-f2);vec2 w2=1.-w0-w1-w3;vec2 w12=w1+w2;
+          vec2 t0=(tc-1.)/sz,t3=(tc+2.)/sz,t12=(tc+w2/w12)/sz;
+          vec4 r=texture(t,vec2(t12.x,t0.y))*(w12.x*w0.y)+texture(t,vec2(t0.x,t12.y))*(w0.x*w12.y)+texture(t,t12)*(w12.x*w12.y)+texture(t,vec2(t3.x,t12.y))*(w3.x*w12.y)+texture(t,vec2(t12.x,t3.y))*(w12.x*w3.y);
+          r/=(w12.x*w0.y+w0.x*w12.y+w12.x*w12.y+w3.x*w12.y+w12.x*w3.y);r.a=clamp(r.a,0.,1.);r.rgb=clamp(r.rgb,0.,r.a);return r;}
+          """
+          val COMP=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uAcc,uLay,uDisp,uStroke,uSelM;uniform int uHas,uSM,uMode,uHS;uniform float uSO,uOp;uniform vec2 uSize;\n"+CR+"""
+          float lum(vec3 c){return dot(c,vec3(.3,.59,.11));}
+          vec3 clipC(vec3 c){float l=lum(c),n=min(min(c.r,c.g),c.b),x=max(max(c.r,c.g),c.b);if(n<0.)c=l+(c-l)*l/(l-n);if(x>1.)c=l+(c-l)*(1.-l)/(x-l);return c;}
+          vec3 setLum(vec3 c,float l){return clipC(c+(l-lum(c)));}
+          float sat(vec3 c){return max(max(c.r,c.g),c.b)-min(min(c.r,c.g),c.b);}
+          vec3 setSat(vec3 c,float s){float mx=max(max(c.r,c.g),c.b),mn=min(min(c.r,c.g),c.b);return mx>mn?(c-mn)*s/(mx-mn):vec3(0.);}
+          vec3 bf(int m,vec3 b,vec3 s){switch(m){"""+BLENDS.mapIndexed{i,p->"case $i:return ${p.second};"}.joinToString("")+"""default:return s;}}
+          void main(){vec2 u=uv;vec4 L;if(uHas>0){u+=texture(uDisp,uv).rg;L=cr(uLay,u,uSize);}else L=texture(uLay,uv);
+          if(uSM>0){vec4 S=texture(uStroke,uv)*uSO*(uHS>0?texture(uSelM,uv).r:1.);if(uSM==1)L=S+L*(1.-S.a);else if(uSM==2)L*=1.-S.a;else L=vec4(S.rgb*L.a+L.rgb*(1.-S.a),L.a);}
+          vec4 B=texture(uAcc,uv);float sa=L.a*uOp;
+          if(uMode==1)sa=step(fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453),sa);
+          vec3 s=L.a>0.?L.rgb/L.a:vec3(0.);vec3 b=B.a>0.?B.rgb/B.a:vec3(0.);vec3 m=clamp(bf(uMode,b,s),0.,1.);
+          o=vec4((1.-B.a)*sa*s+(1.-sa)*B.rgb+sa*B.a*m,sa+B.a*(1.-sa));}"""
+          val BAKE=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uLay,uDisp;uniform vec2 uSize;\n"+CR+"void main(){o=cr(uLay,uv+texture(uDisp,uv).rg,uSize);}"
+          val COMMIT=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uS,uSel;uniform float uSO;uniform int uHS;void main(){o=texture(uS,uv)*uSO*(uHS>0?texture(uSel,uv).r:1.);}"
+          val DABV=HDR+"layout(location=0)in vec2 aP;layout(location=1)in vec4 aA;layout(location=2)in vec3 aC;uniform vec2 uSize;flat out vec4 vA;flat out vec3 vC;flat out vec2 vP;out vec2 vQ;void main(){vec2 c=vec2(gl_VertexID&1,gl_VertexID>>1);vQ=c-.5;vec2 pp=aP+vQ*(aA.x+2.);gl_Position=vec4(pp/uSize*2.-1.,0,1);vA=aA;vC=aC;vP=aP;}"
+          val DABF=HDR+"""flat in vec4 vA;flat in vec3 vC;flat in vec2 vP;in vec2 vQ;out vec4 o;uniform float uHard,uEdge,uGrain,uGS,uGM,uGC;
+          float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+          float vn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h(i),h(i+vec2(1,0)),f.x),mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x),f.y);}
+          void main(){float ps=vA.x+2.;vec2 p=vQ*ps;float c=cos(vA.y),s=sin(vA.y);p=vec2(c*p.x+s*p.y,-s*p.x+c*p.y);p.y/=max(vA.w,.05);
+          float r=length(p)/(vA.x*.5);float a=1.-smoothstep(uHard*.98,1.,r);a*=1.+uEdge*smoothstep(.5,.95,r);
+          vec2 gp=(uGM>.5?p+vA.x:vP+p)*uGS*.5;float n=vn(gp)*.65+vn(gp*2.3)*.35;a*=mix(1.,smoothstep(.5-uGC,.5+uGC,n),uGrain);
+          a=clamp(a*vA.z,0.,1.);o=vec4(vC*a,a);}"""
+          val LQ=HDR+"""in vec2 uv;out vec4 o;uniform sampler2D uD,uSel;uniform vec2 uSize,uC,uDl;uniform float uR,uK,uH;uniform int uM,uHS;
+          vec2 D(vec2 q){return texture(uD,q/uSize).rg*uSize;}
+          void main(){vec2 p=uv*uSize;vec2 v=p-uC;float f=1.-smoothstep(uR*uH,uR,length(v));if(uHS>0)f*=texture(uSel,uv).r;vec2 q=p,r;
+          if(uM==0)q=p-uDl*f;
+          else if(uM==1||uM==2){float a=uK*f*(uM==1?1.:-1.);float c=cos(a),s=sin(a);q=uC+vec2(c*v.x-s*v.y,s*v.x+c*v.y);}
+          else if(uM==3)q=uC+v*(1.-uK*f);else if(uM==4)q=uC+v*(1.+uK*f);
+          if(uM==5)r=D(p)*(1.-uK*f);
+          else if(uM==6){float e=uR*.08;r=mix(D(p),(D(p+vec2(e,0))+D(p-vec2(e,0))+D(p+vec2(0,e))+D(p-vec2(0,e)))*.25,clamp(uK*f*8.,0.,1.));}
+          else r=D(q)+(q-p);
+          o=vec4(r/uSize,0,1);}"""
+          val VIEW=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uC,uSel;uniform vec2 uCS,uVS,uPan,uRot;uniform float uSc,uT;uniform int uAnt;\n"+CR+"""
+          void main(){vec2 sp=vec2(gl_FragCoord.x,uVS.y-gl_FragCoord.y);vec2 v=(sp-uVS*.5-uPan)/uSc;v=vec2(uRot.x*v.x+uRot.y*v.y,-uRot.y*v.x+uRot.x*v.y);vec2 c=v+uCS*.5;
+          vec3 bg=mix(vec3(.05,.06,.09),vec3(.12,.1,.17),sp.y/uVS.y);
+          if(c.x<0.||c.y<0.||c.x>uCS.x||c.y>uCS.y){o=vec4(bg,1);return;}
+          vec4 t=cr(uC,c/uCS,uCS);vec2 k=floor(c/40.);float ch=.86+.08*mod(k.x+k.y,2.);vec3 col=t.rgb+(1.-t.a)*ch;
+          if(uAnt>0){vec2 u=c/uCS;vec2 e=vec2(1./uSc)/uCS;float m0=texture(uSel,u).r;
+          float d=max(max(abs(texture(uSel,u+vec2(e.x,0.)).r-m0),abs(texture(uSel,u-vec2(e.x,0.)).r-m0)),max(abs(texture(uSel,u+vec2(0.,e.y)).r-m0),abs(texture(uSel,u-vec2(0.,e.y)).r-m0)));
+          if(d>.4)col=vec3(step(.5,fract((sp.x+sp.y)/16.+uT*.7)));}
+          o=vec4(col,1);}"""
+          // Liquid glass: smooth-union SDF blobs that refract, blur and disperse the live canvas behind them
+          val GLASS=HDR+"""in vec2 uv;out vec4 o;uniform sampler2D uV;uniform vec2 uVS,uL;uniform int uN;uniform vec4 uB[12],uP[12];uniform float uT,uBlur,uRef,uDisp,uTint,uTintL,uRim,uShadow,uWob,uMelt;
+          float sd(vec2 p){float d=1e4;for(int i=0;i<12;i++){if(i>=uN)break;vec2 q=abs(p-uB[i].xy)-uB[i].zw+uP[i].x;float di=length(max(q,0.))+min(max(q.x,q.y),0.)-uP[i].x;float k=max(uMelt,.001);float h=clamp(.5+.5*(d-di)/k,0.,1.);d=mix(d,di,h)-k*h*(1.-h);}return d;}
+          vec3 tx(vec2 u,float l){return textureLod(uV,u,l).rgb;}
+          void main(){vec2 sp=vec2(gl_FragCoord.x,uVS.y-gl_FragCoord.y);vec3 base=tx(uv,0.);
+          if(uN==0){o=vec4(base,1);return;}
+          vec2 w=sp+uWob*sin(vec2(uT*1.3+sp.y*.02,uT*1.1+sp.x*.02));float d=sd(w);
+          base*=1.-(1.-smoothstep(0.,40.,sd(w-vec2(0,12))))*uShadow;
+          if(d<1.5){vec2 e=vec2(1.5,0.);vec2 n=normalize(vec2(sd(w+e)-sd(w-e),sd(w+e.yx)-sd(w-e.yx))+1e-5);
+          float lens=pow(1.-clamp(-d/28.,0.,1.),2.2);vec2 off=vec2(n.x,-n.y)*lens*uRef/uVS;
+          vec3 c=vec3(tx(uv-off,uBlur).r,tx(uv-off*(1.+uDisp),uBlur).g,tx(uv-off*(1.+2.*uDisp),uBlur).b);c=mix(c,vec3(uTintL),uTint);
+          float rim=smoothstep(-6.,-.5,d);vec2 L=normalize(uL);
+          c+=uRim*(rim*(.18+.7*pow(max(dot(n,L),0.),3.))+rim*.12*pow(max(dot(n,-L),0.),3.));
+          base=mix(base,c,1.-smoothstep(-1.,1.5,d));}
+          o=vec4(base,1);}"""
+
+          const val PGV=HDR+"layout(location=0)in vec2 aP;uniform vec2 uSize;void main(){gl_Position=vec4(aP/uSize*2.-1.,0,1);}"
+          const val PGF=HDR+"out vec4 o;uniform float uV;void main(){o=vec4(uV);}"
+          val CMB=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uA,uB;uniform int uM;void main(){float a=texture(uA,uv).r,b=texture(uB,uv).r;float r=uM==0?b:(uM==1?max(a,b):(uM==2?a*(1.-b):1.-a));o=vec4(r);}"
+          val FILL=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uSel;uniform int uHS;uniform vec3 uCol;void main(){float m=uHS>0?texture(uSel,uv).r:1.;o=vec4(uCol*m,m);}"
+          val PROBE=FSV.let{HDR}+"in vec2 uv;out vec4 o;uniform sampler2D uV;uniform vec2 uVS;uniform vec4 uB[12];\nvoid main(){vec4 b=uB[int(gl_FragCoord.x)];vec3 s=vec3(0.);for(int k=0;k<5;k++){float kx=(k==1?1.:0.)-(k==2?1.:0.);float ky=(k==3?1.:0.)-(k==4?1.:0.);vec2 c=(b.xy+vec2(kx*b.z,ky*b.w)*.6)/uVS;s+=textureLod(uV,vec2(c.x,1.-c.y),5.).rgb;}o=vec4(s/5.,1);}"
+          fun prog(vs:String,fs:String):Int{
+           fun sh(t:Int,s:String):Int{val i=G.glCreateShader(t);G.glShaderSource(i,s);G.glCompileShader(i);val o=IntArray(1);G.glGetShaderiv(i,G.GL_COMPILE_STATUS,o,0)
+            if(o[0]==0)throw RuntimeException(G.glGetShaderInfoLog(i)+"\n"+s);return i}
+           val p=G.glCreateProgram();G.glAttachShader(p,sh(G.GL_VERTEX_SHADER,vs));G.glAttachShader(p,sh(G.GL_FRAGMENT_SHADER,fs));G.glLinkProgram(p);return p}
+          fun mk(w:Int,h:Int,fmt:Int,lv:Int=1):IntArray{
+           val t=IntArray(1);G.glGenTextures(1,t,0);G.glBindTexture(G.GL_TEXTURE_2D,t[0]);G.glTexStorage2D(G.GL_TEXTURE_2D,lv,fmt,w,h)
+           G.glTexParameteri(G.GL_TEXTURE_2D,G.GL_TEXTURE_MIN_FILTER,if(lv>1)G.GL_LINEAR_MIPMAP_LINEAR else G.GL_LINEAR);G.glTexParameteri(G.GL_TEXTURE_2D,G.GL_TEXTURE_MAG_FILTER,G.GL_LINEAR)
+           G.glTexParameteri(G.GL_TEXTURE_2D,G.GL_TEXTURE_WRAP_S,G.GL_CLAMP_TO_EDGE);G.glTexParameteri(G.GL_TEXTURE_2D,G.GL_TEXTURE_WRAP_T,G.GL_CLAMP_TO_EDGE)
+           val b=IntArray(1);G.glGenFramebuffers(1,b,0);G.glBindFramebuffer(G.GL_FRAMEBUFFER,b[0]);G.glFramebufferTexture2D(G.GL_FRAMEBUFFER,G.GL_COLOR_ATTACHMENT0,G.GL_TEXTURE_2D,t[0],0)
+           G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT);return intArrayOf(t[0],b[0])}
+          fun fb(f:Int,w:Int,h:Int){G.glBindFramebuffer(G.GL_FRAMEBUFFER,f);G.glViewport(0,0,w,h)}
+          fun uf(p:Int,n:String,vararg v:Float){val l=G.glGetUniformLocation(p,n);if(v.size==1)G.glUniform1f(l,v[0]) else G.glUniform2f(l,v[0],v[1])}
+          fun ui(p:Int,n:String,v:Int)=G.glUniform1i(G.glGetUniformLocation(p,n),v)
+          fun bt(u:Int,t:Int,p:Int,n:String){G.glActiveTexture(G.GL_TEXTURE0+u);G.glBindTexture(G.GL_TEXTURE_2D,t);ui(p,n,u)}
+          fun tri()=G.glDrawArrays(G.GL_TRIANGLES,0,3)
+          fun lp(a:Float,b:Float,t:Float)=a+(b-a)*t
+          fun rn()=Random.nextFloat()
+
+          class Eng:GLSurfaceView.Renderer{
+           val N=2048
+           var pc=0;var pd=0;var pq=0;var pb=0;var pl=0;var pv=0;var pg=0
+           var a=arrayOf(IntArray(2),IntArray(2));var stk=IntArray(2);var sd=IntArray(2);var vt=IntArray(2)
+           var vbo=0;var maxPt=256f;var pp=0;var pf=IntArray(2);var fr=0;val rb=ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());var vw=1;var vh=1;var fin=0;var key=0;var dirty=true
+           val trash=ConcurrentLinkedQueue<Layer>()
+           val buf=ByteBuffer.allocateDirect(9*4*4096).order(ByteOrder.nativeOrder()).asFloatBuffer();var dn=0
+           var st=false;var sx=0f;var sy=0f;var lx=0f;var ly=0f;var carry=0f;var path=0f;var vel=0f;var dir=0f;var hsv=FloatArray(3)
+           var lqd=false;var lqx=0f;var lqy=0f
+           var pgeo=0;var pcm=0;var pfl=0;var hasSel=false;var si=0;var sel=arrayOf(IntArray(2),IntArray(2));var prv=IntArray(2);val lpts=ArrayList<Float>();var lx0=0f;var ly0=0f
+           fun th(k:String)=Cur.th[k]!!
+           fun g(k:String)=Cur.b[k]!!
+           fun cur()=Cur.layers.getOrNull(Cur.sel)
+
+           override fun onSurfaceCreated(x:GL10?,c:EGLConfig?){
+            Cur.r=this
+            pc=prog(FSV,COMP);pb=prog(FSV,BAKE);pq=prog(FSV,COMMIT);pd=prog(DABV,DABF);pl=prog(FSV,LQ);pv=prog(FSV,VIEW);pg=prog(FSV,GLASS);pp=prog(FSV,PROBE);pf=mk(12,1,G.GL_RGBA8)
+            pgeo=prog(PGV,PGF);pcm=prog(FSV,CMB);pfl=prog(FSV,FILL);sel=arrayOf(mk(N,N,G.GL_R8),mk(N,N,G.GL_R8));prv=mk(N,N,G.GL_R8);si=0;hasSel=false;lpts.clear()
+            val rbo=IntArray(1);G.glGenRenderbuffers(1,rbo,0);G.glBindRenderbuffer(G.GL_RENDERBUFFER,rbo[0]);G.glRenderbufferStorage(G.GL_RENDERBUFFER,G.GL_DEPTH24_STENCIL8,N,N);G.glBindFramebuffer(G.GL_FRAMEBUFFER,prv[1]);G.glFramebufferRenderbuffer(G.GL_FRAMEBUFFER,G.GL_DEPTH_STENCIL_ATTACHMENT,G.GL_RENDERBUFFER,rbo[0])
+            a=arrayOf(mk(N,N,G.GL_RGBA16F),mk(N,N,G.GL_RGBA16F));stk=mk(N,N,G.GL_RGBA16F);sd=mk(N,N,G.GL_RG16F)
+            val r=FloatArray(2);G.glGetFloatv(G.GL_ALIASED_POINT_SIZE_RANGE,r,0);maxPt=r[1]
+            val v=IntArray(1);G.glGenBuffers(1,v,0);vbo=v[0]
+            Cur.layers.forEach{it.t=0;it.dt=0;it.has=false}
+            if(Cur.layers.isEmpty()){Cur.layers.add(Layer("Paper").apply{white=true});Cur.layers.add(Layer("Sketch"))}
+            vt=IntArray(2);dirty=true}
+           override fun onSurfaceChanged(x:GL10?,w:Int,h:Int){
+            vw=w;vh=h;if(vt[0]!=0)G.glDeleteTextures(1,intArrayOf(vt[0]),0)
+            vt=mk(w,h,G.GL_RGBA8,1+floor(log2(max(w,h).toFloat())).toInt());Cur.sc=min(w,h)*.9f/N;Cur.vd=true}
+
+           fun ensure(L:Layer){if(L.t!=0)return;val m=mk(N,N,G.GL_RGBA16F);L.t=m[0];L.f=m[1];val w=if(L.white)1f else 0f;G.glClearColor(w,w,w,w);G.glClear(G.GL_COLOR_BUFFER_BIT)}
+           fun ensureD(L:Layer){if(L.dt!=0)return;val m=mk(N,N,G.GL_RG16F);L.dt=m[0];L.df=m[1]}
+           fun blit(f:Int,t:Int){G.glBindFramebuffer(G.GL_READ_FRAMEBUFFER,f);G.glBindFramebuffer(G.GL_DRAW_FRAMEBUFFER,t);G.glBlitFramebuffer(0,0,N,N,0,0,N,N,G.GL_COLOR_BUFFER_BIT,G.GL_NEAREST)}
+           // bake: resample the layer ONCE through its displacement field (bicubic) and reset the field -> stays sharp
+           fun bake(L:Layer){if(!L.has)return;G.glDisable(G.GL_BLEND);fb(a[1][1],N,N);G.glUseProgram(pb);bt(0,L.t,pb,"uLay");bt(1,L.dt,pb,"uDisp");uf(pb,"uSize",N.toFloat(),N.toFloat());tri()
+            blit(a[1][1],L.f);G.glBindFramebuffer(G.GL_FRAMEBUFFER,L.df);G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT);L.has=false;dirty=true}
+
+           fun comp(){
+            val ls=Cur.layers.toList();var s=0;fb(a[0][1],N,N);G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT);G.glDisable(G.GL_BLEND);G.glUseProgram(pc)
+            for((i,L) in ls.withIndex()){if(!L.vis)continue;ensure(L);val d=1-s;fb(a[d][1],N,N)
+             bt(0,a[s][0],pc,"uAcc");bt(1,L.t,pc,"uLay");bt(2,if(L.has)L.dt else L.t,pc,"uDisp");bt(3,stk[0],pc,"uStroke");bt(4,sel[si][0],pc,"uSelM");ui(pc,"uHS",if(hasSel)1 else 0)
+             ui(pc,"uHas",if(L.has)1 else 0);ui(pc,"uSM",if(st&&i==Cur.sel)(when{Cur.tool==0->if(L.lock)3 else 1;Cur.tool==1->2;else->0})else 0)
+             uf(pc,"uSO",g("opacity"));uf(pc,"uOp",L.op);ui(pc,"uMode",L.mode);uf(pc,"uSize",N.toFloat(),N.toFloat());tri();s=d}
+            fin=s}
+
+           override fun onDrawFrame(x:GL10?){
+            while(true){val l=trash.poll()?:break;if(l.t!=0)G.glDeleteTextures(2,intArrayOf(l.t,l.dt),0)}
+            if(lqd&&Cur.tool==2&&Cur.lq>0)lqApply(lqx,lqy,0f,0f)
+            val ls=Cur.layers.toList();var k=ls.size;ls.forEach{k=k*31+it.op.hashCode()*7+it.mode*3+(if(it.vis)1 else 0)+it.t+(if(it.has)5 else 0)}
+            if(k!=key){key=k;dirty=true}
+            if(dirty){comp();dirty=false;Cur.vd=true}
+            if(hasSel||lpts.isNotEmpty())Cur.vd=true
+            if(Cur.vd){Cur.vd=false;G.glDisable(G.GL_BLEND);fb(vt[1],vw,vh);G.glUseProgram(pv);bt(0,a[fin][0],pv,"uC");bt(1,if(lpts.isNotEmpty())prv[0] else sel[si][0],pv,"uSel");ui(pv,"uAnt",if(hasSel||lpts.isNotEmpty())1 else 0);uf(pv,"uT",(SystemClock.uptimeMillis()%1000000)/1000f)
+             uf(pv,"uCS",N.toFloat(),N.toFloat());uf(pv,"uVS",vw.toFloat(),vh.toFloat());uf(pv,"uPan",Cur.px,Cur.py);uf(pv,"uSc",Cur.sc);uf(pv,"uRot",cos(Cur.rot),sin(Cur.rot));tri()
+             G.glBindTexture(G.GL_TEXTURE_2D,vt[0]);G.glGenerateMipmap(G.GL_TEXTURE_2D)}
+            fb(0,vw,vh);G.glUseProgram(pg);bt(0,vt[0],pg,"uV")
+            val es=Glass.m.entries.take(12);val bl=es.map{it.value};val b=FloatArray(48);val q=FloatArray(48)
+            bl.forEachIndexed{i,v->b[i*4]=v[0];b[i*4+1]=v[1];b[i*4+2]=v[2];b[i*4+3]=v[3];q[i*4]=min(v[4]*th("rad")/34f,min(v[2],v[3]))}
+            ui(pg,"uN",bl.size);for(k in listOf("blur","ref","disp","tint","tintL","rim","shadow","wob","melt"))uf(pg,"u"+k.replaceFirstChar{it.uppercase()},th(k));G.glUniform4fv(G.glGetUniformLocation(pg,"uB[0]"),12,b,0);G.glUniform4fv(G.glGetUniformLocation(pg,"uP[0]"),12,q,0)
+            uf(pg,"uVS",vw.toFloat(),vh.toFloat());uf(pg,"uL",Cur.lx,Cur.ly-.001f);uf(pg,"uT",(SystemClock.uptimeMillis()%1000000)/1000f);tri()
+            if(++fr%6==0&&bl.isNotEmpty()){fb(pf[1],12,1);G.glUseProgram(pp);bt(0,vt[0],pp,"uV");uf(pp,"uVS",vw.toFloat(),vh.toFloat());G.glUniform4fv(G.glGetUniformLocation(pp,"uB[0]"),12,b,0);tri()
+             rb.clear();G.glReadPixels(0,0,bl.size,1,G.GL_RGBA,G.GL_UNSIGNED_BYTE,rb)
+             es.forEachIndexed{i,en->val l=((rb.get(i*4).toInt() and 255)*.3f+(rb.get(i*4+1).toInt() and 255)*.59f+(rb.get(i*4+2).toInt() and 255)*.11f)/255f
+              val pl2=l*(1f-th("tint"))+th("tintL")*th("tint");val was=Glass.light[en.key]==true;val now=if(was)pl2>.5f else pl2>.62f;if(now!=was)Glass.light[en.key]=now}}}
+
+           // ---- input (runs on GL thread) ----
+           fun ptr(k:Int,x:Float,y:Float,p:Float,t:Float){
+            if(k==3){st=false;lqd=false;dn=0;buf.clear();if(Cur.tool==3&&Cur.ls==0)lpts.clear();dirty=true;return}
+            if(Cur.tool==3){lasso(k,x,y);return}
+            if(Cur.tool==2){liq(k,x,y);return}
+            when(k){
+             0->{val L=cur()?:return;if(L.has)bake(L);ensure(L);fb(stk[1],N,N);G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT)
+              sx=x;sy=y;lx=x;ly=y;carry=0f;path=0f;vel=0f;dir=0f;st=true;hsv=floatArrayOf(Cur.hue,Cur.sat,Cur.vl);dab(x,y,p,t);flush();dirty=true}
+             1->{if(!st)return;val al=1f-.97f*g("stab");val nx=sx+(x-sx)*al;val ny=sy+(y-sy)*al;vel=vel*.7f+.3f*hypot(x-sx,y-sy)
+              walk(nx,ny,p,t);sx=nx;sy=ny;flush();dirty=true}
+             2->{if(!st)return;walk(x,y,p,t);flush();cur()?.let{commit(it)};st=false;dirty=true}}}
+           fun walk(nx:Float,ny:Float,p:Float,t:Float){
+            val dx=nx-lx;val dy=ny-ly;val d=hypot(dx,dy);if(d<1e-3f)return;dir=Math.toDegrees(atan2(dy,dx).toDouble()).toFloat()
+            val sp=max(.5f,g("spacing")*g("size"));var s=sp-carry
+            while(s<=d){dab(lx+dx/d*s,ly+dy/d*s,p,t);s+=sp}
+            carry=d-(s-sp);path+=d;lx=nx;ly=ny}
+           fun dab(x:Float,y:Float,p:Float,t:Float){
+            val pr=p.coerceIn(0f,1f).pow(g("pGamma"));val v=min(vel/(8f+g("size")*.3f),1f)-.5f
+            var sz=g("size")*(1f+g("pSize")*(lp(g("minSize"),1f,pr)-1f))*(1f+g("vSize")*v)*(1f-g("sizeJ")*rn())
+            if(g("taper")>0f)sz*=min(1f,.2f+.8f*path/g("taper"))
+            sz=max(sz,1f)
+            val fl=(g("flow")*lp(1f,pr,g("pFlow"))*(1f+g("vFlow")*v)*(1f-g("flowJ")*rn())).coerceIn(0f,1f)
+            val deg=g("angle")+g("follow")*dir+g("tAng")*t*180f+g("angJ")*(rn()-.5f)*360f
+            val rot=Math.toRadians(deg.toDouble()).toFloat();val rd=g("round")*(1f-g("tRound")*t*.8f)
+            val c=if(Cur.tool==1)0 else Color.HSVToColor(floatArrayOf((hsv[0]+g("hueJ")*(rn()-.5f)*180f+360f)%360f,(hsv[1]+g("satJ")*(rn()-.5f)).coerceIn(0f,1f),(hsv[2]+g("valJ")*(rn()-.5f)).coerceIn(0f,1f)))
+            repeat(g("count").roundToInt()){val an=rn()*6.2832f;val rr=g("scatter")*sz*.5f*sqrt(rn())
+             if(dn==4096)flush()
+             buf.put(x+cos(an)*rr);buf.put(y+sin(an)*rr);buf.put(sz);buf.put(rot);buf.put(fl);buf.put(rd)
+             buf.put(Color.red(c)/255f);buf.put(Color.green(c)/255f);buf.put(Color.blue(c)/255f);dn++}}
+           fun flush(){if(dn==0)return
+            fb(stk[1],N,N);G.glEnable(G.GL_BLEND);G.glBlendFunc(G.GL_ONE,G.GL_ONE_MINUS_SRC_ALPHA);G.glUseProgram(pd)
+            uf(pd,"uSize",N.toFloat(),N.toFloat());uf(pd,"uHard",g("hard"));uf(pd,"uEdge",g("edge"));uf(pd,"uGrain",g("grain"))
+            uf(pd,"uGS",g("gScale"));uf(pd,"uGM",g("gMove"));uf(pd,"uGC",g("gCon"))
+            G.glBindBuffer(G.GL_ARRAY_BUFFER,vbo);buf.limit(dn*9);buf.position(0);G.glBufferData(G.GL_ARRAY_BUFFER,dn*36,buf,G.GL_STREAM_DRAW)
+            for(i in 0..2)G.glEnableVertexAttribArray(i)
+            G.glVertexAttribPointer(0,2,G.GL_FLOAT,false,36,0);G.glVertexAttribPointer(1,4,G.GL_FLOAT,false,36,8);G.glVertexAttribPointer(2,3,G.GL_FLOAT,false,36,24)
+            for(i in 0..2)G.glVertexAttribDivisor(i,1);G.glDrawArraysInstanced(G.GL_TRIANGLE_STRIP,0,4,dn);for(i in 0..2){G.glVertexAttribDivisor(i,0);G.glDisableVertexAttribArray(i)};G.glBindBuffer(G.GL_ARRAY_BUFFER,0);G.glDisable(G.GL_BLEND);dn=0;buf.clear()}
+           fun commit(L:Layer){fb(L.f,N,N);G.glEnable(G.GL_BLEND)
+            when{Cur.tool==1->G.glBlendFunc(G.GL_ZERO,G.GL_ONE_MINUS_SRC_ALPHA);L.lock->G.glBlendFuncSeparate(G.GL_DST_ALPHA,G.GL_ONE_MINUS_SRC_ALPHA,G.GL_ZERO,G.GL_ONE);else->G.glBlendFunc(G.GL_ONE,G.GL_ONE_MINUS_SRC_ALPHA)}
+            G.glUseProgram(pq);bt(0,stk[0],pq,"uS");bt(1,sel[si][0],pq,"uSel");ui(pq,"uHS",if(hasSel)1 else 0);uf(pq,"uSO",g("opacity"));tri();G.glDisable(G.GL_BLEND)}
+
+           // ---- lasso selection (Ibis-style): freehand/polygon, new/add/subtract, invert, fill, clear; brush + liquify are clipped to it
+           fun up(f:FloatArray){val fbuf=ByteBuffer.allocateDirect(f.size*4).order(ByteOrder.nativeOrder()).asFloatBuffer();fbuf.put(f);fbuf.position(0)
+            G.glBindBuffer(G.GL_ARRAY_BUFFER,vbo);G.glBufferData(G.GL_ARRAY_BUFFER,f.size*4,fbuf,G.GL_STREAM_DRAW);G.glEnableVertexAttribArray(0);G.glVertexAttribDivisor(0,0);G.glVertexAttribPointer(0,2,G.GL_FLOAT,false,0,0)}
+           fun rasterLasso(){val f=lpts.toFloatArray();val n=f.size/2;if(n<1)return
+            fb(prv[1],N,N);G.glDisable(G.GL_BLEND);G.glClearColor(0f,0f,0f,0f);G.glClearStencil(0);G.glClear(G.GL_COLOR_BUFFER_BIT or G.GL_STENCIL_BUFFER_BIT)
+            G.glUseProgram(pgeo);uf(pgeo,"uSize",N.toFloat(),N.toFloat());up(f)
+            if(n>=3){G.glEnable(G.GL_STENCIL_TEST);G.glStencilFunc(G.GL_ALWAYS,0,0xFF);G.glStencilOp(G.GL_KEEP,G.GL_KEEP,G.GL_INVERT);G.glColorMask(false,false,false,false)
+             uf(pgeo,"uV",1f);G.glDrawArrays(G.GL_TRIANGLE_FAN,0,n);G.glColorMask(true,true,true,true)
+             G.glStencilFunc(G.GL_EQUAL,1,1);G.glStencilOp(G.GL_KEEP,G.GL_KEEP,G.GL_KEEP);up(floatArrayOf(0f,0f,N.toFloat(),0f,0f,N.toFloat(),N.toFloat(),N.toFloat()));G.glDrawArrays(G.GL_TRIANGLE_STRIP,0,4)
+             G.glDisable(G.GL_STENCIL_TEST);up(f)}
+            uf(pgeo,"uV",1f);G.glDrawArrays(if(n>=3)G.GL_LINE_LOOP else G.GL_LINE_STRIP,0,n);G.glDisableVertexAttribArray(0);G.glBindBuffer(G.GL_ARRAY_BUFFER,0);Cur.vd=true}
+           fun combine(m:Int){G.glDisable(G.GL_BLEND);val o=1-si;fb(sel[o][1],N,N);G.glUseProgram(pcm);bt(0,sel[si][0],pcm,"uA");bt(1,prv[0],pcm,"uB");ui(pcm,"uM",m);tri();si=o}
+           fun commitLasso(){rasterLasso();combine(Cur.lm);hasSel=true;lpts.clear();Cur.vd=true}
+           fun closePoly(){if(lpts.size>=6)commitLasso()}
+           fun selInvert(){combine(3);hasSel=true;Cur.vd=true}
+           fun deselect(){hasSel=false;lpts.clear();for(s in sel){fb(s[1],N,N);G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT)};Cur.vd=true}
+           fun fillSel(del:Boolean){val L=cur()?:return;if(L.has)bake(L);ensure(L);fb(L.f,N,N);G.glEnable(G.GL_BLEND);G.glBlendFunc(if(del)G.GL_ZERO else G.GL_ONE,G.GL_ONE_MINUS_SRC_ALPHA)
+            G.glUseProgram(pfl);bt(0,sel[si][0],pfl,"uSel");ui(pfl,"uHS",if(hasSel)1 else 0);val c=Cur.col();G.glUniform3f(G.glGetUniformLocation(pfl,"uCol"),Color.red(c)/255f,Color.green(c)/255f,Color.blue(c)/255f);tri();G.glDisable(G.GL_BLEND);dirty=true}
+           fun lasso(k:Int,x:Float,y:Float){
+            if(Cur.ls==0){when(k){
+             0->{lpts.clear();lpts.add(x);lpts.add(y)}
+             1->{val n=lpts.size;if(n>=2&&n<8000&&hypot(x-lpts[n-2],y-lpts[n-1])>3f){lpts.add(x);lpts.add(y);rasterLasso()}}
+             else->{if(lpts.size>=6)commitLasso() else lpts.clear()}}}
+            else{when(k){
+             0->{lx0=x;ly0=y}
+             2->{if(hypot(x-lx0,y-ly0)<24f/Cur.sc){if(lpts.size>=6&&hypot(x-lpts[0],y-lpts[1])<30f/Cur.sc)commitLasso() else{lpts.add(x);lpts.add(y);rasterLasso()}}}}}}
+
+           // ---- multilayer liquify: every target layer owns a displacement field; ops compose fields, pixels are never resampled until bake ----
+           fun liq(k:Int,x:Float,y:Float){when(k){
+            0->{lqx=x;lqy=y;lqd=true}
+            1->{if(!lqd)return;if(Cur.lq==0){val dx=x-lqx;val dy=y-lqy;val m=max(1,ceil(hypot(dx,dy)/(g("lqR")*.2f)).toInt())
+              for(i in 1..m)lqApply(lqx+dx*i/m,lqy+dy*i/m,dx/m,dy/m)};lqx=x;lqy=y}
+            else->lqd=false}}
+           fun lqApply(x:Float,y:Float,dx:Float,dy:Float){
+            val ts=Cur.layers.filter{it.liq}.ifEmpty{listOfNotNull(cur())}
+            for(L in ts){ensure(L);ensureD(L);G.glDisable(G.GL_BLEND);fb(sd[1],N,N);G.glUseProgram(pl);bt(0,L.dt,pl,"uD");bt(1,sel[si][0],pl,"uSel");ui(pl,"uHS",if(hasSel)1 else 0)
+             uf(pl,"uSize",N.toFloat(),N.toFloat());uf(pl,"uC",x,y);uf(pl,"uDl",dx,dy);uf(pl,"uR",g("lqR"));uf(pl,"uK",g("lqK")*(if(Cur.lq==0)1f else .05f));uf(pl,"uH",g("lqH"));ui(pl,"uM",Cur.lq)
+             tri();blit(sd[1],L.df);L.has=true}
+            dirty=true}
+          }
+
+          class CanvasView(c:Context):GLSurfaceView(c){
+           val r=Eng();var g=false;var ig=false;var pcx=0f;var pcy=0f;var pdist=1f;var pa=0f;var sty=false
+           init{setEGLContextClientVersion(3);setEGLConfigChooser(8,8,8,8,0,0);setRenderer(r);Cur.view=this}
+           fun cv(x:Float,y:Float):FloatArray{val vx=(x-width/2f-Cur.px)/Cur.sc;val vy=(y-height/2f-Cur.py)/Cur.sc;val c=cos(Cur.rot);val s=sin(Cur.rot)
+            return floatArrayOf(c*vx+s*vy+1024f,-s*vx+c*vy+1024f)}
+           fun pt(k:Int,e:MotionEvent,h:Int){
+            val x=if(h<0)e.x else e.getHistoricalX(h);val y=if(h<0)e.y else e.getHistoricalY(h)
+            val st=e.getToolType(0)==MotionEvent.TOOL_TYPE_STYLUS
+            val p=if(st)(if(h<0)e.pressure else e.getHistoricalPressure(h)) else 1f
+            val t=if(st)(if(h<0)e.getAxisValue(MotionEvent.AXIS_TILT) else e.getHistoricalAxisValue(MotionEvent.AXIS_TILT,h))/1.5708f else 0f
+            val c=cv(x,y);queueEvent{r.ptr(k,c[0],c[1],p,t)}}
+           override fun onTouchEvent(e:MotionEvent):Boolean{
+            requestUnbufferedDispatch(e);val a=e.actionMasked
+            if(e.getToolType(0)==MotionEvent.TOOL_TYPE_STYLUS)sty=true
+            if(e.pointerCount>=2){
+             if(!ig){ig=true;queueEvent{r.ptr(2,0f,0f,0f,0f)}}
+             if(a==MotionEvent.ACTION_POINTER_UP){g=false;return true}
+             val x0=e.getX(0);val y0=e.getY(0);val x1=e.getX(1);val y1=e.getY(1)
+             val cx=(x0+x1)/2;val cy=(y0+y1)/2;val d=max(1f,hypot(x1-x0,y1-y0));val an=atan2(y1-y0,x1-x0)
+             if(g&&a!=MotionEvent.ACTION_POINTER_DOWN){
+              val p=cv(pcx,pcy);Cur.sc=(Cur.sc*d/pdist).coerceIn(.05f,40f);Cur.rot+=an-pa
+              val vx=p[0]-1024f;val vy=p[1]-1024f;val c=cos(Cur.rot);val s=sin(Cur.rot)
+              Cur.px=cx-width/2f-Cur.sc*(c*vx-s*vy);Cur.py=cy-height/2f-Cur.sc*(s*vx+c*vy);Cur.vd=true}
+             g=true;pcx=cx;pcy=cy;pdist=d;pa=an;return true}
+            if(ig){if(a==MotionEvent.ACTION_UP||a==MotionEvent.ACTION_CANCEL){ig=false;g=false};return true}
+            if(sty&&e.getToolType(0)!=MotionEvent.TOOL_TYPE_STYLUS)return true
+            when(a){
+             MotionEvent.ACTION_DOWN->pt(0,e,-1)
+             MotionEvent.ACTION_MOVE->{for(h in 0 until e.historySize)pt(1,e,h);pt(1,e,-1)}
+             MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL->pt(2,e,-1)}
+            return true}
+          }
+          EOF_5
+          mkdir -p $(dirname app/src/main/java/art/liquid/UI.kt)
+          cat > app/src/main/java/art/liquid/UI.kt <<'EOF_6'
+          package art.liquid
+          import android.hardware.*
+          import android.os.Bundle
+          import android.view.WindowManager
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.animation.animateColorAsState
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Slider
+          import androidx.compose.material3.SliderDefaults
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.Rect
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.graphicsLayer
+          import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.layout.boundsInWindow
+          import androidx.compose.ui.layout.onGloballyPositioned
+          import androidx.compose.ui.platform.LocalHapticFeedback
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.core.view.WindowInsetsControllerCompat
+          import kotlin.math.*
+
+          class MainActivity:ComponentActivity(),SensorEventListener{
+           override fun onCreate(s:Bundle?){super.onCreate(s);ld("th",Cur.th);ld("br",Cur.b);WindowCompat.setDecorFitsSystemWindows(window,false)
+            WindowInsetsControllerCompat(window,window.decorView).apply{hide(WindowInsetsCompat.Type.systemBars());systemBarsBehavior=WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE}
+            window.attributes=window.attributes.apply{layoutInDisplayCutoutMode=WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;preferredRefreshRate=120f}
+            val cf=java.io.File(filesDir,"crash.txt")
+            Thread.setDefaultUncaughtExceptionHandler{_,e->try{cf.writeText(e.stackTraceToString().take(6000))}catch(_:Throwable){};android.os.Process.killProcess(android.os.Process.myPid())}
+            setContent{var err by remember{mutableStateOf<String?>(if(cf.exists())cf.readText() else null)}
+             val m=err
+             if(m!=null)Column(Modifier.fillMaxSize().background(Color.Black).padding(16.dp).verticalScroll(rememberScrollState())){
+              T("Crash report - screenshot this:",16);T(m,10);T("[ tap here to continue ]",16,Modifier.clickable{cf.delete();err=null}.padding(20.dp))}
+             else App()}}
+           override fun onResume(){super.onResume();(getSystemService(SENSOR_SERVICE) as SensorManager).let{it.registerListener(this,it.getDefaultSensor(Sensor.TYPE_ACCELEROMETER),SensorManager.SENSOR_DELAY_GAME)}}
+           override fun onPause(){super.onPause();sv("th",Cur.th);sv("br",Cur.b);(getSystemService(SENSOR_SERVICE) as SensorManager).unregisterListener(this)}
+           fun ld(n:String,m:MutableMap<String,Float>){getSharedPreferences("liquid",0).getString(n,"")?.split(";")?.forEach{val p=it.split("=");val v=if(p.size==2)p[1].toFloatOrNull() else null;if(v!=null&&m.containsKey(p[0])){m[p[0]]=v}}}
+           fun sv(n:String,m:Map<String,Float>){getSharedPreferences("liquid",0).edit().putString(n,m.entries.joinToString(";"){"${it.key}=${it.value}"}).apply()}
+           override fun onSensorChanged(e:SensorEvent){Cur.lx+=(-e.values[0]/9.8f-Cur.lx)*.1f;Cur.ly+=(-e.values[1]/9.8f-Cur.ly)*.1f}
+           override fun onAccuracyChanged(s:Sensor?,a:Int){}}
+
+          val LocalInk=compositionLocalOf{Color.White}
+          @Composable fun T(s:String,sz:Int=13,m:Modifier=Modifier)=Text(s,m,color=LocalInk.current,fontSize=sz.sp)
+
+          // A glass panel = one blob in the GL liquid-glass pass. Spring-driven size gives jelly open/close; nearby blobs melt together.
+          @Composable fun Glass(id:Int,open:Boolean,mod:Modifier,rad:Float=34f,content:@Composable BoxScope.()->Unit){
+           val sc by animateFloatAsState(if(open)1f else 0f,spring(1f-.65f*(Cur.th["bounce"]?:.5f),230f),label="g")
+           val ink by animateColorAsState(if(Glass.light[id]==true)Color.Black else Color.White,label="i")
+           var r by remember{mutableStateOf(Rect.Zero)}
+           DisposableEffect(id){onDispose{Glass.m.remove(id)}}
+           if(sc>.02f){
+            SideEffect{if(r.width>0f)Glass.m[id]=floatArrayOf(r.center.x,r.center.y,r.width/2*sc,r.height/2*sc,min(rad*sc,min(r.width,r.height)/2*sc))}
+            Box(mod.onGloballyPositioned{r=it.boundsInWindow()}.graphicsLayer{scaleX=sc;scaleY=sc;alpha=min(1f,sc*1.4f)}){CompositionLocalProvider(LocalInk provides ink){content()}}
+           }else SideEffect{Glass.m.remove(id)}}
+
+          @Composable fun GB(t:String,on:Boolean=false,f:()->Unit){
+           val h=LocalHapticFeedback.current;val ink=LocalInk.current;var pr by remember{mutableStateOf(false)}
+           val sc by animateFloatAsState(if(pr).78f else 1f,spring(.35f,500f),label="b")
+           Box(Modifier.size(38.dp).graphicsLayer{scaleX=sc;scaleY=sc}.background(if(on)ink.copy(.2f)else Color.Transparent,CircleShape)
+            .pointerInput(Unit){detectTapGestures(onPress={pr=true;h.performHapticFeedback(HapticFeedbackType.TextHandleMove);tryAwaitRelease();pr=false},onTap={f()})},Alignment.Center){T(t,17)}}
+
+          @Composable fun SL(n:String,v:Float,r:ClosedFloatingPointRange<Float>,f:(Float)->Unit){
+           val h=LocalHapticFeedback.current;val ink=LocalInk.current
+           Row(verticalAlignment=Alignment.CenterVertically){T(n,12,Modifier.width(96.dp))
+            Slider(v,{if(abs(it-v)>(r.endInclusive-r.start)*.03f)h.performHapticFeedback(HapticFeedbackType.TextHandleMove);f(it)},Modifier.weight(1f),valueRange=r,
+             colors=SliderDefaults.colors(thumbColor=ink,activeTrackColor=ink.copy(.85f),inactiveTrackColor=ink.copy(.25f)))
+            T("%.2f".format(v),11,Modifier.width(44.dp))}}
+
+          @Composable fun Chip(s:String,on:Boolean,f:()->Unit){val ink=LocalInk.current;T(s,13,Modifier.clickable{f()}.background(if(on)ink.copy(.2f)else Color.Transparent,RoundedCornerShape(50)).padding(horizontal=10.dp,vertical=5.dp))}
+
+          @Composable fun BrushPanel(){
+           val gs=when(Cur.tool){2->listOf("Liquify");3->listOf("Lasso");else->listOf("Shape","Flow","Dynamics","Stroke","Texture","Color")}
+           var tab by remember{mutableStateOf("Shape")};val tb=if(tab in gs)tab else gs[0]
+           Column(Modifier.padding(14.dp).width(540.dp)){
+            Row(Modifier.horizontalScroll(rememberScrollState())){gs.forEach{Chip(it,it==tb){tab=it}}}
+            if(tb=="Liquify"){Row(Modifier.horizontalScroll(rememberScrollState())){listOf("Push","Twirl R","Twirl L","Bloat","Pucker","Restore","Smooth").forEachIndexed{i,n->Chip(n,Cur.lq==i){Cur.lq=i}}
+             Chip("Bake layer",false){Cur.q{Cur.layers.getOrNull(Cur.sel)?.let{Cur.r?.bake(it)}}};Chip("Bake all",false){Cur.q{Cur.layers.forEach{Cur.r?.bake(it)}}}}}
+            if(tb=="Lasso"){
+             Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Freehand",Cur.ls==0){Cur.ls=0;Cur.q{Cur.r?.lpts?.clear()}};Chip("Polygon",Cur.ls==1){Cur.ls=1;Cur.q{Cur.r?.lpts?.clear()}};Chip("New",Cur.lm==0){Cur.lm=0};Chip("Add",Cur.lm==1){Cur.lm=1};Chip("Subtract",Cur.lm==2){Cur.lm=2}}
+             Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Invert",false){Cur.q{Cur.r?.selInvert()}};Chip("Deselect",false){Cur.q{Cur.r?.deselect()}};Chip("Fill",false){Cur.q{Cur.r?.fillSel(false)}};Chip("Clear",false){Cur.q{Cur.r?.fillSel(true)}};if(Cur.ls==1)Chip("Close shape",false){Cur.q{Cur.r?.closePoly()}}}}
+            Column(Modifier.heightIn(max=190.dp).verticalScroll(rememberScrollState())){
+             if(tb=="Color"){SL("Hue",Cur.hue,0f..360f){Cur.hue=it};SL("Saturation",Cur.sat,0f..1f){Cur.sat=it};SL("Value",Cur.vl,0f..1f){Cur.vl=it}
+              Box(Modifier.fillMaxWidth().height(22.dp).background(Color(Cur.col()),RoundedCornerShape(11.dp)))}
+             DEFS.filter{it.g==tb}.forEach{d->SL(d.n,Cur.b[d.k]!!,d.lo..d.hi){Cur.b[d.k]=it}}}}}
+
+          @Composable fun Layers(openBlend:()->Unit){
+           val ink=LocalInk.current
+           fun mv(d:Int){val i=Cur.sel;val j=i+d;if(j in Cur.layers.indices){Cur.layers.add(j,Cur.layers.removeAt(i));Cur.sel=j}}
+           Column(Modifier.padding(12.dp).width(250.dp)){
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){
+             GB("+"){Cur.layers.add(Layer("Layer ${Cur.layers.size}"));Cur.sel=Cur.layers.lastIndex}
+             GB("-"){if(Cur.layers.size>1){val l=Cur.layers.removeAt(Cur.sel);Cur.r?.trash?.add(l);Cur.sel=Cur.sel.coerceAtMost(Cur.layers.lastIndex)}}
+             GB("^"){mv(1)};GB("v"){mv(-1)}}
+            LazyColumn(Modifier.heightIn(max=190.dp)){items(Cur.layers.indices.reversed().toList()){i->
+             val l=Cur.layers.getOrNull(i)
+             if(l!=null)Row(Modifier.fillMaxWidth().clickable{Cur.sel=i}.background(if(i==Cur.sel)ink.copy(.18f)else Color.Transparent,RoundedCornerShape(12.dp)).padding(8.dp),verticalAlignment=Alignment.CenterVertically){
+              T(l.name,13,Modifier.weight(1f));T(if(l.liq)"[L]" else "",12);T(if(l.vis)"o" else "-",16,Modifier.clickable{l.vis=!l.vis}.padding(6.dp))}}}
+            Cur.layers.getOrNull(Cur.sel)?.let{l->
+             SL("Opacity",l.op,0f..1f){l.op=it}
+             Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){Chip(BLENDS[l.mode].first,true,openBlend);Chip("Lock a",l.lock){l.lock=!l.lock};Chip("Liquify",l.liq){l.liq=!l.liq}}}}}
+
+          @Composable fun ThemePanel(){
+           Column(Modifier.padding(14.dp).width(420.dp)){
+            T("Glass theme",15,Modifier.padding(bottom=4.dp))
+            Row(Modifier.horizontalScroll(rememberScrollState())){PRESETS.keys.forEach{n->Chip(n,false){PRESETS[n]!!.forEachIndexed{i,v->Cur.th[THEME[i].k]=v}}}}
+            Column(Modifier.heightIn(max=300.dp).verticalScroll(rememberScrollState())){THEME.forEach{d->SL(d.n,Cur.th[d.k]!!,d.lo..d.hi){Cur.th[d.k]=it}}}}}
+
+          @Composable fun App(){
+           Box(Modifier.fillMaxSize()){
+            AndroidView({CanvasView(it)},Modifier.fillMaxSize())
+            var lp by remember{mutableStateOf(true)};var bp by remember{mutableStateOf(true)};var bm by remember{mutableStateOf(false)};var tp by remember{mutableStateOf(false)}
+            Glass(1,true,Modifier.align(Alignment.TopCenter).padding(top=16.dp)){Row(Modifier.padding(8.dp)){
+             GB("B",Cur.tool==0){Cur.tool=0};GB("E",Cur.tool==1){Cur.tool=1};GB("~",Cur.tool==2){Cur.tool=2};GB("[]",Cur.tool==3){Cur.tool=3};GB("L",lp){lp=!lp};GB("S",bp){bp=!bp};GB("G",tp){tp=!tp};GB("0"){Cur.px=0f;Cur.py=0f;Cur.rot=0f;Cur.sc=(Cur.view?.let{min(it.width,it.height)*.9f/2048f}?:.4f);Cur.vd=true}}}
+            Glass(2,lp,Modifier.align(Alignment.CenterEnd).padding(end=14.dp)){Layers{bm=true}}
+            Glass(3,bp,Modifier.align(Alignment.BottomCenter).padding(14.dp)){BrushPanel()}
+            Glass(5,tp,Modifier.align(Alignment.Center)){ThemePanel()}
+            Glass(4,bm,Modifier.align(Alignment.Center)){LazyColumn(Modifier.padding(14.dp).width(230.dp).height(380.dp)){items(BLENDS.size){i->
+             T(BLENDS[i].first,15,Modifier.fillMaxWidth().clickable{Cur.layers.getOrNull(Cur.sel)?.mode=i;bm=false}.padding(9.dp))}}}
+           }}
+          EOF_6
+      - name: Build debug APK
+        run: cd liquidart && gradle assembleDebug --parallel --build-cache --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiquidArt-debug-apk
+          path: liquidart/app/build/outputs/apk/debug/*.apk
