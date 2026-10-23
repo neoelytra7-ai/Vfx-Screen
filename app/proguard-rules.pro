@@ -1,0 +1,3 @@
+-assumenosideeffects class android.util.Log { *; }
+-repackageclasses ''
+-allowaccessmodification
