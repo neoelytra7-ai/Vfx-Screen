@@ -1,0 +1,450 @@
+name: GPUFORGE X - Build APK and Project ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpuforge-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/java/com/gpuforge/x app/src/main/res/values
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "GPUFORGE-X"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.gpuforge.x"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.gpuforge.x"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.vulkan.level" android:required="false" />
+              <uses-feature android:name="android.hardware.vulkan.version" android:required="false" />
+              <uses-feature android:glEsVersion="0x00030000" android:required="false" />
+              <application
+                  android:allowBackup="false"
+                  android:label="GPUFORGE X"
+                  android:theme="@style/AppTheme"
+                  android:usesCleartextTraffic="false">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#080A12</item>
+                  <item name="android:navigationBarColor">#080A12</item>
+                  <item name="android:colorAccent">#A78BFA</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/gpuforge/x/MainActivity.kt <<'EOF'
+          package com.gpuforge.x
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Debug
+          import android.os.Process
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import android.app.ActivityManager
+          import android.content.pm.PackageManager
+          import android.os.HardwarePropertiesManager
+          import java.util.Locale
+          import kotlin.concurrent.thread
+
+          class MainActivity : Activity() {
+              private val bg = Color.rgb(8, 10, 18)
+              private val panel = Color.rgb(18, 21, 35)
+              private val purple = Color.rgb(167, 139, 250)
+              private val mint = Color.rgb(110, 231, 183)
+              private val white = Color.rgb(240, 242, 250)
+              private val muted = Color.rgb(155, 163, 184)
+              private lateinit var root: LinearLayout
+              private lateinit var gpuValue: TextView
+              private lateinit var vulkanValue: TextView
+              private lateinit var memoryValue: TextView
+              private lateinit var thermalValue: TextView
+              private lateinit var modelValue: TextView
+              private lateinit var statusValue: TextView
+              private var selectedModel: Uri? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = bg
+                  window.navigationBarColor = bg
+                  buildUi()
+                  refreshDiagnostics()
+              }
+
+              private fun buildUi() {
+                  val scroll = ScrollView(this).apply {
+                      setBackgroundColor(bg)
+                      isFillViewport = true
+                  }
+                  root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(20), dp(22), dp(20), dp(28))
+                  }
+                  scroll.addView(root)
+                  setContentView(scroll)
+
+                  text("GPUFORGE", 13f, purple, true, 2)
+                  text("X", 36f, white, true, 0)
+                  text("MOBILE AI • GPU DIAGNOSTICS", 11f, muted, true, 18)
+
+                  val hero = card()
+                  hero.addView(label("DEVICE PROFILE"))
+                  gpuValue = value("Detecting graphics hardware…", 20f)
+                  hero.addView(gpuValue)
+                  hero.addView(body("Read-only diagnostics for your Android graphics stack. No fake boost switches, no hidden overclocking."))
+                  root.addView(hero)
+
+                  val grid = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  val left = card(attach = false).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) } }
+                  val right = card(attach = false).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) } }
+                  left.addView(label("VULKAN"))
+                  vulkanValue = value("Checking…", 17f)
+                  left.addView(vulkanValue)
+                  left.addView(body("API availability"))
+                  right.addView(label("MEMORY"))
+                  memoryValue = value("Checking…", 17f)
+                  right.addView(memoryValue)
+                  right.addView(body("System memory estimate"))
+                  grid.addView(left); grid.addView(right)
+                  root.addView(grid)
+
+                  val thermal = card()
+                  thermal.addView(label("THERMAL STATUS"))
+                  thermalValue = value("Checking…", 18f)
+                  thermal.addView(thermalValue)
+                  thermal.addView(body("Android exposes limited thermal state; exact GPU temperature is not available on every device."))
+                  root.addView(thermal)
+
+                  val model = card()
+                  model.addView(label("LOCAL MODEL FILE"))
+                  modelValue = value("No model selected", 16f)
+                  model.addView(modelValue)
+                  model.addView(body("Choose a model file to inspect its name and size. Importing a file does not execute it; inference needs a compatible runtime and supported operators."))
+                  val choose = button("SELECT MODEL FILE")
+                  choose.setOnClickListener {
+                      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                          addCategory(Intent.CATEGORY_OPENABLE)
+                          type = "*/*"
+                      }
+                      startActivityForResult(intent, 41)
+                  }
+                  model.addView(choose)
+                  root.addView(model)
+
+                  val engine = card()
+                  engine.addView(label("ENGINE STATUS"))
+                  statusValue = value("Diagnostics only • inference runtime not bundled", 16f)
+                  engine.addView(statusValue)
+                  engine.addView(body("Android does not provide a universal switch that forces every AI model onto the GPU. Vulkan, NNAPI, and vendor delegates support different operations. This build intentionally reports capabilities rather than claiming unsupported acceleration."))
+                  val refresh = button("REFRESH DIAGNOSTICS")
+                  refresh.setOnClickListener { refreshDiagnostics() }
+                  engine.addView(refresh)
+                  root.addView(engine)
+
+                  text("GPUFORGE X  /  BUILD 1.0.0", 10f, muted, true, 14)
+              }
+
+              private fun refreshDiagnostics() {
+                  val gl = try {
+                      val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                      manager.deviceConfigurationInfo.glEsVersion ?: "Unknown"
+                  } catch (_: Exception) { "Unknown" }
+
+                  val vulkan = try {
+                      val hasVulkan = packageManager.hasSystemFeature("android.hardware.vulkan.level") ||
+                          packageManager.hasSystemFeature("android.hardware.vulkan.version")
+                      if (hasVulkan) {
+                          val version = packageManager.getSystemAvailableFeatures()
+                              .firstOrNull { it.name == "android.hardware.vulkan.version" }?.version
+                          if (version != null && version > 0) {
+                              "AVAILABLE\n${String.format(Locale.US, "%d.%d", version shr 22, (version shr 12) and 0x3ff)}"
+                          } else "AVAILABLE"
+                      } else "NOT REPORTED"
+                  } catch (_: Exception) { "UNKNOWN" }
+
+                  val mem = try {
+                      val mi = android.app.ActivityManager.MemoryInfo()
+                      (getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(mi)
+                      val avail = mi.availMem / (1024L * 1024L)
+                      val total = if (Build.VERSION.SDK_INT >= 16) mi.totalMem / (1024L * 1024L) else -1
+                      if (total > 0) "${avail} MB free\n${total} MB total" else "${avail} MB free"
+                  } catch (_: Exception) { "Unavailable" }
+
+                  gpuValue.text = "${Build.MANUFACTURER} ${Build.MODEL}\nOpenGL ES $gl"
+                  vulkanValue.text = vulkan
+                  memoryValue.text = mem
+                  thermalValue.text = thermalDescription()
+              }
+
+              private fun thermalDescription(): String {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      return when (getSystemService(Context.POWER_SERVICE).let {
+                          (it as android.os.PowerManager).currentThermalStatus
+                      }) {
+                          0 -> "NOMINAL"
+                          1 -> "LIGHT"
+                          2 -> "MODERATE"
+                          3 -> "SEVERE"
+                          4 -> "CRITICAL"
+                          5 -> "EMERGENCY"
+                          6 -> "SHUTDOWN"
+                          else -> "UNKNOWN"
+                      }
+                  }
+                  return "API unavailable on this Android version"
+              }
+
+              @Deprecated("Deprecated in Android API")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 41 && resultCode == RESULT_OK) {
+                      val uri = data?.data ?: return
+                      selectedModel = uri
+                      val name = uri.lastPathSegment?.substringAfterLast('/') ?: "Selected file"
+                      thread {
+                          val size = try {
+                              contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+                          } catch (_: Exception) { -1L }
+                          runOnUiThread {
+                              val sizeText = if (size >= 0) {
+                                  if (size >= 1024L * 1024L) String.format(Locale.US, "%.2f MB", size / (1024.0 * 1024.0))
+                                  else "${size / 1024L} KB"
+                              } else "size unavailable"
+                              modelValue.text = "$name\n$sizeText • selected, not loaded"
+                              Toast.makeText(this, "Model file selected. No inference runtime is bundled.", Toast.LENGTH_LONG).show()
+                          }
+                      }
+                  }
+              }
+
+              private fun card(attach: Boolean = true): LinearLayout {
+                  val box = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(16), dp(16), dp(16))
+                      setBackgroundColor(panel)
+                  }
+                  if (attach) {
+                      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                      lp.bottomMargin = dp(12)
+                      root.addView(box, lp)
+                  }
+                  return box
+              }
+
+              private fun text(s: String, size: Float, color: Int, bold: Boolean, top: Int) {
+                  val v = TextView(this).apply {
+                      text = s
+                      textSize = size
+                      setTextColor(color)
+                      if (bold) setTypeface(typeface, Typeface.BOLD)
+                      letterSpacing = if (size <= 13f) 0.08f else 0.01f
+                      setPadding(0, dp(top), 0, dp(6))
+                  }
+                  root.addView(v)
+              }
+
+              private fun label(s: String) = TextView(this).apply {
+                  text = s
+                  textSize = 10f
+                  letterSpacing = 0.12f
+                  setTextColor(purple)
+                  setTypeface(typeface, Typeface.BOLD)
+                  setPadding(0, 0, 0, dp(9))
+              }
+
+              private fun value(s: String, size: Float) = TextView(this).apply {
+                  text = s
+                  textSize = size
+                  setTextColor(white)
+                  setTypeface(typeface, Typeface.BOLD)
+                  setPadding(0, 0, 0, dp(8))
+              }
+
+              private fun body(s: String) = TextView(this).apply {
+                  text = s
+                  textSize = 12f
+                  setTextColor(muted)
+                  setLineSpacing(dp(3).toFloat(), 1.0f)
+                  setPadding(0, dp(4), 0, dp(8))
+              }
+
+              private fun button(s: String) = Button(this).apply {
+                  text = s
+                  textSize = 11f
+                  setTextColor(Color.BLACK)
+                  setBackgroundColor(mint)
+                  setPadding(dp(12), dp(8), dp(12), dp(8))
+                  isAllCaps = false
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+          }
+          EOF
+
+          cat > README.md <<'EOF'
+          # GPUFORGE X
+
+          Android GPU capability and thermal diagnostics starter project.
+
+          ## Build
+          This repository's `.github/workflows/build.yml` generates the project, builds a debug APK, and uploads both the APK and a ZIP of the generated source project as GitHub Actions artifacts.
+
+          ## Accuracy / limitations
+          - The app reports Android-visible graphics/API capabilities and system memory. It does not claim to measure actual GPU utilization.
+          - Android does not provide a universal API to force every AI model to run entirely on the GPU.
+          - Selecting a model file only inspects its filename and size. This starter does not bundle an inference runtime or execute model inference.
+          - A production inference engine must be selected per model format (for example, ONNX, TFLite, or GGUF) and tested against the device's supported operators and driver.
+          - No overclocking, voltage changes, thermal bypass, or privileged tuning is attempted.
+          EOF
+
+      - name: Build debug APK
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Package generated project source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/GPUFORGE-X-debug.apk
+          zip -r dist/GPUFORGE-X-Project.zip \
+            settings.gradle.kts build.gradle.kts gradle.properties README.md app \
+            -x "app/build/*" "app/.gradle/*"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GPUFORGE-X-APK
+          path: dist/GPUFORGE-X-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload source project ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: GPUFORGE-X-Project-ZIP
+          path: dist/GPUFORGE-X-Project.zip
+          if-no-files-found: error
+          retention-days: 14
