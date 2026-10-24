@@ -1,0 +1,2436 @@
+# .github/workflows/apk.yml  ·  NerdFM — build APK, download dari tab Actions > run > Artifacts
+# Repo kosong -> source app dibuat otomatis & di-commit balik. Edit source di repo untuk iterasi berikutnya.
+# Versi: 1.0.<nomor run>. Tanda tangan: secrets KS_B64 + KS_PASS (opsional; tanpa itu pakai kunci cache).
+name: NerdFM-APK
+on:
+  push: {branches: [main], paths-ignore: ['**.md', '.nerdfm']}
+  workflow_dispatch:
+    inputs:
+      rescaffold: {type: boolean, default: false, description: 'overwrite sources with this YAML scaffold'}
+concurrency: {group: 'apk-${{ github.ref }}', cancel-in-progress: true}
+permissions: {contents: write}
+env:
+  SV: '4'
+  GRADLE_OPTS: -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KS: ${{ github.workspace }}/ks.jks
+      KS_PASS: ${{ secrets.KS_PASS || 'nerdfm-ci-key' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: '8.9'}
+      - uses: actions/cache@v4
+        with: {path: ks.jks, key: 'ks-${{ github.repository }}-v1'}
+
+      - name: Keystore
+        env: {B64: '${{ secrets.KS_B64 }}'}
+        run: |
+          [ -s ks.jks ] && exit 0
+          if [ -n "$B64" ]; then echo "$B64" | base64 -d > ks.jks
+          else keytool -genkeypair -keystore ks.jks -alias k -keyalg RSA -keysize 2048 -validity 36500 \
+            -storepass "$KS_PASS" -keypass "$KS_PASS" -dname "CN=NerdFM"; fi
+
+      - name: Version
+        id: v
+        run: echo "n=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap
+        id: b
+        env: {FORCE: '${{ inputs.rescaffold }}'}
+        run: |
+          [ "$(cat .nerdfm 2>/dev/null)" = "$SV" ] && [ "$FORCE" != true ] && exit 0
+          if [ -f settings.gradle.kts ] && [ ! -f .nerdfm ] && ! grep -q NerdFM settings.gradle.kts; then echo "foreign project: skip scaffold"; exit 0; fi
+          echo s=1 >> "$GITHUB_OUTPUT"
+          cat > .gitignore <<'NFM_EOF'
+          build/
+          .gradle/
+          *.jks
+          *.apk
+          local.properties
+          .idea/
+          NFM_EOF
+          cat > build.gradle.kts <<'NFM_EOF'
+          plugins{
+           id("com.android.application") version "8.5.2" apply false
+           id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+           id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+          }
+          NFM_EOF
+          cat > gradle.properties <<'NFM_EOF'
+          org.gradle.jvmargs=-Xmx3g -XX:+UseParallelGC
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.incremental=true
+          NFM_EOF
+          cat > settings.gradle.kts <<'NFM_EOF'
+          pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}
+          dependencyResolutionManagement{repositories{google();mavenCentral()}}
+          rootProject.name="NerdFM"
+          include(":app")
+          NFM_EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'NFM_EOF'
+          import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+          plugins{id("com.android.application");id("org.jetbrains.kotlin.android");id("org.jetbrains.kotlin.plugin.compose")}
+          android{
+           namespace="dev.nerd.fm";compileSdk=34
+           defaultConfig{applicationId="dev.nerd.fm";minSdk=24;targetSdk=34
+            versionCode=(findProperty("vCode") as String?)?.toInt()?:1
+            versionName=(findProperty("vName") as String?)?:"0.0.1"
+            resourceConfigurations+=listOf("en")}
+           signingConfigs{create("r"){storeFile=file(System.getenv("KS")?:"ks.jks");storePassword=System.getenv("KS_PASS");keyAlias="k";keyPassword=System.getenv("KS_PASS")}}
+           buildTypes{release{isMinifyEnabled=true;isShrinkResources=true;signingConfig=signingConfigs["r"]
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"),"proguard-rules.pro")}}
+           buildFeatures{compose=true}
+           lint{checkReleaseBuilds=false;abortOnError=false}
+           packaging{resources.excludes+=listOf("/META-INF/{AL2.0,LGPL2.1}","/META-INF/*.version","DebugProbesKt.bin","kotlin-tooling-metadata.json")}
+          }
+          kotlin{jvmToolchain(17)}
+          tasks.withType<KotlinCompile>().configureEach{compilerOptions.freeCompilerArgs.addAll("-Xno-param-assertions","-Xno-call-assertions","-Xno-receiver-assertions")}
+          dependencies{
+           implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+           implementation("androidx.compose.material3:material3")
+           implementation("androidx.activity:activity-compose:1.9.2")
+           implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+           implementation("androidx.profileinstaller:profileinstaller:1.3.1")
+          }
+          NFM_EOF
+          mkdir -p app
+          cat > app/proguard-rules.pro <<'NFM_EOF'
+          -assumenosideeffects class android.util.Log { *; }
+          -repackageclasses ''
+          -allowaccessmodification
+          NFM_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'NFM_EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+           <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+           <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+           <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
+           <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+           <application android:label="NerdFM" android:icon="@drawable/ic" android:allowBackup="false" android:requestLegacyExternalStorage="true" android:theme="@android:style/Theme.Material.NoActionBar">
+            <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+            </activity>
+            <provider android:name="androidx.core.content.FileProvider" android:authorities="dev.nerd.fm.fp" android:exported="false" android:grantUriPermissions="true">
+             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/paths"/>
+            </provider>
+           </application>
+          </manifest>
+          NFM_EOF
+          mkdir -p app/src/main/java/dev/nerd/fm
+          cat > app/src/main/java/dev/nerd/fm/Cfg.kt <<'NFM_EOF'
+          package dev.nerd.fm
+
+          import android.content.Context
+          import android.content.SharedPreferences
+          import android.graphics.Typeface
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontFamily
+          import kotlin.math.sqrt
+          import kotlin.reflect.KProperty
+
+          class Pal(val name: String, val bg: Color, val fg: Color, val dim: Color, val hue: Float, val sat: Float, val light: Boolean = false)
+
+          object Th {
+            val pals = listOf(
+              Pal("MOCHI", Color(0xFF1C1423), Color(0xFFFFEEF6), Color(0xFFB59AB0), 335f, .45f),
+              Pal("AMOLED", Color.Black, Color.White, Color(0xFF9A9A9A), 165f, 1f),
+              Pal("MINT", Color(0xFF0E1F1C), Color(0xFFEFFFFA), Color(0xFF8FB5AC), 160f, .5f),
+              Pal("PEACH", Color(0xFF231815), Color(0xFFFFF1E8), Color(0xFFBFA092), 20f, .5f),
+              Pal("LAVENDER", Color(0xFF16132A), Color(0xFFF2EEFF), Color(0xFFA39BC7), 260f, .45f),
+              Pal("SAKURA", Color(0xFFFFF4F8), Color(0xFF4A3040), Color(0xFF9C7F8F), 335f, .55f, true),
+              Pal("CREAM", Color(0xFFFFF9EC), Color(0xFF45392C), Color(0xFF9A8B78), 28f, .6f, true)
+            )
+            var pal by mutableStateOf(pals[0])
+            var cap by mutableIntStateOf(2)
+            val fg: Color get() = pal.fg
+            val dim: Color get() = pal.dim
+            val bg: Color get() = pal.bg
+          }
+
+          class Pv<T : Any>(private val sp: SharedPreferences, private val k: String, private val d: T) {
+            private var s by mutableStateOf(read())
+            @Suppress("UNCHECKED_CAST")
+            private fun read(): T = when (d) {
+              is Float -> sp.getFloat(k, d) as T
+              is Int -> sp.getInt(k, d) as T
+              is Long -> sp.getLong(k, d) as T
+              is Boolean -> sp.getBoolean(k, d) as T
+              is String -> (sp.getString(k, d) ?: d) as T
+              else -> d
+            }
+            fun put(v: T) {
+              s = v
+              val e = sp.edit()
+              when (v) {
+                is Float -> e.putFloat(k, v)
+                is Int -> e.putInt(k, v)
+                is Long -> e.putLong(k, v)
+                is Boolean -> e.putBoolean(k, v)
+                is String -> e.putString(k, v)
+              }
+              e.apply()
+            }
+            fun reset() = put(d)
+            operator fun getValue(t: Any?, p: KProperty<*>): T = s
+            operator fun setValue(t: Any?, p: KProperty<*>, v: T) = put(v)
+          }
+
+          private val fRound = FontFamily(Typeface.create("sans-serif-rounded", Typeface.NORMAL))
+          private val fCasual = FontFamily(Typeface.create("casual", Typeface.NORMAL))
+
+          class Cfg(ctx: Context) {
+            private val sp = ctx.getSharedPreferences("cfg", 0)
+            private val all = ArrayList<Pv<*>>()
+            private fun <T : Any> pv(k: String, d: T): Pv<T> = Pv(sp, k, d).also { all.add(it) }
+
+            var hue by pv("hue", 335f)
+            var sat by pv("sat", .45f)
+            var font by pv("font", 0)
+            var fs by pv("fs", 1f)
+            var pad by pv("pad", 7f)
+            var rad by pv("rad", 16f)
+            var anim by pv("anim", 2)
+            var amp by pv("amp", 4f)
+            var spd by pv("spd", 2.4f)
+            var stag by pv("stag", 16f)
+            var hidden by pv("hidden", false)
+            var sort by pv("sort", 0)
+            var desc by pv("desc", false)
+            var cSize by pv("cSize", true)
+            var cDate by pv("cDate", true)
+            var cPerm by pv("cPerm", false)
+            var dual by pv("dual", true)
+            var grid by pv("grid", false)
+            var haptic by pv("haptic", true)
+            var sparkle by pv("sparkle", true)
+            var auto by pv("auto", true)
+            var preset by Pv(sp, "preset", 0)
+            var bm by Pv(sp, "bm", "")
+            var xp by Pv(sp, "xp", 0)
+            var cleaned by Pv(sp, "cleaned", 0L)
+            var streak by Pv(sp, "streak", 0)
+            var lastDay by Pv(sp, "lastDay", 0)
+
+            val fx: Int get() = minOf(anim, Th.cap)
+            private val lt: Boolean get() = Th.pal.light
+            val ac: Color get() = Color.hsv(hue.coerceIn(0f, 360f), sat.coerceIn(0f, 1f).let { if (lt) maxOf(it, .5f) else it }, if (lt) .86f else 1f)
+            val ac2: Color get() = Color.hsv((hue + 50f) % 360f, (sat.coerceIn(0f, 1f) * .9f).let { if (lt) maxOf(it, .45f) else it }, if (lt) .88f else 1f)
+            val bgc: Color get() = Th.bg
+            val ff: FontFamily get() = when (font) { 0 -> fRound; 1 -> fCasual; 2 -> FontFamily.SansSerif; 3 -> FontFamily.Monospace; else -> FontFamily.Serif }
+            val level: Int get() = sqrt(xp / 12.0).toInt() + 1
+
+            fun applyPreset(i: Int) { preset = i; Th.pal = Th.pals[i]; hue = Th.pal.hue; sat = Th.pal.sat }
+            fun addXp(n: Int) { if (n > 0) xp += n }
+            fun reset() { all.forEach { it.reset() }; applyPreset(0) }
+
+            init {
+              Th.pal = Th.pals[preset.coerceIn(0, Th.pals.size - 1)]
+              val today = (System.currentTimeMillis() / 86400000L).toInt()
+              if (lastDay != today) { streak = if (lastDay == today - 1) streak + 1 else 1; lastDay = today }
+            }
+          }
+          NFM_EOF
+          mkdir -p app/src/main/java/dev/nerd/fm
+          cat > app/src/main/java/dev/nerd/fm/Fx.kt <<'NFM_EOF'
+          package dev.nerd.fm
+
+          import android.os.Build
+          import androidx.compose.runtime.Immutable
+          import android.os.Environment
+          import android.os.StatFs
+          import android.webkit.MimeTypeMap
+          import kotlinx.coroutines.currentCoroutineContext
+          import kotlinx.coroutines.ensureActive
+          import java.io.*
+          import java.security.MessageDigest
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          import java.util.zip.*
+          import kotlin.math.min
+
+          @Immutable class E(val f: File) {
+            val dir = f.isDirectory
+            val n: String = f.name
+            val sz = if (dir) 0L else f.length()
+            val mt = f.lastModified()
+            val ex = if (dir) "" else n.substringAfterLast('.', "").lowercase()
+            val pm = (if (f.canRead()) "r" else "-") + (if (f.canWrite()) "w" else "-") + (if (f.canExecute()) "x" else "-")
+          }
+
+          class Q(raw: String, rx: Boolean, private val cs: Boolean) {
+            private val inc = ArrayList<(String) -> Boolean>()
+            private val exc = ArrayList<(String) -> Boolean>()
+            var minS = 0L; var maxS = Long.MAX_VALUE
+            var newer = Long.MAX_VALUE; var older = 0L
+            val exts = HashSet<String>()
+            var type = ""
+            var content: String? = null
+            var depth = 64
+            var onlyD = false; var onlyF = false; var bad = false
+
+            private fun mk(b: String, rx: Boolean): (String) -> Boolean {
+              val opt = if (cs) emptySet() else setOf(RegexOption.IGNORE_CASE)
+              if (rx) { val r = Regex(b, opt); return { r.containsMatchIn(it) } }
+              if (b.contains('*') || b.contains('?')) { val r = Regex(Fx.glob(b), opt); return { r.matches(it) } }
+              return { it.contains(b, !cs) }
+            }
+
+            init {
+              val num = Regex("^(size|age)([<>])(\\d+(?:\\.\\d+)?)([a-z]*)$")
+              for (t in raw.trim().split(Regex("\\s+"))) {
+                if (t.isEmpty()) continue
+                val m = num.find(t)
+                if (m != null) {
+                  val (k, o, nv, u) = m.destructured
+                  val v = nv.toDouble()
+                  if (k == "size") {
+                    val mul = when (u) { "k", "kb" -> 1024.0; "m", "mb" -> 1048576.0; "g", "gb" -> 1073741824.0; else -> 1.0 }
+                    val b = (v * mul).toLong()
+                    if (o == ">") minS = b else maxS = b
+                  } else {
+                    val mul = when (u) { "min" -> 60e3; "h" -> 3.6e6; "w" -> 6.048e8; "mo" -> 2.592e9; "y" -> 3.1536e10; else -> 8.64e7 }
+                    val ms = (v * mul).toLong()
+                    if (o == "<") newer = ms else older = ms
+                  }
+                  continue
+                }
+                when {
+                  t.startsWith("ext:") -> exts.addAll(t.substring(4).lowercase().split(',').map { it.trim('.') })
+                  t.startsWith("type:") -> type = t.substring(5).lowercase()
+                  t.startsWith("c:") -> content = t.substring(2)
+                  t.startsWith("depth:") -> depth = t.substring(6).toIntOrNull() ?: 64
+                  t == "dir" -> onlyD = true
+                  t == "file" -> onlyF = true
+                  else -> {
+                    val neg = t.length > 1 && t[0] == '-'
+                    val b = if (neg) t.substring(1) else t
+                    val fn = try { mk(b, rx) } catch (e: Exception) { bad = true; null }
+                    if (fn != null) (if (neg) exc else inc).add(fn)
+                  }
+                }
+              }
+            }
+
+            fun ok(f: File, d: Boolean, now: Long): Boolean {
+              if (onlyD && !d) return false
+              if (onlyF && d) return false
+              val n = f.name
+              for (p in inc) if (!p(n)) return false
+              for (p in exc) if (p(n)) return false
+              if (exts.isNotEmpty() || type.isNotEmpty()) {
+                if (d) return false
+                val x = f.extension.lowercase()
+                if (exts.isNotEmpty() && x !in exts) return false
+                if (type.isNotEmpty() && x !in (Fx.TYPES[type] ?: emptySet())) return false
+              }
+              if (minS > 0 || maxS != Long.MAX_VALUE) { if (d) return false; val s = f.length(); if (s < minS || s > maxS) return false }
+              if (newer != Long.MAX_VALUE || older > 0) { val a = now - f.lastModified(); if (a > newer || a < older) return false }
+              val c = content
+              if (c != null) { if (d || f.length() > 4_000_000) return false; if (!Fx.grep(f, c, cs)) return false }
+              return true
+            }
+          }
+
+          object Fx {
+            val IMG = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "avif")
+            val VID = setOf("mp4", "mkv", "webm", "avi", "mov", "3gp", "flv")
+            val AUD = setOf("mp3", "flac", "wav", "ogg", "m4a", "aac", "opus", "wma")
+            val DOC = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "odt", "epub", "csv")
+            val ARC = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "jar", "cbz")
+            val CODE = setOf("kt", "java", "py", "js", "ts", "c", "cpp", "h", "rs", "go", "sh", "json", "xml", "yml", "yaml", "html", "css", "gradle", "kts", "toml", "sql")
+            val TXT = CODE + setOf("txt", "md", "csv", "log", "ini", "conf", "cfg", "properties", "gitignore")
+            val MEDIA = IMG + VID + AUD
+            val TYPES = mapOf("img" to IMG, "vid" to VID, "aud" to AUD, "doc" to DOC, "arc" to ARC, "apk" to setOf("apk", "xapk", "apks"), "code" to CODE)
+            private val df = SimpleDateFormat("yy-MM-dd HH:mm", Locale.US)
+
+            fun dt(t: Long): String = df.format(Date(t))
+            fun sz(n: Long): String {
+              if (n < 1024) return "${n}B"
+              var v = n.toDouble(); var i = -1
+              while (v >= 1024 && i < 3) { v /= 1024; i++ }
+              return String.format(Locale.US, "%.1f%c", v, "KMGT"[i])
+            }
+            fun kind(e: E): Int = if (e.dir) 0 else when { e.ex in IMG -> 1; e.ex in VID -> 2; e.ex in AUD -> 3; e.ex in ARC -> 4; e.ex == "apk" -> 5; e.ex in CODE -> 6; e.ex in DOC -> 7; else -> 8 }
+            fun gl(e: E): String = if (e.dir) "▸" else when (e.ex) {
+              in IMG -> "◧"; in VID -> "▶"; in AUD -> "♪"; in ARC -> "▤"; "apk" -> "◆"; in CODE -> "‹›"; in DOC -> "≡"; else -> "·"
+            }
+            fun glob(g: String): String = buildString {
+              for (c in g) when (c) { '*' -> append(".*"); '?' -> append('.'); else -> append(Regex.escape(c.toString())) }
+            }
+            fun mime(f: File): String = MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "*/*"
+            fun stor(): Pair<Long, Long> { val s = StatFs(Environment.getExternalStorageDirectory().path); return s.totalBytes to s.availableBytes }
+            fun sym(f: File): Boolean = Build.VERSION.SDK_INT >= 26 && java.nio.file.Files.isSymbolicLink(f.toPath())
+
+            fun list(d: File, hid: Boolean, sort: Int, desc: Boolean): List<E> {
+              val a = d.listFiles() ?: return emptyList()
+              val l = ArrayList<E>(a.size)
+              for (f in a) if (hid || !f.name.startsWith(".")) l.add(E(f))
+              val c: Comparator<E> = when (sort) {
+                1 -> compareBy<E> { it.sz }
+                2 -> compareBy<E> { it.mt }
+                3 -> compareBy<E>({ it.ex }, { it.n.lowercase() })
+                else -> compareBy<E> { it.n.lowercase() }
+              }
+              return l.sortedWith(compareBy<E> { !it.dir }.then(if (desc) c.reversed() else c))
+            }
+
+            fun uniq(f: File): File {
+              if (!f.exists()) return f
+              val b = f.nameWithoutExtension
+              val x = if (f.extension.isEmpty()) "" else "." + f.extension
+              for (i in 1..9999) { val c = File(f.parentFile, "$b ($i)$x"); if (!c.exists()) return c }
+              return File(f.parentFile, "$b-${System.currentTimeMillis()}$x")
+            }
+
+            fun cp(s: File, d: File) {
+              if (s.isDirectory && d.canonicalPath.startsWith(s.canonicalPath + File.separator)) throw IOException("into itself")
+              cp0(s, d)
+            }
+            private fun cp0(s: File, d: File) {
+              if (s.isDirectory) { d.mkdirs(); s.listFiles()?.forEach { cp0(it, File(d, it.name)) } }
+              else {
+                d.parentFile?.mkdirs()
+                BufferedInputStream(FileInputStream(s), 65536).use { i -> BufferedOutputStream(FileOutputStream(d), 65536).use { o -> i.copyTo(o, 65536) } }
+                d.setLastModified(s.lastModified())
+              }
+            }
+            fun mv(s: File, d: File) { if (!s.renameTo(d)) { cp(s, d); s.deleteRecursively() } }
+
+            fun du(f: File, depth: Int = 0): Long {
+              if (!f.isDirectory) return f.length()
+              if (depth > 40) return 0L
+              var t = 0L
+              f.listFiles()?.forEach { t += du(it, depth + 1) }
+              return t
+            }
+
+            fun hash(f: File, alg: String, lim: Long): String = try {
+              val m = MessageDigest.getInstance(alg)
+              var left = lim
+              f.inputStream().use { i ->
+                val b = ByteArray(65536)
+                while (left > 0) { val n = i.read(b, 0, min(b.size.toLong(), left).toInt()); if (n < 0) break; m.update(b, 0, n); left -= n }
+              }
+              m.digest().joinToString("") { "%02x".format(it) }
+            } catch (e: Exception) { "!" + f.path }
+
+            fun grep(f: File, c: String, cs: Boolean): Boolean = try {
+              f.inputStream().buffered().use { i ->
+                val h = ByteArray(512)
+                val n = i.read(h)
+                var bin = false
+                for (k in 0 until n) if (h[k].toInt() == 0) bin = true
+                if (bin) false else f.bufferedReader().useLines { s -> s.any { it.contains(c, !cs) } }
+              }
+            } catch (e: Exception) { false }
+
+            suspend fun search(root: File, q: Q, hid: Boolean, max: Int, hit: suspend (E) -> Unit, prog: (Int) -> Unit) {
+              val st = ArrayList<Pair<File, Int>>(); st.add(root to 0)
+              var n = 0; var h = 0
+              val now = System.currentTimeMillis()
+              while (st.isNotEmpty() && h < max) {
+                currentCoroutineContext().ensureActive()
+                val (d, lv) = st.removeAt(st.lastIndex)
+                val ch = d.listFiles() ?: continue
+                for (f in ch) {
+                  if (!hid && f.name.startsWith(".")) continue
+                  n++; if ((n and 255) == 0) prog(n)
+                  val dr = f.isDirectory
+                  if (dr && lv < q.depth && !sym(f)) st.add(f to lv + 1)
+                  if (q.ok(f, dr, now)) { hit(E(f)); h++; if (h >= max) break }
+                }
+              }
+              prog(n)
+            }
+
+            suspend fun dupes(root: File, hid: Boolean, minSz: Long): List<List<File>> {
+              val by = HashMap<Long, ArrayList<File>>()
+              val st = ArrayList<File>(); st.add(root)
+              while (st.isNotEmpty()) {
+                currentCoroutineContext().ensureActive()
+                val d = st.removeAt(st.lastIndex)
+                for (f in d.listFiles() ?: continue) {
+                  if (!hid && f.name.startsWith(".")) continue
+                  if (f.isDirectory) { if (!sym(f)) st.add(f) }
+                  else { val l = f.length(); if (l >= minSz) by.getOrPut(l) { ArrayList() }.add(f) }
+                }
+              }
+              val out = ArrayList<List<File>>()
+              for ((_, g) in by) {
+                if (g.size < 2) continue
+                currentCoroutineContext().ensureActive()
+                for ((_, g2) in g.groupBy { hash(it, "MD5", 65536L) }) {
+                  if (g2.size < 2) continue
+                  for ((_, g3) in g2.groupBy { hash(it, "SHA-1", Long.MAX_VALUE) }) if (g3.size > 1) out.add(g3)
+                }
+              }
+              return out.sortedByDescending { it[0].length() * it.size }
+            }
+
+            fun empties(root: File): List<File> {
+              val r = ArrayList<File>()
+              fun w(d: File, depth: Int): Boolean {
+                val c = d.listFiles() ?: return false
+                var empty = true
+                for (f in c) { if (f.isDirectory && !sym(f) && depth < 40) { if (!w(f, depth + 1)) empty = false } else empty = false }
+                if (empty && d != root) r.add(d)
+                return empty
+              }
+              w(root, 0)
+              val s = r.toSet()
+              return r.filter { it.parentFile !in s }
+            }
+
+            fun hex(f: File, off: Long, n: Int): List<String> {
+              val b = ByteArray(n)
+              val r = RandomAccessFile(f, "r").use { it.seek(off); it.read(b) }
+              if (r <= 0) return emptyList()
+              return (0 until r step 16).map { o ->
+                val l = min(16, r - o)
+                val sb = StringBuilder(String.format(Locale.US, "%08X ", off + o))
+                for (k in 0 until 16) sb.append(if (k < l) String.format(Locale.US, "%02X ", b[o + k]) else "   ")
+                sb.append(' ')
+                for (k in 0 until l) { val c = b[o + k].toInt(); sb.append(if (c in 32..126) c.toChar() else '.') }
+                sb.toString()
+              }
+            }
+          }
+
+          object Ar {
+            fun exr(s: String): List<Regex> = s.split(',').map { it.trim() }.filter { it.isNotEmpty() }.map { Regex(Fx.glob(it), RegexOption.IGNORE_CASE) }
+            private fun skip(f: File, ex: List<Regex>, hid: Boolean) = (!hid && f.name.startsWith(".")) || ex.any { it.matches(f.name) }
+            private fun crc(f: File): Long {
+              val c = CRC32()
+              f.inputStream().use { i -> val b = ByteArray(65536); while (true) { val n = i.read(b); if (n < 0) break; c.update(b, 0, n) } }
+              return c.value
+            }
+            private fun gzo(out: File, level: Int): GZIPOutputStream = object : GZIPOutputStream(BufferedOutputStream(FileOutputStream(out), 65536)) {
+              init { def.setLevel(level.coerceIn(1, 9)) }
+            }
+
+            fun kind(f: File): String {
+              val n = f.name.lowercase()
+              return when {
+                n.endsWith(".tar.gz") || n.endsWith(".tgz") -> "tgz"
+                n.endsWith(".tar") -> "tar"
+                n.endsWith(".gz") -> "gz"
+                n.endsWith(".zip") || n.endsWith(".jar") || n.endsWith(".apk") || n.endsWith(".cbz") -> "zip"
+                else -> ""
+              }
+            }
+            fun stem(f: File): String {
+              val n = f.name
+              for (s in listOf(".tar.gz", ".tgz", ".tar", ".gz", ".zip", ".jar", ".apk", ".cbz")) if (n.lowercase().endsWith(s)) return n.dropLast(s.length)
+              return n + "_x"
+            }
+
+            fun zip(src: List<File>, out: File, level: Int, store: Boolean, ex: List<Regex>, hid: Boolean, cm: String) {
+              ZipOutputStream(BufferedOutputStream(FileOutputStream(out), 65536)).use { z ->
+                z.setLevel(level.coerceIn(0, 9))
+                if (cm.isNotEmpty()) z.setComment(cm)
+                fun add(f: File, p: String) {
+                  if (skip(f, ex, hid) || f == out) return
+                  if (f.isDirectory) {
+                    val c = f.listFiles() ?: return
+                    if (c.isEmpty()) { val e = ZipEntry("$p/"); e.time = f.lastModified(); z.putNextEntry(e); z.closeEntry() }
+                    for (x in c) add(x, p + "/" + x.name)
+                  } else {
+                    val e = ZipEntry(p); e.time = f.lastModified()
+                    if (store) { e.method = ZipEntry.STORED; e.size = f.length(); e.compressedSize = f.length(); e.crc = crc(f) }
+                    z.putNextEntry(e); f.inputStream().use { it.copyTo(z, 65536) }; z.closeEntry()
+                  }
+                }
+                for (f in src) add(f, f.name)
+              }
+            }
+
+            private fun hdr(nm: String, size: Long, mt: Long, dir: Boolean): ByteArray? {
+              var n = nm; var pre = ""
+              if (n.toByteArray().size > 100) {
+                val i = n.indexOf('/', maxOf(0, n.length - 99))
+                if (i < 1 || i > 155) return null
+                pre = n.substring(0, i); n = n.substring(i + 1)
+                if (n.toByteArray().size > 100) return null
+              }
+              val h = ByteArray(512)
+              fun put(s: String, o: Int, w: Int) { val b = s.toByteArray(); System.arraycopy(b, 0, h, o, min(b.size, w)) }
+              fun oct(v: Long, o: Int, w: Int) = put(java.lang.Long.toOctalString(v).padStart(w - 1, '0'), o, w - 1)
+              put(n, 0, 100); put(if (dir) "0000755" else "0000644", 100, 7); put("0000000", 108, 7); put("0000000", 116, 7)
+              oct(size, 124, 12); oct(mt / 1000, 136, 12)
+              for (i in 148 until 156) h[i] = 32
+              h[156] = (if (dir) '5' else '0').code.toByte()
+              put("ustar", 257, 5); put("00", 263, 2); put(pre, 345, 155)
+              var s = 0
+              for (b in h) s += b.toInt() and 255
+              put(s.toString(8).padStart(6, '0'), 148, 6); h[154] = 0; h[155] = 32
+              return h
+            }
+
+            fun tgz(src: List<File>, out: File, level: Int, ex: List<Regex>, hid: Boolean): Int {
+              var skipped = 0
+              gzo(out, level).use { o ->
+                fun add(f: File, p: String) {
+                  if (skip(f, ex, hid) || f == out) return
+                  val dr = f.isDirectory
+                  val h = hdr(if (dr) "$p/" else p, if (dr) 0L else f.length(), f.lastModified(), dr)
+                  if (h == null) { skipped++; return }
+                  o.write(h)
+                  if (dr) { f.listFiles()?.forEach { add(it, p + "/" + it.name) } }
+                  else {
+                    val size = f.length(); var left = size
+                    f.inputStream().use { i ->
+                      val b = ByteArray(65536)
+                      while (left > 0) { val n = i.read(b, 0, min(b.size.toLong(), left).toInt()); if (n < 0) break; o.write(b, 0, n); left -= n }
+                    }
+                    while (left > 0) { val c = min(8192L, left).toInt(); o.write(ByteArray(c)); left -= c }
+                    val pad = ((512 - size % 512) % 512).toInt()
+                    if (pad > 0) o.write(ByteArray(pad))
+                  }
+                }
+                for (f in src) add(f, f.name)
+                o.write(ByteArray(1024))
+              }
+              return skipped
+            }
+
+            fun gz(f: File, out: File, level: Int) { gzo(out, level).use { z -> f.inputStream().use { it.copyTo(z, 65536) } } }
+            fun gunzip(f: File, out: File) { GZIPInputStream(f.inputStream().buffered(65536)).use { i -> out.outputStream().buffered(65536).use { i.copyTo(it, 65536) } } }
+
+            fun unzip(zf: File, dest: File, ow: Boolean): Int {
+              var n = 0
+              dest.mkdirs()
+              val base = dest.canonicalPath
+              ZipFile(zf).use { z ->
+                val en = z.entries()
+                while (en.hasMoreElements()) {
+                  val e = en.nextElement()
+                  val t = File(dest, e.name)
+                  if (!t.canonicalPath.startsWith(base + File.separator)) continue
+                  if (e.isDirectory) { t.mkdirs(); continue }
+                  if (!ow && t.exists()) continue
+                  t.parentFile?.mkdirs()
+                  z.getInputStream(e).use { i -> BufferedOutputStream(FileOutputStream(t), 65536).use { i.copyTo(it, 65536) } }
+                  if (e.time > 0) t.setLastModified(e.time)
+                  n++
+                }
+              }
+              return n
+            }
+
+            private fun str(h: ByteArray, o: Int, w: Int) = String(h, o, w, Charsets.UTF_8).substringBefore('\u0000')
+            private fun skipN(i: InputStream, n: Long) {
+              var l = n; val b = ByteArray(8192)
+              while (l > 0) { val r = i.read(b, 0, min(b.size.toLong(), l).toInt()); if (r < 0) throw EOFException(); l -= r }
+            }
+            private fun copyN(i: InputStream, o: OutputStream, n: Long) {
+              var l = n; val b = ByteArray(65536)
+              while (l > 0) { val r = i.read(b, 0, min(b.size.toLong(), l).toInt()); if (r < 0) throw EOFException(); o.write(b, 0, r); l -= r }
+            }
+
+            fun untar(f: File, dest: File, ow: Boolean, gzip: Boolean): Int {
+              var cnt = 0
+              dest.mkdirs()
+              val base = dest.canonicalPath
+              val raw = BufferedInputStream(FileInputStream(f), 65536)
+              val i = DataInputStream(if (gzip) BufferedInputStream(GZIPInputStream(raw, 65536), 65536) else raw)
+              i.use {
+                val h = ByteArray(512)
+                var ln: String? = null
+                try {
+                  while (true) {
+                    i.readFully(h)
+                    if (h.all { it.toInt() == 0 }) break
+                    val nm0 = str(h, 0, 100); val pre = str(h, 345, 155)
+                    val size = str(h, 124, 12).trim().toLongOrNull(8) ?: 0L
+                    val mt = str(h, 136, 12).trim().toLongOrNull(8) ?: 0L
+                    val ty = h[156].toInt().toChar()
+                    val pad = (512 - size % 512) % 512
+                    if (ty == 'L') {
+                      val b = ByteArray(size.toInt()); i.readFully(b); skipN(i, pad)
+                      ln = String(b, Charsets.UTF_8).trimEnd('\u0000'); continue
+                    }
+                    val name = ln ?: (if (pre.isNotEmpty()) "$pre/$nm0" else nm0)
+                    ln = null
+                    val t = File(dest, name)
+                    val safe = t.canonicalPath.startsWith(base + File.separator)
+                    if (ty == '5') { if (safe) t.mkdirs(); continue }
+                    val want = (ty == '0' || ty == '\u0000') && safe && (ow || !t.exists())
+                    if (want) {
+                      t.parentFile?.mkdirs()
+                      BufferedOutputStream(FileOutputStream(t), 65536).use { o -> copyN(i, o, size) }
+                      if (mt > 0) t.setLastModified(mt * 1000)
+                      cnt++
+                    } else skipN(i, size)
+                    skipN(i, pad)
+                  }
+                } catch (e: EOFException) { }
+              }
+              return cnt
+            }
+
+            fun list(f: File): List<Pair<String, Long>> {
+              val out = ArrayList<Pair<String, Long>>()
+              val k = kind(f)
+              if (k == "zip") ZipFile(f).use { z -> val en = z.entries(); while (en.hasMoreElements() && out.size < 1000) { val e = en.nextElement(); out.add(e.name to e.size) } }
+              else if (k == "tgz" || k == "tar") {
+                val raw = BufferedInputStream(FileInputStream(f), 65536)
+                val i = DataInputStream(if (k == "tgz") BufferedInputStream(GZIPInputStream(raw, 65536), 65536) else raw)
+                i.use {
+                  val h = ByteArray(512)
+                  var ln: String? = null
+                  try {
+                    while (out.size < 1000) {
+                      i.readFully(h)
+                      if (h.all { it.toInt() == 0 }) break
+                      val size = str(h, 124, 12).trim().toLongOrNull(8) ?: 0L
+                      val ty = h[156].toInt().toChar()
+                      val pre = str(h, 345, 155); val nm0 = str(h, 0, 100)
+                      val pad = (512 - size % 512) % 512
+                      if (ty == 'L') { val b = ByteArray(size.toInt()); i.readFully(b); skipN(i, pad); ln = String(b, Charsets.UTF_8).trimEnd('\u0000'); continue }
+                      val name = ln ?: (if (pre.isNotEmpty()) "$pre/$nm0" else nm0)
+                      ln = null
+                      if (ty != 'x' && ty != 'g') out.add(name to size)
+                      skipN(i, size + pad)
+                    }
+                  } catch (e: EOFException) { }
+                }
+              } else if (k == "gz") out.add(f.nameWithoutExtension to f.length())
+              return out
+            }
+          }
+          NFM_EOF
+          mkdir -p app/src/main/java/dev/nerd/fm
+          cat > app/src/main/java/dev/nerd/fm/Fx2.kt <<'NFM_EOF'
+          package dev.nerd.fm
+
+          import android.content.pm.PackageManager
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.os.Environment
+          import android.util.LruCache
+          import kotlinx.coroutines.currentCoroutineContext
+          import kotlinx.coroutines.ensureActive
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.io.IOException
+          import java.io.RandomAccessFile
+          import kotlin.math.max
+          import kotlin.math.min
+
+          object Thumbs {
+            private val cache = LruCache<String, Bitmap>(80)
+            fun ok(e: E) = e.ex in Fx.IMG || e.ex == "apk"
+            fun get(pm: PackageManager, f: File, px: Int): Bitmap? {
+              val k = f.path + f.lastModified()
+              cache.get(k)?.let { return it }
+              val b: Bitmap? = try {
+                if (f.extension.lowercase() == "apk") {
+                  val ai = pm.getPackageArchiveInfo(f.path, 0)?.applicationInfo
+                  if (ai == null) null else {
+                    ai.sourceDir = f.path; ai.publicSourceDir = f.path
+                    val d = ai.loadIcon(pm)
+                    val bm = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+                    d.setBounds(0, 0, px, px); d.draw(android.graphics.Canvas(bm)); bm
+                  }
+                } else {
+                  val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                  BitmapFactory.decodeFile(f.path, o)
+                  var s = 1
+                  while (o.outWidth / s > px * 2 || o.outHeight / s > px * 2) s *= 2
+                  BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s })
+                }
+              } catch (e: Throwable) { null }
+              if (b != null) cache.put(k, b)
+              return b
+            }
+          }
+
+          class TItem(val dir: File, val item: File, val orig: String)
+          object Trash {
+            val root: File get() = File(Environment.getExternalStorageDirectory(), ".nerdfm_trash")
+            fun put(f: File) {
+              val d = File(root, System.currentTimeMillis().toString() + "-" + (f.name.hashCode() and 0xffff))
+              d.mkdirs(); File(d, ".orig").writeText(f.parent ?: ""); Fx.mv(f, File(d, f.name))
+            }
+            fun list(): List<TItem> = (root.listFiles() ?: emptyArray()).mapNotNull { d ->
+              val x = d.listFiles()?.firstOrNull { it.name != ".orig" }
+              if (x == null) null else TItem(d, x, runCatching { File(d, ".orig").readText() }.getOrDefault(""))
+            }.sortedByDescending { it.dir.name }
+            fun restore(t: TItem): String {
+              val par = if (t.orig.isEmpty()) Environment.getExternalStorageDirectory() else File(t.orig)
+              par.mkdirs()
+              val to = Fx.uniq(File(par, t.item.name)); Fx.mv(t.item, to); t.dir.deleteRecursively()
+              return to.name
+            }
+            fun empty() { root.deleteRecursively() }
+          }
+
+          class Cmp(val onlyA: List<String>, val onlyB: List<String>, val diff: List<String>, val same: Int)
+
+          object Fx2 {
+            fun shred(f: File) {
+              if (f.isDirectory) { f.listFiles()?.forEach { shred(it) }; f.delete(); return }
+              try {
+                RandomAccessFile(f, "rw").use { r ->
+                  val b = ByteArray(65536); java.util.Random().nextBytes(b)
+                  var left = f.length(); r.seek(0)
+                  while (left > 0) { val n = min(left, 65536L).toInt(); r.write(b, 0, n); left -= n }
+                }
+              } catch (e: Exception) { }
+              f.delete()
+            }
+
+            suspend fun breakdown(root: File): LinkedHashMap<String, Long> {
+              val m = linkedMapOf("images" to 0L, "videos" to 0L, "audio" to 0L, "docs" to 0L, "archives" to 0L, "apps" to 0L, "code" to 0L, "other" to 0L)
+              val st = ArrayList<File>(); st.add(root)
+              while (st.isNotEmpty()) {
+                currentCoroutineContext().ensureActive()
+                val d = st.removeAt(st.lastIndex)
+                for (f in d.listFiles() ?: continue) {
+                  if (f.isDirectory) { if (!Fx.sym(f)) st.add(f) }
+                  else {
+                    val x = f.extension.lowercase()
+                    val k = when {
+                      x in Fx.IMG -> "images"; x in Fx.VID -> "videos"; x in Fx.AUD -> "audio"; x in Fx.ARC -> "archives"
+                      x == "apk" || x == "xapk" -> "apps"; x in Fx.CODE -> "code"; x in Fx.DOC -> "docs"; else -> "other"
+                    }
+                    m[k] = (m[k] ?: 0L) + f.length()
+                  }
+                }
+              }
+              return m
+            }
+
+            suspend fun collect(root: File, q: String, hid: Boolean, max: Int = 4000): List<File> {
+              val out = ArrayList<File>()
+              Fx.search(root, Q(q, false, false), hid, max, { out.add(it.f) }, { })
+              return out
+            }
+
+            fun squish(f: File, maxSide: Int, q: Int, webp: Boolean): File {
+              val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+              BitmapFactory.decodeFile(f.path, o)
+              var s = 1
+              while (o.outWidth / s > maxSide * 2 || o.outHeight / s > maxSide * 2) s *= 2
+              var b = BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s }) ?: throw IOException("decode failed")
+              val m = max(b.width, b.height)
+              if (m > maxSide) {
+                val r = maxSide.toFloat() / m
+                b = Bitmap.createScaledBitmap(b, (b.width * r).toInt().coerceAtLeast(1), (b.height * r).toInt().coerceAtLeast(1), true)
+              }
+              val out = Fx.uniq(File(f.parentFile, f.nameWithoutExtension + "_squish." + (if (webp) "webp" else "jpg")))
+              FileOutputStream(out).use { b.compress(if (webp) Bitmap.CompressFormat.WEBP else Bitmap.CompressFormat.JPEG, q, it) }
+              return out
+            }
+
+            private fun rel(root: File): Map<String, File> {
+              val m = HashMap<String, File>(); val base = root.path.length + 1
+              for (f in root.walkTopDown().maxDepth(12)) if (f.isFile) m[f.path.substring(base)] = f
+              return m
+            }
+            fun compare(a: File, b: File): Cmp {
+              val ma = rel(a); val mb = rel(b)
+              val oa = ma.keys.filter { it !in mb }.sorted(); val ob = mb.keys.filter { it !in ma }.sorted()
+              val df = ArrayList<String>(); var same = 0
+              for ((k, fa) in ma) {
+                val fb = mb[k] ?: continue
+                if (fa.length() != fb.length() || kotlin.math.abs(fa.lastModified() - fb.lastModified()) > 2000) df.add(k) else same++
+              }
+              return Cmp(oa, ob, df.sorted(), same)
+            }
+            fun sync(src: File, dst: File, keys: List<String>) { for (k in keys) Fx.cp(File(src, k), File(dst, k)) }
+          }
+          NFM_EOF
+          mkdir -p app/src/main/java/dev/nerd/fm
+          cat > app/src/main/java/dev/nerd/fm/MainActivity.kt <<'NFM_EOF'
+          @file:OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+
+          package dev.nerd.fm
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.drawable.ColorDrawable
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Environment
+          import android.provider.Settings
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.setContent
+          import androidx.compose.animation.*
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.*
+          import androidx.compose.ui.graphics.*
+          import androidx.compose.ui.input.pointer.PointerEventPass
+          import androidx.compose.ui.input.pointer.PointerEventType
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.unit.dp
+          import androidx.core.content.FileProvider
+          import androidx.core.view.WindowCompat
+          import kotlinx.coroutines.*
+          import java.io.File
+          import kotlin.math.roundToInt
+
+          object Ev { var t by mutableIntStateOf(0) }
+          class Boot { var loaded by mutableIntStateOf(0) }
+          private val BackE = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
+          fun hasAccess(): Boolean = Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
+
+          class MainActivity : ComponentActivity() {
+            override fun onCreate(b: Bundle?) {
+              super.onCreate(b)
+              window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.BLACK))
+              try {
+                val m = windowManager.defaultDisplay.supportedModes.maxByOrNull { it.refreshRate }
+                if (m != null) window.attributes = window.attributes.also { it.preferredDisplayModeId = m.modeId }
+              } catch (e: Throwable) { }
+              if (Build.VERSION.SDK_INT < 30) requestPermissions(arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE, android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 1)
+              val cf = Cfg(this)
+              setContent { Root(cf) }
+            }
+            override fun onResume() { super.onResume(); Ev.t++ }
+          }
+
+          @Composable fun Root(cf: Cfg) {
+            val act = LocalContext.current as Activity
+            val ck = rememberClock(cf.fx > 0)
+            var entered by remember { mutableStateOf(false) }
+            val boot = remember { Boot() }
+            var access by remember { mutableStateOf(hasAccess()) }
+            LaunchedEffect(Ev.t) { access = hasAccess() }
+            SideEffect {
+              act.window.statusBarColor = Th.bg.toArgb(); act.window.navigationBarColor = Th.bg.toArgb()
+              WindowCompat.getInsetsController(act.window, act.window.decorView).apply { isAppearanceLightStatusBars = Th.pal.light; isAppearanceLightNavigationBars = Th.pal.light }
+            }
+            val rv = remember { Animatable(0f) }
+            LaunchedEffect(entered) { if (entered) rv.animateTo(1f, spring(.6f, 200f)) }
+            CompositionLocalProvider(LCfg provides cf, LClock provides ck) {
+              MaterialTheme(darkColorScheme(primary = cf.ac, background = Th.bg, surface = Th.bg)) {
+                Box(Modifier.fillMaxSize().background(cf.bgc)) {
+                  Box(Modifier.fillMaxSize().graphicsLayer { val s = .94f + .06f * rv.value; scaleX = s; scaleY = s; alpha = rv.value.coerceIn(0f, 1f) }) { App(cf, boot) }
+                  AnimatedVisibility(!entered, exit = fadeOut(tween(450)) + scaleOut(tween(450), targetScale = 1.2f)) {
+                    Welcome(boot.loaded > 0, access, {
+                      try { act.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + act.packageName))) }
+                      catch (e: Exception) { act.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                    }) { entered = true }
+                  }
+                }
+              }
+            }
+          }
+
+          @Composable fun App(cf: Cfg, boot: Boot) {
+            val ctx = LocalContext.current
+            val scope = rememberCoroutineScope()
+            val root = remember { Environment.getExternalStorageDirectory() }
+            val pa = remember { Pane(root) }
+            val pb = remember { Pane(root) }
+            val burst = remember { Burst() }
+            val lt = remember { floatArrayOf(300f, 500f) }
+            var act by remember { mutableIntStateOf(0) }
+            var tab by remember { mutableIntStateOf(0) }
+            var sub by remember { mutableStateOf<String?>(null) }
+            var vf by remember { mutableStateOf<File?>(null) }
+            var pendingQ by remember { mutableStateOf("") }
+            var busy by remember { mutableStateOf<String?>(null) }
+            var snack by remember { mutableStateOf<String?>(null) }
+            var dg by remember { mutableStateOf<Dg?>(null) }
+            var clip by remember { mutableStateOf(listOf<File>()) }
+            var cut by remember { mutableStateOf(false) }
+            var rev by remember { mutableIntStateOf(0) }
+            val dual = cf.dual
+            val P = if (act == 0 || !dual) pa else pb
+            val O = if (P === pa) pb else pa
+
+            LaunchedEffect(snack) { if (snack != null) { delay(2400); snack = null } }
+            fun toast(s: String) { snack = s }
+            fun cheer(n: Int) { burst.emit(lt[0], lt[1].coerceAtLeast(200f), n, -1, cf.ac) }
+            fun load(p: Pane, d: File) {
+              p.job?.cancel()
+              p.job = scope.launch {
+                val l = withContext(Dispatchers.IO) { Fx.list(d, cf.hidden, cf.sort, cf.desc) }
+                p.sel = emptySet(); p.snap = Snap(d, l); boot.loaded++
+              }
+            }
+            LaunchedEffect(rev, Ev.t, cf.sort, cf.desc, cf.hidden) { load(pa, pa.dir); load(pb, pb.dir) }
+
+            fun sf(p: Pane): List<File> = p.snap.items.filter { it.f.path in p.sel }.map { it.f }
+            fun bg(msg: String, xp: Int = 0, work: () -> String?) {
+              scope.launch {
+                busy = msg
+                val r = try { withContext(Dispatchers.IO) { work() } } catch (t: Throwable) { "✕ " + (t.message ?: t.javaClass.simpleName) }
+                busy = null; rev++
+                val before = cf.level; cf.addXp(xp)
+                if (r != null) { snack = r; if (!r.startsWith("✕")) cheer(10) }
+                if (cf.level > before) { snack = "level up! Lv ${cf.level} ♡"; cheer(28) }
+              }
+            }
+            fun uri(f: File): Uri = FileProvider.getUriForFile(ctx, "dev.nerd.fm.fp", f)
+            fun opn(f: File) {
+              try { ctx.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri(f), Fx.mime(f)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)) }
+              catch (e: Exception) { toast("no app can open this") }
+            }
+            fun share(fs: List<File>) {
+              try {
+                val us = ArrayList(fs.filter { it.isFile }.map { uri(it) })
+                if (us.isEmpty()) { toast("select files"); return }
+                val i = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*").putParcelableArrayListExtra(Intent.EXTRA_STREAM, us).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                ctx.startActivity(Intent.createChooser(i, "share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+              } catch (e: Exception) { toast("✕ " + e.message) }
+            }
+            fun ask(title: String, init: String, ok: (String) -> Unit) {
+              val tx = mutableStateOf(init)
+              dg = Dg(title, "OK", { ok(tx.value) }) { Inp(tx.value, { tx.value = it }, "…", Modifier.fillMaxWidth()) }
+            }
+            fun delDlg(fs: List<File>) {
+              if (fs.isEmpty()) { toast("select first"); return }
+              val mode = mutableIntStateOf(if (fs.any { it.path.startsWith(Trash.root.path) }) 1 else 0)
+              dg = Dg("DELETE ${fs.size}?", "GO", {
+                val m = mode.intValue
+                bg(if (m == 0) "tidying away…" else "deleting…", fs.size * 2) {
+                  for (f in fs) { if (m == 0) Trash.put(f) else if (m == 1) f.deleteRecursively() else Fx2.shred(f) }
+                  if (m == 0) "moved ${fs.size} to trash" else "deleted ${fs.size}"
+                }
+              }) {
+                T(fs.take(8).joinToString("\n") { it.name } + (if (fs.size > 8) "\n…" else ""), Th.dim, 11f, ml = 9)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                  Bt("TRASH", mode.intValue == 0) { mode.intValue = 0 }
+                  Bt("FOREVER", mode.intValue == 1) { mode.intValue = 1 }
+                  Bt("SHRED", mode.intValue == 2) { mode.intValue = 2 }
+                }
+              }
+            }
+            fun cleanDlg(name: String, fs: List<File>, bytes: Long) {
+              val mode = mutableIntStateOf(1)
+              dg = Dg("CLEAN $name", "SWEEP", {
+                val m = mode.intValue; cf.cleaned += bytes
+                bg("sweeping…", (bytes / 1048576L).toInt().coerceIn(2, 200)) {
+                  for (f in fs) { if (m == 0) Trash.put(f) else f.deleteRecursively() }
+                  "swept ${fs.size} · ${Fx.sz(bytes)} ♡"
+                }
+              }) {
+                T("${fs.size} items · ${Fx.sz(bytes)}", Th.fg, 12f)
+                T(fs.take(6).joinToString("\n") { it.name }, Th.dim, 10f, ml = 7)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) { Bt("FOREVER", mode.intValue == 1) { mode.intValue = 1 }; Bt("TO TRASH", mode.intValue == 0) { mode.intValue = 0 } }
+              }
+            }
+            fun infoDlg(fs: List<File>) {
+              if (fs.isEmpty()) { toast("select first"); return }
+              dg = Dg(if (fs.size == 1) fs[0].name else "${fs.size} items", "OK", null) { InfoBody(fs) }
+            }
+            fun unDlg(f: File) {
+              val k = Ar.kind(f)
+              if (k.isEmpty()) { toast("not an archive"); return }
+              val nm = mutableStateOf(Ar.stem(f)); val ow = mutableStateOf(false); val here = mutableStateOf(false)
+              dg = Dg("EXTRACT ${f.name}", "GO", {
+                val par = f.parentFile ?: root
+                val d = if (here.value) par else File(par, nm.value)
+                bg("extracting…", 4) {
+                  val n = when (k) {
+                    "zip" -> Ar.unzip(f, d, ow.value)
+                    "tgz" -> Ar.untar(f, d, ow.value, true)
+                    "tar" -> Ar.untar(f, d, ow.value, false)
+                    else -> { Ar.gunzip(f, Fx.uniq(File(par, f.nameWithoutExtension))); 1 }
+                  }
+                  "$n file(s) → ${d.name}"
+                }
+              }) {
+                Inp(nm.value, { nm.value = it }, "folder", Modifier.fillMaxWidth())
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                  Bt("OVERWRITE", ow.value) { ow.value = !ow.value }
+                  Bt("HERE (no folder)", here.value) { here.value = !here.value }
+                }
+              }
+            }
+            fun zipDlg() {
+              val fs = sf(P)
+              if (fs.isEmpty()) { toast("select first"); return }
+              val d = P.dir
+              val nm = mutableStateOf(if (fs.size == 1) fs[0].nameWithoutExtension else d.name.ifEmpty { "archive" })
+              val fmt = mutableIntStateOf(0); val lv = mutableFloatStateOf(6f)
+              val st = mutableStateOf(false); val hd = mutableStateOf(cf.hidden)
+              val ex = mutableStateOf(".git,*.tmp,Thumbs.db,.DS_Store"); val cm = mutableStateOf("")
+              dg = Dg("COMPRESS ${fs.size} item(s)", "GO", {
+                val level = lv.floatValue.roundToInt(); val z = fmt.intValue == 0
+                val out = Fx.uniq(File(d, nm.value + (if (z) ".zip" else ".tar.gz")))
+                val ef = Ar.exr(ex.value); val store = st.value; val hid = hd.value; val com = cm.value
+                bg("compressing…", 5) {
+                  val sk = if (z) { Ar.zip(fs, out, level, store, ef, hid, com); 0 } else Ar.tgz(fs, out, level, ef, hid)
+                  val src = fs.sumOf { Fx.du(it) }
+                  out.name + ": " + Fx.sz(src) + " → " + Fx.sz(out.length()) + " (" + (if (src > 0) out.length() * 100 / src else 0L) + "%)" + (if (sk > 0) " · skipped $sk" else "")
+                }
+              }) {
+                Inp(nm.value, { nm.value = it }, "name", Modifier.fillMaxWidth())
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                  Bt("ZIP", fmt.intValue == 0) { fmt.intValue = 0 }
+                  Bt("TAR.GZ", fmt.intValue == 1) { fmt.intValue = 1 }
+                  Bt("STORE (zip)", st.value) { st.value = !st.value }
+                  Bt("HIDDEN", hd.value) { hd.value = !hd.value }
+                }
+                Sl("level", lv.floatValue, 0f..9f) { lv.floatValue = it.roundToInt().toFloat() }
+                Inp(ex.value, { ex.value = it }, "exclude: glob,glob", Modifier.fillMaxWidth())
+                Inp(cm.value, { cm.value = it }, "zip comment (optional)", Modifier.fillMaxWidth())
+              }
+            }
+            fun squishDlg() {
+              val fs = sf(P).filter { it.extension.lowercase() in Fx.IMG }
+              if (fs.isEmpty()) { toast("select photos in FILES first"); return }
+              val mx = mutableFloatStateOf(1280f); val q = mutableFloatStateOf(80f); val wp = mutableStateOf(false); val del = mutableStateOf(false)
+              dg = Dg("SQUISH ${fs.size} photo(s)", "SQUISH", {
+                val m = mx.floatValue.roundToInt(); val qq = q.floatValue.roundToInt(); val w = wp.value; val dl = del.value
+                bg("squishing…", fs.size * 3) {
+                  var before = 0L; var after = 0L
+                  for (f in fs) { before += f.length(); val o = Fx2.squish(f, m, qq, w); after += o.length(); if (dl) f.delete() }
+                  "saved ${Fx.sz((before - after).coerceAtLeast(0L))} ♡"
+                }
+              }) {
+                Sl("max px", mx.floatValue, 256f..4096f) { mx.floatValue = (it / 64f).roundToInt() * 64f }
+                Sl("quality", q.floatValue, 30f..100f) { q.floatValue = it.roundToInt().toFloat() }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                  Bt("JPG", !wp.value) { wp.value = false }; Bt("WEBP", wp.value) { wp.value = true }; Bt("DELETE ORIGINALS", del.value) { del.value = !del.value }
+                }
+              }
+            }
+            fun paste() {
+              if (clip.isEmpty()) { toast("clipboard empty"); return }
+              val d = P.dir; val c = clip; val mv = cut
+              bg(if (mv) "moving…" else "copying…", 3) {
+                c.forEach { s -> val t = Fx.uniq(File(d, s.name)); if (mv) Fx.mv(s, t) else Fx.cp(s, t) }
+                "${c.size} → ${d.name}"
+              }
+              if (mv) clip = emptyList()
+            }
+            fun xfer(mv: Boolean) {
+              val fs = sf(P)
+              if (fs.isEmpty()) { toast("select first"); return }
+              val d = O.dir
+              bg(if (mv) "moving…" else "copying…", 3) {
+                fs.forEach { s -> val t = Fx.uniq(File(d, s.name)); if (mv) Fx.mv(s, t) else Fx.cp(s, t) }
+                "${fs.size} → ${d.name}"
+              }
+            }
+            fun batch() {
+              val fs = sf(P)
+              if (fs.isEmpty()) { toast("select files in FILES first (long-press)"); return }
+              val fi = mutableStateOf("(.*)"); val re = mutableStateOf("\$1")
+              fun nn(f: File, i: Int): String = Regex(fi.value).replace(f.name, re.value.replace("{n}", (i + 1).toString()))
+              dg = Dg("BATCH RENAME ${fs.size}", "APPLY", {
+                bg("renaming…", 2) {
+                  var c = 0
+                  fs.forEachIndexed { i, f -> val n = nn(f, i); if (n.isNotEmpty() && n != f.name && f.renameTo(File(f.parentFile, n))) c++ }
+                  "renamed $c"
+                }
+              }) {
+                Inp(fi.value, { fi.value = it }, "find (regex)", Modifier.fillMaxWidth())
+                Inp(re.value, { re.value = it }, "replace  \$1 {n}", Modifier.fillMaxWidth())
+                fs.take(6).forEachIndexed { i, f -> T(f.name + " → " + (runCatching { nn(f, i) }.getOrDefault("?")), Th.dim, 10f, ml = 2) }
+              }
+            }
+            fun bms(): List<String> = cf.bm.split('\n').filter { it.isNotEmpty() }
+            fun bmDlg() {
+              dg = Dg("BOOKMARKS", "OK", null) {
+                val l = bms()
+                if (l.isEmpty()) T("none · tap ☆ in FILES to add", Th.dim)
+                l.forEach { p ->
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                    T(p, cf.ac, 12f, null, Modifier.weight(1f).clickable { dg = null; sub = null; tab = 1; load(P, File(p)) }, 2)
+                    Bt("✕") { cf.bm = bms().filter { it != p }.joinToString("\n"); dg = null }
+                  }
+                }
+              }
+            }
+            fun fileMenu(e: E) {
+              val f = e.f; val k = Ar.kind(f)
+              dg = Dg(f.name, "CLOSE", null) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                  Bt("OPEN") { dg = null; opn(f) }
+                  if (e.sz <= 262144) Bt("EDIT") { dg = null; vf = f; sub = "edit" }
+                  Bt("HEX") { dg = null; vf = f; sub = "hex" }
+                  if (e.ex in Fx.IMG) Bt("IMAGE") { dg = null; vf = f; sub = "img" }
+                  if (k.isNotEmpty()) { Bt("EXTRACT") { dg = null; unDlg(f) }; Bt("PEEK") { dg = Dg("PEEK · " + f.name, "OK", null) { PeekBody(f) } } }
+                  Bt("HASH") { dg = Dg("CHECKSUMS · " + f.name, "OK", null) { HashBody(f) } }
+                  Bt("SHARE") { dg = null; share(listOf(f)) }
+                  Bt("INFO") { infoDlg(listOf(f)) }
+                  Bt("SHOW") { dg = null; sub = null; tab = 1; load(P, f.parentFile ?: root) }
+                }
+              }
+            }
+            fun togg(p: Pane, e: E) { p.sel = if (e.f.path in p.sel) p.sel - e.f.path else p.sel + e.f.path; cheer(3) }
+            fun tapE(p: Pane, e: E) { if (p.sel.isNotEmpty()) togg(p, e) else if (e.dir) load(p, e.f) else fileMenu(e) }
+            fun mochiTap() { cheer(12); snack = listOf("hehe!", "yay~", "nya!", "(≧▽≦)", "more pats pls", "i love folders ♡").random() }
+            fun doAct(a: String) {
+              when {
+                a.startsWith("q:") -> { pendingQ = a.substring(2); sub = null; tab = 2 }
+                a.startsWith("go:") -> { val d = File(root, a.substring(3)); if (d.isDirectory) { load(P, d); sub = null; tab = 1 } else toast("no ${a.substring(3)} folder yet") }
+                a.startsWith("nav:") -> sub = a.substring(4)
+                a == "batch" -> batch()
+                a == "squish" -> squishDlg()
+                a == "bm" -> bmDlg()
+              }
+            }
+
+            BackHandler(sub != null || tab != 0) {
+              if (sub != null) sub = null
+              else if (tab == 1 && P.sel.isNotEmpty()) P.sel = emptySet()
+              else if (tab == 1 && P.dir.path != root.path) load(P, P.dir.parentFile ?: root)
+              else tab = 0
+            }
+
+            val route = if (sub != null) "s:$sub" else "t:$tab"
+            Box(Modifier.fillMaxSize().pointerInput(Unit) {
+              awaitPointerEventScope {
+                while (true) {
+                  val ev = awaitPointerEvent(PointerEventPass.Initial)
+                  if (ev.type == PointerEventType.Press) {
+                    val pos = ev.changes.first().position; lt[0] = pos.x; lt[1] = pos.y
+                    if (cf.sparkle && cf.fx == 2) burst.emit(pos.x, pos.y, 3, 1, cf.ac)
+                  }
+                }
+              }
+            }) {
+              Column(Modifier.fillMaxSize().padding(horizontal = 6.dp).padding(top = 6.dp, bottom = 4.dp)) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                  AnimatedContent(route, transitionSpec = {
+                    val o = { r: String -> if (r.startsWith("t:")) r.substring(2).toInt() else 10 }
+                    val d = if (o(targetState) >= o(initialState)) 1 else -1
+                    if (cf.fx == 0) EnterTransition.None togetherWith ExitTransition.None
+                    else if (cf.fx == 1) fadeIn(tween(160)) togetherWith fadeOut(tween(100))
+                    else (slideInHorizontally(tween(420, easing = BackE)) { it * d / 2 } + fadeIn(tween(220)) + scaleIn(tween(420, easing = BackE), .9f)) togetherWith
+                      (slideOutHorizontally(tween(260)) { -it * d / 3 } + fadeOut(tween(160)) + scaleOut(tween(260), .94f))
+                  }, label = "route") { r ->
+                    Column(Modifier.fillMaxSize()) {
+                      when (r) {
+                        "t:0" -> HomeScr({ a -> doAct(a) }) { mochiTap() }
+                        "t:1" -> {
+                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Wave("FILES", 18f); Spacer(Modifier.weight(1f))
+                            Bt(if (cf.grid) "☰" else "▦", cf.grid) { cf.grid = !cf.grid }
+                            Bt(listOf("NAME", "SIZE", "DATE", "EXT")[cf.sort.coerceIn(0, 3)] + (if (cf.desc) "↓" else "↑")) { cf.sort = (cf.sort + 1) % 4 }
+                            Bt("↕") { cf.desc = !cf.desc }
+                            Bt(".", cf.hidden) { cf.hidden = !cf.hidden }
+                          }
+                          Spacer(Modifier.height(4.dp)); Stor(); Spacer(Modifier.height(4.dp))
+                          PaneView(pa, act == 0 || !dual, Modifier.weight(1f), { act = 0; load(pa, it) }, { e -> act = 0; tapE(pa, e) }, { e -> act = 0; togg(pa, e) })
+                          if (dual) {
+                            Spacer(Modifier.height(4.dp))
+                            PaneView(pb, act == 1, Modifier.weight(1f), { act = 1; load(pb, it) }, { e -> act = 1; tapE(pb, e) }, { e -> act = 1; togg(pb, e) })
+                          }
+                          val b = busy
+                          if (b != null) Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            LinearProgressIndicator(Modifier.weight(1f), color = cf.ac, trackColor = Th.fg.copy(alpha = .1f))
+                            T(b, cf.ac, 11f, null, Modifier.padding(start = 8.dp))
+                          }
+                          Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (P.sel.isNotEmpty()) {
+                              Bt("COPY") { clip = sf(P); cut = false; P.sel = emptySet(); toast("${clip.size} copied") }
+                              Bt("CUT") { clip = sf(P); cut = true; P.sel = emptySet(); toast("${clip.size} cut") }
+                              if (clip.isNotEmpty()) Bt("PASTE ${clip.size}", true) { paste() }
+                              Bt("DEL") { delDlg(sf(P)) }
+                              if (P.sel.size == 1) Bt("REN") {
+                                val f = sf(P)[0]
+                                ask("RENAME", f.name) { n -> bg("renaming…") { if (n.isNotBlank() && !File(f.parentFile, n).exists()) { f.renameTo(File(f.parentFile, n)); null } else "✕ invalid or exists" } }
+                              }
+                              Bt("ZIP") { zipDlg() }
+                              Bt("SHARE") { share(sf(P)) }
+                              Bt("INFO") { infoDlg(sf(P)) }
+                              Bt("BATCH") { batch() }
+                              Bt("SQUISH") { squishDlg() }
+                              if (dual) { Bt("⇉COPY") { xfer(false) }; Bt("⇉MOVE") { xfer(true) } }
+                              Bt("ALL") { P.sel = P.snap.items.map { it.f.path }.toSet() }
+                              Bt("INV") { P.sel = P.snap.items.map { it.f.path }.filter { it !in P.sel }.toSet() }
+                              Bt("✕") { P.sel = emptySet() }
+                            } else {
+                              val d = P.dir
+                              Bt("+DIR") { ask("NEW FOLDER", "") { n -> bg("mkdir…") { File(d, n).mkdirs(); null } } }
+                              Bt("+FILE") { ask("NEW FILE", "") { n -> bg("touch…") { File(d, n).createNewFile(); null } } }
+                              if (clip.isNotEmpty()) Bt("PASTE ${clip.size}", true) { paste() }
+                              Bt("ALL") { P.sel = P.snap.items.map { it.f.path }.toSet() }
+                              Bt("DUAL", cf.dual) { cf.dual = !cf.dual }
+                              if (dual) { Bt("⇄") { load(O, P.dir) }; Bt("DIFF") { sub = "cmp" } }
+                              val cur = d.path
+                              Bt(if (cur in bms()) "★" else "☆", cur in bms()) { cf.bm = (if (cur in bms()) bms() - cur else bms() + cur).joinToString("\n") }
+                              Bt("BM") { bmDlg() }
+                            }
+                          }
+                        }
+                        "t:2" -> SearchScr(P.dir, root, cf.hidden, pendingQ) { e -> if (e.dir) { load(P, e.f); tab = 1 } else fileMenu(e) }
+                        "t:3" -> ToolsScr { a -> doAct(a) }
+                        "t:4" -> MeScr { mochiTap() }
+                        "s:ana" -> AnaScr({ sub = null }, P.dir) { f -> load(P, f); sub = null; tab = 1 }
+                        "s:dupe" -> DupeScr({ sub = null }, P.dir, cf.hidden, rev) { fs -> delDlg(fs) }
+                        "s:empty" -> EmpScr({ sub = null }, P.dir, rev, { fs -> delDlg(fs) }) { f -> load(P, f); sub = null; tab = 1 }
+                        "s:clean" -> CleanerScr({ sub = null }, root, rev) { n, fs, by -> cleanDlg(n, fs, by) }
+                        "s:trash" -> TrashScr({ sub = null }, rev, { t -> bg("restoring…", 1) { "restored " + Trash.restore(t) } }) {
+                          dg = Dg("EMPTY TRASH?", "EMPTY", { bg("emptying…") { Trash.empty(); "trash emptied" } }) { T("this cannot be undone", Th.dim) }
+                        }
+                        "s:break" -> BreakdownScr({ sub = null }, root)
+                        "s:cmp" -> CompareScr({ sub = null }, pa.dir, pb.dir, rev) { keys, a, b -> bg("syncing…", 6) { Fx2.sync(a, b, keys); "synced ${keys.size} files" } }
+                        "s:edit" -> vf?.let { f -> EditScr({ sub = null }, f) { m -> toast(m); rev++ } }
+                        "s:hex" -> vf?.let { f -> HexScr({ sub = null }, f) }
+                        "s:img" -> vf?.let { f -> ImgScr({ sub = null }, f) }
+                        else -> {}
+                      }
+                    }
+                  }
+                }
+                NavBar(tab) { i -> sub = null; if (i != 2) pendingQ = ""; tab = i }
+              }
+              Wipe(tab)
+              ParticleLayer(burst)
+              Snack(snack)
+            }
+            dg?.let { d -> Dlg(d) { dg = null } }
+          }
+          NFM_EOF
+          mkdir -p app/src/main/java/dev/nerd/fm
+          cat > app/src/main/java/dev/nerd/fm/Screens.kt <<'NFM_EOF'
+          @file:OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+
+          package dev.nerd.fm
+
+          import android.graphics.BitmapFactory
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.tween
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.gestures.detectTransformGestures
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.*
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.BasicTextField
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.*
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.*
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.*
+          import java.io.File
+          import kotlin.math.max
+
+          private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type:arc", "type:apk", "type:code",
+            "size>10m", "size>100m", "size<10k", "age<1d", "age<7d", "age>365d", "dir", "file", "depth:1", "depth:3")
+
+          @Composable fun SearchScr(here: File, all: File, hid: Boolean, initQ: String, go: (E) -> Unit) {
+            val cf = LCfg.current
+            var q by remember { mutableStateOf(initQ) }
+            var wide by remember { mutableStateOf(initQ.isNotEmpty()) }
+            val root = if (wide) all else here
+            var rx by remember { mutableStateOf(false) }
+            var cs by remember { mutableStateOf(false) }
+            var res by remember { mutableStateOf(listOf<E>()) }
+            var scanned by remember { mutableIntStateOf(0) }
+            var ms by remember { mutableLongStateOf(0L) }
+            var run by remember { mutableStateOf(false) }
+            var bad by remember { mutableStateOf(false) }
+            LaunchedEffect(q, rx, cs, wide) {
+              res = emptyList(); scanned = 0; bad = false; run = false
+              if (q.isBlank()) return@LaunchedEffect
+              delay(400)
+              val qq = Q(q, rx, cs)
+              bad = qq.bad
+              if (bad) return@LaunchedEffect
+              run = true
+              val t0 = System.currentTimeMillis()
+              val buf = ArrayList<E>()
+              withContext(Dispatchers.IO) {
+                Fx.search(root, qq, hid, 3000, { e ->
+                  buf.add(e)
+                  if (buf.size >= 40) { val s = buf.toList(); buf.clear(); withContext(Dispatchers.Main) { res = res + s } }
+                }, { scanned = it })
+              }
+              res = res + buf.toList()
+              ms = System.currentTimeMillis() - t0
+              run = false
+            }
+            fun tog(t: String) { val l = q.split(" ").filter { it.isNotEmpty() }; q = (if (t in l) l - t else l + t).joinToString(" ") }
+            Column(Modifier.fillMaxSize()) {
+              Wave("FIND", 18f)
+              Inp(q, { q = it }, "name* -skip  ext:jpg,png  size>10m  age<7d  c:text  type:img  depth:3", Modifier.fillMaxWidth())
+              Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Bt(".*", rx) { rx = !rx }; Bt("Aa", cs) { cs = !cs }; Bt(if (wide) "ALL" else "HERE", wide) { wide = !wide }
+                if (run) Wave("scan", 11f)
+                T(if (bad) "bad regex" else "$scanned scanned · ${res.size} hits · ${ms}ms", Th.dim, 10f)
+              }
+              val toks = q.split(" ")
+              FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                CHIPS.forEach { c -> Bt(c, c in toks) { tog(c) } }
+              }
+              LazyColumn(Modifier.weight(1f).padding(top = 6.dp)) {
+                items(res, key = { it.f.path }) { e ->
+                  Column(Modifier.fillMaxWidth().clickable { go(e) }.padding(vertical = 4.dp, horizontal = 4.dp)) {
+                    Row {
+                      Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) { Ico(e, 28.dp); Spacer(Modifier.width(6.dp)); T(e.n, if (e.dir) cf.ac else Th.fg, 13f, null, Modifier.weight(1f)) }
+                      if (!e.dir) T(Fx.sz(e.sz), Th.dim, 10f)
+                    }
+                    T(e.f.parent ?: "", Th.dim, 9f)
+                  }
+                }
+              }
+            }
+          }
+
+          @Composable fun AnaScr(back: () -> Unit, dir: File, go: (File) -> Unit) {
+            val cf = LCfg.current
+            val r = produceState<List<Pair<File, Long>>?>(null, dir) {
+              value = null
+              value = withContext(Dispatchers.IO) { (dir.listFiles() ?: emptyArray()).map { it to Fx.du(it) }.sortedByDescending { it.second } }
+            }.value
+            var go0 by remember { mutableStateOf(false) }
+            LaunchedEffect(r) { go0 = false; delay(30); go0 = true }
+            Column(Modifier.fillMaxSize()) {
+              Hdr("ANALYZER", back)
+              T(dir.path, Th.dim, 10f)
+              if (r == null) Wave("measuring…", 14f) else {
+                val tot = r.sumOf { it.second }.coerceAtLeast(1L)
+                T("total " + Fx.sz(tot), cf.ac2, 12f)
+                LazyColumn(Modifier.weight(1f)) {
+                  items(r, key = { it.first.path }) { (f, s) ->
+                    val fr by animateFloatAsState(if (go0) s.toFloat() / tot else 0f, tween(600), label = "fr")
+                    Box(Modifier.fillMaxWidth().clickable(enabled = f.isDirectory) { go(f) }.padding(vertical = 2.dp)) {
+                      Box(Modifier.fillMaxWidth(fr.coerceIn(0.005f, 1f)).height(26.dp).background(cf.ac.copy(alpha = .25f)))
+                      Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
+                        T((if (f.isDirectory) "▸ " else "· ") + f.name, Th.fg, 12f, null, Modifier.weight(1f))
+                        T(Fx.sz(s) + "  " + (s * 100 / tot) + "%", Th.dim, 10f)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          @Composable fun DupeScr(back: () -> Unit, root: File, hid: Boolean, rev: Int, onDel: (List<File>) -> Unit) {
+            val cf = LCfg.current
+            var mn by remember { mutableLongStateOf(1024L) }
+            var mk by remember { mutableStateOf(setOf<String>()) }
+            val g = produceState<List<List<File>>?>(null, mn, rev) { value = null; value = withContext(Dispatchers.IO) { Fx.dupes(root, hid, mn) } }.value
+            Column(Modifier.fillMaxSize()) {
+              Hdr("DUPLICATES", back)
+              Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                T("min", Th.dim, 11f)
+                listOf(1024L to ">1K", 102400L to ">100K", 1048576L to ">1M").forEach { (v, l) -> Bt(l, mn == v) { mn = v } }
+              }
+              if (g == null) Wave("hashing…", 14f) else {
+                Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                  Bt("AUTO") { mk = g.flatMap { it.drop(1) }.map { it.path }.toSet() }
+                  Bt("CLEAR") { mk = emptySet() }
+                  Bt("DEL ${mk.size}", mk.isNotEmpty()) { onDel(g.flatten().filter { it.path in mk }) }
+                  T("${g.size} grp · ${Fx.sz(g.sumOf { (it.size - 1) * it[0].length() })} wasted", Th.dim, 10f)
+                }
+                LazyColumn(Modifier.weight(1f)) {
+                  g.forEachIndexed { gi, grp ->
+                    item(key = "h$gi") { T(Fx.sz(grp[0].length()) + " × " + grp.size, cf.ac2, 11f, FontWeight.Bold, Modifier.padding(top = 6.dp)) }
+                    items(grp, key = { it.path }) { f ->
+                      val on = f.path in mk
+                      Box(Modifier.fillMaxWidth().background(if (on) Color.Red.copy(alpha = .22f) else Color.Transparent)
+                        .clickable { mk = if (on) mk - f.path else mk + f.path }.padding(horizontal = 4.dp, vertical = 3.dp)) {
+                        T(f.path.removePrefix(root.path), if (on) Color(0xFFFF8080) else Th.fg, 11f, ml = 2)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          @Composable fun EmpScr(back: () -> Unit, root: File, rev: Int, onDel: (List<File>) -> Unit, go: (File) -> Unit) {
+            val l = produceState<List<File>?>(null, root, rev) { value = null; value = withContext(Dispatchers.IO) { Fx.empties(root) } }.value
+            Column(Modifier.fillMaxSize()) {
+              Hdr("EMPTY FOLDERS", back) { if (!l.isNullOrEmpty()) Bt("PURGE ${l.size}", true) { onDel(l) } }
+              if (l == null) Wave("scanning…", 14f)
+              else if (l.isEmpty()) T("∅ none", Th.dim)
+              else LazyColumn(Modifier.weight(1f)) {
+                items(l, key = { it.path }) { f -> Box(Modifier.fillMaxWidth().clickable { go(f.parentFile ?: f) }.padding(4.dp)) { T(f.path.removePrefix(root.path), Th.fg, 11f, ml = 2) } }
+              }
+            }
+          }
+
+          @Composable fun EditScr(back: () -> Unit, f: File, msg: (String) -> Unit) {
+            val cf = LCfg.current
+            val scope = rememberCoroutineScope()
+            val big = f.length() > 262144
+            val init = produceState<String?>(null, f) { value = if (big) "" else withContext(Dispatchers.IO) { runCatching { f.readText() }.getOrDefault("") } }.value
+            var tx by remember(init) { mutableStateOf(init ?: "") }
+            Column(Modifier.fillMaxSize()) {
+              Hdr(f.name, back) {
+                if (!big && init != null) Bt(if (tx != init) "SAVE ●" else "SAVE", tx != init) {
+                  scope.launch { withContext(Dispatchers.IO) { f.writeText(tx) }; msg("saved ${tx.length} chars") }
+                }
+              }
+              if (big) T("file > 256 KB · use HEX", Th.dim)
+              else if (init == null) Wave("loading…", 14f)
+              else Box(Modifier.weight(1f).fillMaxWidth().background(Th.fg.copy(alpha = .04f)).padding(6.dp)) {
+                BasicTextField(tx, { tx = it }, Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                  textStyle = TextStyle(color = Th.fg, fontSize = (12 * cf.fs).sp, fontFamily = FontFamily.Monospace), cursorBrush = SolidColor(cf.ac))
+              }
+            }
+          }
+
+          @Composable fun HexScr(back: () -> Unit, f: File) {
+            val cf = LCfg.current
+            var off by remember { mutableLongStateOf(0L) }
+            val lines = produceState(listOf<String>(), f, off) { value = withContext(Dispatchers.IO) { runCatching { Fx.hex(f, off, 2048) }.getOrDefault(emptyList()) } }.value
+            Column(Modifier.fillMaxSize()) {
+              Hdr("HEX · " + f.name, back)
+              Row(Modifier.padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Bt("⏮") { off = 0L }; Bt("◂") { off = max(0L, off - 2048) }; Bt("▸") { if (off + 2048 < f.length()) off += 2048 }
+                T("0x" + java.lang.Long.toHexString(off) + " / " + Fx.sz(f.length()), cf.ac2, 10f)
+              }
+              LazyColumn(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
+                items(lines) { Text(it, color = Th.fg, fontSize = 8.5.sp, fontFamily = FontFamily.Monospace, softWrap = false, maxLines = 1) }
+              }
+            }
+          }
+
+          @Composable fun ImgScr(back: () -> Unit, f: File) {
+            val bm = produceState<ImageBitmap?>(null, f) {
+              value = withContext(Dispatchers.IO) {
+                runCatching {
+                  val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                  BitmapFactory.decodeFile(f.path, o)
+                  var s = 1
+                  while (o.outWidth / s > 1400 || o.outHeight / s > 1400) s *= 2
+                  BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s })?.asImageBitmap()
+                }.getOrNull()
+              }
+            }.value
+            var sc by remember { mutableFloatStateOf(1f) }
+            var off by remember { mutableStateOf(Offset.Zero) }
+            Column(Modifier.fillMaxSize()) {
+              Hdr(f.name, back)
+              Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(0.dp)).pointerInput(Unit) {
+                detectTransformGestures { _, pan, zoom, _ -> sc = (sc * zoom).coerceIn(1f, 8f); off += pan }
+              }, Alignment.Center) {
+                if (bm == null) Wave("decoding…", 14f)
+                else Image(bm, f.name, Modifier.fillMaxSize().graphicsLayer { scaleX = sc; scaleY = sc; translationX = off.x; translationY = off.y }, contentScale = ContentScale.Fit)
+              }
+            }
+          }
+
+          @Composable fun InfoBody(fs: List<File>) {
+            val cf = LCfg.current
+            val sz = produceState(-1L, fs) { value = withContext(Dispatchers.IO) { fs.sumOf { Fx.du(it) } } }.value
+            val n = produceState(-1, fs) { value = withContext(Dispatchers.IO) { fs.sumOf { if (it.isDirectory) it.walkTopDown().count() - 1 else 1 } } }.value
+            @Composable fun kv(k: String, v: String) { Row { T(k, Th.dim, 11f, null, Modifier.width(52.dp)); T(v, Th.fg, 11f, ml = 4) } }
+            val f = fs[0]
+            kv("path", f.parent ?: "/")
+            kv("size", if (sz < 0) "…" else Fx.sz(sz) + " (" + sz + " B)")
+            kv("files", if (n < 0) "…" else n.toString())
+            if (fs.size == 1) { kv("mod", Fx.dt(f.lastModified())); kv("perm", E(f).pm + if (f.isHidden) " hidden" else ""); kv("mime", if (f.isDirectory) "dir" else Fx.mime(f)) }
+          }
+          NFM_EOF
+          mkdir -p app/src/main/java/dev/nerd/fm
+          cat > app/src/main/java/dev/nerd/fm/Screens2.kt <<'NFM_EOF'
+          @file:OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+
+          package dev.nerd.fm
+
+          import androidx.compose.animation.AnimatedContent
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.interaction.MutableInteractionSource
+          import androidx.compose.foundation.interaction.collectIsPressedAsState
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.*
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.*
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.*
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import kotlinx.coroutines.*
+          import java.io.File
+          import java.util.Calendar
+
+          private val TILES = listOf(
+            Triple("🕘", "Recent", "q:file age<3d"), Triple("🖼️", "Photos", "q:type:img"), Triple("🎬", "Videos", "q:type:vid"),
+            Triple("🎵", "Music", "q:type:aud"), Triple("📄", "Docs", "q:type:doc"), Triple("📦", "Archives", "q:type:arc"),
+            Triple("🤖", "APKs", "q:type:apk"), Triple("🐘", "Big files", "q:size>100m"), Triple("⬇️", "Downloads", "go:Download"),
+            Triple("🧹", "Cleaner", "nav:clean"), Triple("🗑️", "Trash", "nav:trash"), Triple("👯", "Dupes", "nav:dupe")
+          )
+
+          @Composable fun Tile(ic: String, lb: String, i: Int, m: Modifier, f: () -> Unit) {
+            val cf = LCfg.current
+            val src = remember { MutableInteractionSource() }
+            val pr by src.collectIsPressedAsState()
+            val sx by animateFloatAsState(if (pr) .88f else 1f, spring(.35f, 400f), label = "t")
+            val hue = (cf.hue + i * 31f) % 360f; val lt = Th.pal.light
+            val sh = RoundedCornerShape(cf.rad.dp + 4.dp)
+            Pop(i, m) {
+              Column(Modifier.fillMaxWidth().graphicsLayer { scaleX = sx; scaleY = sx }.clip(sh)
+                .background(Color.hsv(hue, .4f, if (lt) .97f else .3f))
+                .border(1.5.dp, Color.hsv(hue, .5f, if (lt) .8f else .9f).copy(alpha = .6f), sh)
+                .clickable(src, null) { f() }.padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                T(ic, Th.fg, 26f); T(lb, Th.fg, 11f, FontWeight.Medium)
+              }
+            }
+          }
+
+          @Composable fun HomeScr(act: (String) -> Unit, mochiTap: () -> Unit) {
+            val cf = LCfg.current; val ac = cf.ac; val a2 = cf.ac2
+            val h = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
+            val greet = when { h < 5 -> "still awake? (・ω・)"; h < 11 -> "good morning!"; h < 17 -> "hello hello!"; h < 21 -> "good evening~"; else -> "sleepy time soon…" }
+            val tips = remember { listOf("long-press a file to pick it ♡", "try size>100m age>180d in FIND", "dual panes: copy with ⇉", "tap me! i like it", "trash keeps deleted things safe", "squish photos to save space", "pinch to zoom images", "☆ saves a folder as bookmark") }
+            var tip by remember { mutableIntStateOf(0) }
+            LaunchedEffect(Unit) { while (true) { delay(6000); tip = (tip + 1) % tips.size } }
+            val (tot, fr) = remember { Fx.stor() }
+            val used = if (tot > 0) (tot - fr).toFloat() / tot else 0f
+            val grow = remember { Animatable(0f) }
+            LaunchedEffect(Unit) { grow.animateTo(used, spring(.6f, 80f)) }
+            val sh = RoundedCornerShape(cf.rad.dp + 6.dp)
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                Mochi(104.dp, 0, Modifier, mochiTap)
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f).clip(sh).background(Th.fg.copy(alpha = .07f)).border(1.5.dp, ac.copy(alpha = .3f), sh).padding(12.dp)) {
+                  T(greet, ac, 15f, FontWeight.Bold)
+                  AnimatedContent(tip, label = "tip") { T(tips[it], Th.dim, 11f, ml = 3) }
+                }
+              }
+              Row(Modifier.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = .05f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(104.dp), Alignment.Center) {
+                  Canvas(Modifier.fillMaxSize()) {
+                    val sw = 14.dp.toPx(); val sz = Size(size.width - sw, size.height - sw)
+                    drawArc(Th.fg.copy(alpha = .1f), -90f, 360f, false, Offset(sw / 2, sw / 2), sz, style = Stroke(sw, cap = StrokeCap.Round))
+                    drawArc(Brush.sweepGradient(listOf(a2, ac, a2)), -90f, 360f * grow.value, false, Offset(sw / 2, sw / 2), sz, style = Stroke(sw, cap = StrokeCap.Round))
+                  }
+                  Column(horizontalAlignment = Alignment.CenterHorizontally) { T("${(used * 100).toInt()}%", ac, 20f, FontWeight.Bold); T("used", Th.dim, 10f) }
+                }
+                Column(Modifier.padding(start = 16.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                  T("storage", Th.dim, 10f); T(Fx.sz(tot - fr) + " used", Th.fg, 14f, FontWeight.Bold)
+                  T(Fx.sz(fr) + " free", a2, 12f); T("of " + Fx.sz(tot), Th.dim, 10f)
+                  T("Lv ${cf.level} · ${cf.streak}d streak ♡", ac, 11f, FontWeight.Medium)
+                }
+              }
+              TILES.chunked(3).forEachIndexed { r, row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  row.forEachIndexed { c, t -> Tile(t.first, t.second, r * 3 + c, Modifier.weight(1f)) { act(t.third) } }
+                  repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+              }
+              Spacer(Modifier.height(8.dp))
+            }
+          }
+
+          @Composable fun ToolsScr(act: (String) -> Unit) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+              Wave("TOOLS", 18f)
+              Cd("🧹 CLEANER", "junk · leftover APKs · big & old · caches · empty folders, one tap each") { act("nav:clean") }
+              Cd("📊 BREAKDOWN", "where did my storage go? images / videos / audio / docs…") { act("nav:break") }
+              Cd("🔎 ANALYZER", "biggest items in the current folder, live bars") { act("nav:ana") }
+              Cd("👯 DUPLICATES", "size → MD5 → SHA-1, auto-mark extras") { act("nav:dupe") }
+              Cd("📂 EMPTY FOLDERS", "find & purge empty directory trees") { act("nav:empty") }
+              Cd("🗑️ TRASH", "restore deleted things, or empty it for good") { act("nav:trash") }
+              Cd("⇄ COMPARE PANES", "diff both panes, sync A→B or B→A") { act("nav:cmp") }
+              Cd("✎ BATCH RENAME", "regex + {n} counter on selected files") { act("batch") }
+              Cd("🗜️ SQUISH PHOTOS", "shrink selected images (JPG/WEBP, quality + size)") { act("squish") }
+              Cd("★ BOOKMARKS", "saved folders") { act("bm") }
+            }
+          }
+
+          @Composable fun MeScr(mochiTap: () -> Unit) {
+            val cf = LCfg.current; val ac = cf.ac
+            val lv = cf.level; val base = (lv - 1) * (lv - 1) * 12; val next = lv * lv * 12
+            val fr by animateFloatAsState(((cf.xp - base).toFloat() / (next - base)).coerceIn(0f, 1f), tween(700), label = "xp")
+            val sh = RoundedCornerShape(cf.rad.dp + 6.dp)
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+              Row(Modifier.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = .06f)).border(1.5.dp, ac.copy(alpha = .3f), sh).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Mochi(84.dp, 0, Modifier, mochiTap)
+                Column(Modifier.padding(start = 12.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                  T("Mochi · Lv $lv", ac, 15f, FontWeight.Bold)
+                  Box(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)).background(Th.fg.copy(alpha = .1f))) {
+                    Box(Modifier.fillMaxWidth(fr.coerceAtLeast(.03f)).fillMaxHeight().background(Brush.horizontalGradient(listOf(cf.ac2, ac))))
+                  }
+                  T("${cf.xp} xp · next at $next", Th.dim, 10f)
+                  T("${cf.streak}-day streak · cleaned ${Fx.sz(cf.cleaned)}", Th.dim, 10f)
+                }
+              }
+              Sec("THEME")
+              FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { Th.pals.forEachIndexed { i, p -> Bt(p.name, cf.preset == i) { cf.applyPreset(i) } } }
+              Sl("hue", cf.hue, 0f..360f) { cf.hue = it }
+              Sl("sat", cf.sat, 0f..1f) { cf.sat = it }
+              Sl("font x", cf.fs, .7f..1.6f) { cf.fs = it }
+              Sl("pad", cf.pad, 0f..18f) { cf.pad = it }
+              Sl("round", cf.rad, 0f..28f) { cf.rad = it }
+              FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("ROUND", "CASUAL", "SANS", "MONO", "SERIF").forEachIndexed { i, s -> Bt(s, cf.font == i) { cf.font = i } } }
+              Sec("MOTION" + if (cf.fx < cf.anim) "  (auto-capped for smoothness)" else "")
+              FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("OFF", "LOW", "HIGH").forEachIndexed { i, s -> Bt(s, cf.anim == i) { cf.anim = i } } }
+              Sl("wave", cf.amp, 0f..12f) { cf.amp = it }
+              Sl("speed s", cf.spd, .6f..6f) { cf.spd = it }
+              Sl("stagger", cf.stag, 0f..60f) { cf.stag = it }
+              FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Bt("SPARKLE TAPS", cf.sparkle) { cf.sparkle = !cf.sparkle }
+                Bt("HAPTIC", cf.haptic) { cf.haptic = !cf.haptic }
+                Bt("AUTO QUALITY", cf.auto) { cf.auto = !cf.auto }
+              }
+              Sec("VIEW")
+              FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Bt("HIDDEN", cf.hidden) { cf.hidden = !cf.hidden }
+                Bt("SIZE", cf.cSize) { cf.cSize = !cf.cSize }
+                Bt("DATE", cf.cDate) { cf.cDate = !cf.cDate }
+                Bt("PERM", cf.cPerm) { cf.cPerm = !cf.cPerm }
+                Bt("DUAL", cf.dual) { cf.dual = !cf.dual }
+                Bt("GRID", cf.grid) { cf.grid = !cf.grid }
+              }
+              FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("NAME", "SIZE", "DATE", "EXT").forEachIndexed { i, s -> Bt(s, cf.sort == i) { cf.sort = i } }
+                Bt("DESC", cf.desc) { cf.desc = !cf.desc }
+              }
+              Spacer(Modifier.height(8.dp))
+              Bt("RESET LOOK") { cf.reset() }
+              Spacer(Modifier.height(8.dp))
+            }
+          }
+
+          class Cat(val ic: String, val name: String, val files: List<File>, val bytes: Long)
+
+          @Composable fun CleanerScr(back: () -> Unit, root: File, rev: Int, onClean: (String, List<File>, Long) -> Unit) {
+            val cf = LCfg.current; val sh = RoundedCornerShape(cf.rad.dp + 4.dp)
+            val cats = produceState<List<Cat>?>(null, rev) {
+              value = null
+              value = withContext(Dispatchers.IO) {
+                val q = listOf(
+                  Triple("🧽", "Junk files", "file ext:tmp,temp,log,bak,old,cache,dmp,crdownload,part,thumbdata"),
+                  Triple("🤖", "Leftover APKs", "type:apk"),
+                  Triple("🐘", "Big & old (>100M, >180d)", "size>100m age>180d"),
+                  Triple("🖼️", "Thumbnail caches", "dir .thumbnails")
+                ).map { (ic, n, p) -> val fs = Fx2.collect(root, p, true); Cat(ic, n, fs, fs.sumOf { if (it.isDirectory) Fx.du(it) else it.length() }) }
+                q + Cat("📂", "Empty folders", Fx.empties(root), 0L)
+              }
+            }.value
+            Column(Modifier.fillMaxSize()) {
+              Hdr("CLEANER", back)
+              if (cats == null) { Row(Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = Arrangement.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Mochi(100.dp, 3); Wave("sniffing for crumbs…", 13f) } } }
+              else {
+                T("reclaimable: " + Fx.sz(cats.sumOf { it.bytes }), cf.ac2, 12f, FontWeight.Bold, Modifier.padding(bottom = 6.dp))
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                  cats.forEachIndexed { i, c ->
+                    Pop(i) {
+                      Row(Modifier.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = .06f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        T(c.ic, Th.fg, 24f)
+                        Column(Modifier.weight(1f).padding(horizontal = 10.dp)) { T(c.name, Th.fg, 13f, FontWeight.Bold); T("${c.files.size} items · ${Fx.sz(c.bytes)}", Th.dim, 11f) }
+                        if (c.files.isEmpty()) T("✨ clean", cf.ac, 11f) else Bt("CLEAN", true) { onClean(c.name, c.files, c.bytes) }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          @Composable fun TrashScr(back: () -> Unit, rev: Int, onRestore: (TItem) -> Unit, onEmpty: () -> Unit) {
+            val cf = LCfg.current
+            val l = produceState<List<TItem>?>(null, rev) { value = withContext(Dispatchers.IO) { Trash.list() } }.value
+            Column(Modifier.fillMaxSize()) {
+              Hdr("TRASH", back) { if (!l.isNullOrEmpty()) Bt("EMPTY ${l.size}", true) { onEmpty() } }
+              if (l == null) Wave("rummaging…", 13f)
+              else if (l.isEmpty()) Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) { Mochi(110.dp, 0); T("trash is empty ♡", Th.dim) }
+              else LazyColumn(Modifier.weight(1f)) {
+                items(count = l.size, key = { l[it].dir.name }) { i ->
+                  val t = l[i]
+                  Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) { T(t.item.name, Th.fg, 13f, FontWeight.Medium); T(t.orig, Th.dim, 9f) }
+                    Bt("RESTORE") { onRestore(t) }
+                  }
+                }
+              }
+            }
+          }
+
+          @Composable fun BreakdownScr(back: () -> Unit, root: File) {
+            val cf = LCfg.current
+            val scope = rememberCoroutineScope()
+            var data by remember { mutableStateOf<Map<String, Long>?>(null) }
+            var run by remember { mutableStateOf(false) }
+            val g = remember { Animatable(0f) }
+            LaunchedEffect(data) { if (data != null) { g.snapTo(0f); g.animateTo(1f, tween(800)) } }
+            Column(Modifier.fillMaxSize()) {
+              Hdr("BREAKDOWN", back) { Bt(if (run) "…" else "SCAN", true) { if (!run) scope.launch { run = true; data = withContext(Dispatchers.IO) { Fx2.breakdown(root) }; run = false } } }
+              val d = data
+              if (d == null) { if (run) Wave("measuring everything…", 13f) else T("tap SCAN to see where space goes ♡", Th.dim) }
+              else {
+                val tot = d.values.sum().coerceAtLeast(1L)
+                Canvas(Modifier.fillMaxWidth().height(22.dp).clip(RoundedCornerShape(11.dp))) {
+                  var x = 0f
+                  d.entries.forEachIndexed { i, e -> val w = size.width * (e.value.toFloat() / tot) * g.value; drawRect(Color.hsv((cf.hue + i * 45f) % 360f, .55f, 1f), Offset(x, 0f), Size(w, size.height)); x += w }
+                }
+                Column(Modifier.padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                  d.entries.forEachIndexed { i, e ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                      Box(Modifier.size(12.dp).clip(RoundedCornerShape(6.dp)).background(Color.hsv((cf.hue + i * 45f) % 360f, .55f, 1f)))
+                      T(e.key, Th.fg, 13f, null, Modifier.weight(1f).padding(start = 8.dp))
+                      T(Fx.sz(e.value) + "  " + (e.value * 100 / tot) + "%", Th.dim, 11f)
+                    }
+                  }
+                  T("total " + Fx.sz(tot), cf.ac2, 12f, FontWeight.Bold)
+                }
+              }
+            }
+          }
+
+          @Composable fun CompareScr(back: () -> Unit, a: File, b: File, rev: Int, onSync: (List<String>, File, File) -> Unit) {
+            val cf = LCfg.current
+            val c = produceState<Cmp?>(null, a, b, rev) { value = null; value = withContext(Dispatchers.IO) { Fx2.compare(a, b) } }.value
+            Column(Modifier.fillMaxSize()) {
+              Hdr("COMPARE", back)
+              T("A  " + a.path, Th.dim, 10f); T("B  " + b.path, Th.dim, 10f)
+              if (c == null) Wave("comparing…", 13f)
+              else {
+                T("${c.same} same · ${c.diff.size} differ · ${c.onlyA.size} only in A · ${c.onlyB.size} only in B", cf.ac2, 11f, FontWeight.Bold, Modifier.padding(vertical = 6.dp), 2)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                  Bt("A → B (${c.onlyA.size + c.diff.size})", true) { onSync(c.onlyA + c.diff, a, b) }
+                  Bt("B → A (${c.onlyB.size + c.diff.size})", true) { onSync(c.onlyB + c.diff, b, a) }
+                }
+                LazyColumn(Modifier.weight(1f).padding(top = 6.dp)) {
+                  val rows = c.onlyA.map { "A+ " + it } + c.onlyB.map { "B+ " + it } + c.diff.map { "≠  " + it }
+                  items(count = rows.size.coerceAtMost(300), key = { it }) { i -> T(rows[i], Th.fg, 11f, ml = 2) }
+                }
+              }
+            }
+          }
+
+          @Composable fun HashBody(f: File) {
+            val cf = LCfg.current
+            var exp by remember { mutableStateOf("") }
+            val r = produceState(listOf<Pair<String, String>>(), f) {
+              val o = ArrayList<Pair<String, String>>()
+              for (a in listOf("MD5", "SHA-1", "SHA-256")) { o.add(a to withContext(Dispatchers.IO) { Fx.hash(f, a, Long.MAX_VALUE) }); value = o.toList() }
+            }.value
+            Inp(exp, { exp = it }, "paste expected hash to verify", Modifier.fillMaxWidth())
+            if (r.isEmpty()) Wave("hashing…", 12f)
+            r.forEach { (a, h) ->
+              val hit = exp.isNotBlank() && h.equals(exp.trim(), true)
+              T(a + (if (hit) "  ✓ match!" else ""), if (hit) cf.ac else cf.ac2, 10f, FontWeight.Bold); T(h, Th.fg, 10f, ml = 3)
+            }
+          }
+
+          @Composable fun PeekBody(f: File) {
+            val l = produceState<List<Pair<String, Long>>?>(null, f) { value = withContext(Dispatchers.IO) { runCatching { Ar.list(f) }.getOrDefault(emptyList()) } }.value
+            if (l == null) Wave("peeking inside…", 12f)
+            else {
+              T("${l.size}${if (l.size >= 1000) "+" else ""} entries · " + Fx.sz(l.sumOf { it.second.coerceAtLeast(0L) }), Th.dim, 10f)
+              l.take(150).forEach { (n, s) -> T(n + "  " + Fx.sz(s.coerceAtLeast(0L)), Th.fg, 10f) }
+            }
+          }
+          NFM_EOF
+          mkdir -p app/src/main/java/dev/nerd/fm
+          cat > app/src/main/java/dev/nerd/fm/Ui.kt <<'NFM_EOF'
+          @file:OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+
+          package dev.nerd.fm
+
+          import androidx.compose.animation.*
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.interaction.MutableInteractionSource
+          import androidx.compose.foundation.interaction.collectIsPressedAsState
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.*
+          import androidx.compose.foundation.lazy.grid.*
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.BasicTextField
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.*
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.drawBehind
+          import androidx.compose.ui.geometry.CornerRadius
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.*
+          import androidx.compose.ui.graphics.drawscope.DrawScope
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.drawscope.clipRect
+          import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+          import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+          import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+          import androidx.compose.ui.input.nestedscroll.nestedScroll
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalHapticFeedback
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.IntOffset
+          import androidx.compose.ui.unit.IntSize
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.*
+          import kotlinx.coroutines.flow.first
+          import java.io.File
+          import java.util.Calendar
+          import kotlin.math.*
+          import kotlin.random.Random
+
+          val LCfg = staticCompositionLocalOf<Cfg> { error("cfg") }
+          val LClock = staticCompositionLocalOf<State<Float>> { mutableStateOf(0f) }
+          private val Back = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
+          private val INK = Color(0xFF3B2A38)
+          private val HP = Path()
+
+          @Immutable class Snap(val dir: File, val items: List<E>)
+          class Pane(d: File) {
+            var snap by mutableStateOf(Snap(d, emptyList()))
+            var sel by mutableStateOf(setOf<String>())
+            var job: Job? = null
+            val dir: File get() = snap.dir
+          }
+          class Dg(val title: String, val ok: String, val onOk: (() -> Unit)?, val body: @Composable () -> Unit)
+
+          @Composable fun rememberClock(on: Boolean): State<Float> =
+            if (on) rememberInfiniteTransition(label = "clk").animateFloat(0f, 628.3185f, infiniteRepeatable(tween(628318, easing = LinearEasing)), label = "c")
+            else remember { mutableStateOf(0f) }
+
+          fun DrawScope.drawHeart(cx: Float, cy: Float, s: Float, c: Color, a: Float = 1f) {
+            HP.reset()
+            HP.moveTo(cx, cy + s * .9f)
+            HP.cubicTo(cx - s * 1.6f, cy - s * .2f, cx - s * .7f, cy - s * 1.5f, cx, cy - s * .5f)
+            HP.cubicTo(cx + s * .7f, cy - s * 1.5f, cx + s * 1.6f, cy - s * .2f, cx, cy + s * .9f)
+            HP.close()
+            drawPath(HP, c, a)
+          }
+          fun DrawScope.drawSpark(cx: Float, cy: Float, s: Float, c: Color, a: Float = 1f) {
+            HP.reset()
+            HP.moveTo(cx, cy - s)
+            HP.quadraticBezierTo(cx, cy, cx + s, cy)
+            HP.quadraticBezierTo(cx, cy, cx, cy + s)
+            HP.quadraticBezierTo(cx, cy, cx - s, cy)
+            HP.quadraticBezierTo(cx, cy, cx, cy - s)
+            HP.close()
+            drawPath(HP, c, a)
+          }
+
+          // ───────── text & controls ─────────
+          @Composable fun T(s: String, c: Color = Th.fg, sz: Float = 13f, w: FontWeight? = null, m: Modifier = Modifier, ml: Int = 1) {
+            val cf = LCfg.current
+            Text(s, m, color = c, fontSize = (sz * cf.fs).sp, fontFamily = cf.ff, fontWeight = w, maxLines = ml, overflow = TextOverflow.Ellipsis)
+          }
+
+          @Composable fun Bt(s: String, on: Boolean = false, m: Modifier = Modifier, f: () -> Unit) {
+            val cf = LCfg.current; val ac = cf.ac; val hp = LocalHapticFeedback.current; val fx = cf.fx
+            val src = remember { MutableInteractionSource() }
+            val pr by src.collectIsPressedAsState()
+            val sx by animateFloatAsState(if (pr && fx > 0) .86f else 1f, spring(.35f, Spring.StiffnessMedium), label = "bx")
+            val sy by animateFloatAsState(if (pr && fx > 0) .78f else 1f, spring(.35f, Spring.StiffnessMedium), label = "by")
+            val sh = RoundedCornerShape(cf.rad.dp)
+            Box(m.graphicsLayer { scaleX = sx; scaleY = sy }.clip(sh)
+              .background(if (on) ac.copy(alpha = .28f) else Th.fg.copy(alpha = .08f))
+              .border(1.5.dp, if (on) ac else Th.fg.copy(alpha = .14f), sh)
+              .clickable(src, null) { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.TextHandleMove); f() }
+              .padding(horizontal = 11.dp, vertical = 6.dp)) { T(s, if (on) ac else Th.fg, 12f, FontWeight.Medium) }
+          }
+
+          @Composable fun Inp(v: String, ch: (String) -> Unit, hint: String, m: Modifier = Modifier, one: Boolean = true) {
+            val cf = LCfg.current
+            val sh = RoundedCornerShape(cf.rad.dp)
+            Box(m.clip(sh).background(Th.fg.copy(alpha = .07f)).border(1.5.dp, cf.ac.copy(alpha = .45f), sh).padding(horizontal = 12.dp, vertical = 9.dp)) {
+              if (v.isEmpty()) T(hint, Th.dim, 11f)
+              BasicTextField(v, ch, Modifier.fillMaxWidth(), singleLine = one,
+                textStyle = TextStyle(color = Th.fg, fontSize = (13 * cf.fs).sp, fontFamily = cf.ff), cursorBrush = SolidColor(cf.ac))
+            }
+          }
+
+          @Composable fun Sl(l: String, v: Float, r: ClosedFloatingPointRange<Float>, f: (Float) -> Unit) {
+            val cf = LCfg.current
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              T(l, Th.dim, 11f, null, Modifier.width(70.dp))
+              Slider(v, f, Modifier.weight(1f), valueRange = r,
+                colors = SliderDefaults.colors(thumbColor = cf.ac, activeTrackColor = cf.ac, inactiveTrackColor = Th.fg.copy(alpha = .12f)))
+              T(String.format("%.1f", v), Th.dim, 10f, null, Modifier.width(38.dp))
+            }
+          }
+
+          @Composable fun Wave(t: String, sz: Float = 20f) {
+            val cf = LCfg.current; val ck = LClock.current
+            Row {
+              t.forEachIndexed { i, ch ->
+                val col = Color.hsv((cf.hue + i * 9f) % 360f, if (Th.pal.light) .6f else cf.sat.coerceIn(0f, 1f), if (Th.pal.light) .85f else 1f)
+                T(ch.toString(), col, sz, FontWeight.Bold, Modifier.graphicsLayer {
+                  val p = ck.value * 6.2832f / cf.spd
+                  translationY = sin(p + i * .7f) * cf.amp * (if (cf.fx == 1) .5f else 1f)
+                  alpha = .78f + .22f * cos(p + i * .7f)
+                })
+              }
+            }
+          }
+
+          @Composable fun Scr(t: String, c: Color, sz: Float) {
+            val an = LCfg.current.fx
+            var s by remember { mutableStateOf(t) }
+            LaunchedEffect(t) {
+              if (an == 0) s = t else {
+                val g = "01<>/\\#%&*+=?♡"
+                for (k in 0..7) { s = t.mapIndexed { i, ch -> if (i < k * t.length / 8 || ch == ' ') ch else g.random() }.joinToString(""); delay(30) }
+                s = t
+              }
+            }
+            T(s, c, sz)
+          }
+
+          @Composable fun Sec(t: String) { T(t, LCfg.current.ac2, 11f, FontWeight.Bold, Modifier.padding(top = 10.dp)) }
+
+          @Composable fun Hdr(t: String, back: () -> Unit, extra: @Composable RowScope.() -> Unit = {}) {
+            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+              Bt("‹", false, Modifier, back); Spacer(Modifier.width(8.dp)); Wave(t, 16f); Spacer(Modifier.weight(1f)); extra()
+            }
+          }
+
+          @Composable fun Cd(t: String, d: String, f: () -> Unit) {
+            val cf = LCfg.current; val sh = RoundedCornerShape(cf.rad.dp)
+            Column(Modifier.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = .05f)).border(1.5.dp, cf.ac.copy(alpha = .3f), sh).clickable { f() }.padding(12.dp)) {
+              T(t, cf.ac, 13f, FontWeight.Bold); T(d, Th.dim, 11f, ml = 2)
+            }
+          }
+
+          @Composable fun Pop(i: Int, m: Modifier = Modifier, c: @Composable BoxScope.() -> Unit) {
+            val fx = LCfg.current.fx
+            val s = remember { Animatable(if (fx == 0) 1f else 0f) }
+            LaunchedEffect(Unit) { if (fx > 0) { delay(i * 45L); s.animateTo(1f, spring(.45f, 260f)) } }
+            Box(m.graphicsLayer { scaleX = s.value; scaleY = s.value; alpha = s.value.coerceIn(0f, 1f) }, content = c)
+          }
+
+          // ───────── particles ─────────
+          class Prt(var x: Float, var y: Float, var vx: Float, var vy: Float, var life: Float, val kind: Int, val c: Color, val s: Float)
+          class Burst {
+            val ps = ArrayList<Prt>()
+            var tick by mutableLongStateOf(0L)
+            var ver by mutableIntStateOf(0)
+            fun emit(x: Float, y: Float, n: Int, kind: Int, c: Color) {
+              repeat(n) {
+                val a = Random.nextFloat() * 6.2832f; val v = 110f + Random.nextFloat() * 280f
+                ps.add(Prt(x, y, cos(a) * v, sin(a) * v - 170f, 1f, if (kind < 0) Random.nextInt(2) else kind, c, 7f + Random.nextFloat() * 9f))
+              }
+              while (ps.size > 90) ps.removeAt(0)
+              ver++
+            }
+          }
+
+          @Composable fun ParticleLayer(b: Burst) {
+            val v = b.ver
+            LaunchedEffect(v) {
+              var last = withFrameNanos { it }
+              while (b.ps.isNotEmpty()) {
+                val now = withFrameNanos { it }
+                val dt = ((now - last) / 1e9f).coerceAtMost(.05f); last = now
+                for (p in b.ps) { p.life -= dt * .85f; p.vy += 560f * dt; p.x += p.vx * dt; p.y += p.vy * dt }
+                b.ps.removeAll { it.life <= 0f }
+                b.tick = now
+              }
+            }
+            Canvas(Modifier.fillMaxSize()) {
+              val tk = b.tick
+              if (tk >= 0L) for (p in b.ps) {
+                val a = p.life.coerceIn(0f, 1f); val s = p.s * (.6f + .4f * a)
+                if (p.kind == 0) drawHeart(p.x, p.y, s, p.c, a) else drawSpark(p.x, p.y, s * 1.2f, p.c, a)
+              }
+            }
+          }
+
+          // ───────── mascot ─────────
+          @Composable fun Mochi(sz: Dp, mood: Int = 0, m: Modifier = Modifier, tap: () -> Unit = {}) {
+            val ck = LClock.current; val cf = LCfg.current; val ac = cf.ac; val ac2 = cf.ac2
+            val jump = remember { Animatable(0f) }; val sc = rememberCoroutineScope()
+            val src = remember { MutableInteractionSource() }
+            Canvas(m.size(sz).clickable(src, null) { sc.launch { jump.snapTo(0f); jump.animateTo(1f, tween(560, easing = FastOutSlowInEasing)) }; tap() }) {
+              val t = ck.value; val w = size.width; val h = size.height; val j = jump.value
+              val hop = if (j > 0f && j < 1f) sin(j * 3.1416f) * h * .24f else 0f
+              val sq = if (j > 0f && j < .12f) 1f else 0f
+              val br = sin(t * 2.2f) * .03f
+              val bw = w * .74f * (1f + br + sq * .08f); val bh = h * .6f * (1f - br - sq * .06f)
+              val cx = w / 2f; val by = h * .88f - hop
+              drawOval(Color.Black.copy(alpha = .15f * (1f - hop / h * 2f).coerceIn(.3f, 1f)), Offset(cx - bw * .45f, h * .86f), Size(bw * .9f, h * .07f))
+              drawCircle(ac2, w * .07f, Offset(cx + bw * .52f, by - bh * .22f + sin(t * 5f) * h * .025f))
+              val er = w * .115f
+              for (sg in listOf(-1f, 1f)) {
+                drawCircle(ac, er, Offset(cx + sg * bw * .3f, by - bh * .96f))
+                drawCircle(ac2, er * .5f, Offset(cx + sg * bw * .3f, by - bh * .96f))
+              }
+              drawRoundRect(ac, Offset(cx - bw / 2, by - bh), Size(bw, bh), CornerRadius(bw * .46f))
+              drawOval(Color.White.copy(alpha = .22f), Offset(cx - bw * .32f, by - bh * .94f), Size(bw * .3f, bh * .18f))
+              val ey = by - bh * .56f; val ex = bw * .2f; val r = w * .05f
+              val bl = t % 3.6f; val open = if (bl > 3.46f) .12f else 1f
+              for (sg in listOf(-1f, 1f)) {
+                val x = cx + sg * ex
+                if (mood == 1) drawArc(INK, 200f, 140f, false, Offset(x - r, ey - r * .4f), Size(r * 2, r * 1.3f), style = Stroke(w * .02f, cap = StrokeCap.Round))
+                else {
+                  val rr = if (mood == 3) r * 1.25f else r
+                  drawOval(INK, Offset(x - rr, ey - rr * 1.3f * open), Size(rr * 2, rr * 2.6f * open))
+                  if (open > .5f) drawCircle(Color.White, rr * .38f, Offset(x - rr * .25f, ey - rr * .55f))
+                }
+                drawCircle(Color(0xFFFF8FB1).copy(alpha = .55f), w * .05f, Offset(cx + sg * bw * .33f, by - bh * .36f))
+              }
+              val my = by - bh * .42f
+              when (mood) {
+                2 -> drawArc(INK, 200f, 140f, false, Offset(cx - w * .04f, my + w * .01f), Size(w * .08f, w * .06f), style = Stroke(w * .018f, cap = StrokeCap.Round))
+                3 -> drawOval(INK, Offset(cx - w * .03f, my - w * .01f), Size(w * .06f, w * .07f))
+                else -> drawArc(INK, 20f, 140f, false, Offset(cx - w * .04f, my - w * .03f), Size(w * .08f, w * .06f), style = Stroke(w * .018f, cap = StrokeCap.Round))
+              }
+            }
+          }
+
+          // ───────── procedural cute file icons ─────────
+          @Composable fun Ico(e: E, sz: Dp, sel: Boolean = false, m: Modifier = Modifier) {
+            val ck = LClock.current; val cf = LCfg.current; val ctx = LocalContext.current
+            val kind = Fx.kind(e)
+            val hue = floatArrayOf(cf.hue, 330f, 265f, 195f, 40f, 125f, 215f, 20f, 0f)[kind]
+            val lt = Th.pal.light
+            val col = Color.hsv(hue, if (kind == 8) .12f else if (lt) .55f else .5f, if (lt) .92f else 1f)
+            val dk = Color.hsv(hue, if (kind == 8) .15f else .6f, if (lt) .7f else .82f)
+            val th = if (Thumbs.ok(e)) produceState<ImageBitmap?>(null, e.f.path) { value = withContext(Dispatchers.IO) { Thumbs.get(ctx.packageManager, e.f, 96)?.asImageBitmap() } }.value else null
+            val wh = Color.White.copy(alpha = .9f)
+            Canvas(m.size(sz).graphicsLayer { rotationZ = if (sel && cf.fx > 0) sin(ck.value * 9f) * 6f else 0f }) {
+              val w = size.width; val h = size.height; val t = ck.value
+              if (th != null) {
+                val s = min(th.width, th.height)
+                drawRoundRect(col, Offset.Zero, size, CornerRadius(w * .24f))
+                drawImage(th, IntOffset((th.width - s) / 2, (th.height - s) / 2), IntSize(s, s), IntOffset(w.toInt() / 16, w.toInt() / 16), IntSize(w.toInt() * 7 / 8, h.toInt() * 7 / 8))
+                return@Canvas
+              }
+              val bob = if (cf.fx > 0) sin(t * 3f + kind) * h * .015f else 0f
+              var fy = h * .64f
+              if (kind == 0) {
+                drawRoundRect(dk, Offset(w * .06f, h * .16f + bob), Size(w * .42f, h * .2f), CornerRadius(w * .09f))
+                drawRoundRect(col, Offset(w * .06f, h * .27f + bob), Size(w * .88f, h * .62f), CornerRadius(w * .18f))
+                fy = h * .6f + bob
+              } else {
+                drawRoundRect(col, Offset(w * .17f, h * .08f + bob), Size(w * .66f, h * .84f), CornerRadius(w * .14f))
+                drawRoundRect(dk, Offset(w * .6f, h * .08f + bob), Size(w * .23f, h * .22f), CornerRadius(w * .08f))
+                val cx = w * .5f; val y = h * .31f + bob
+                when (kind) {
+                  1 -> { drawCircle(wh, w * .06f, Offset(cx + w * .1f, y - h * .04f)); HP.reset(); HP.moveTo(cx - w * .2f, y + h * .1f); HP.lineTo(cx - w * .05f, y - h * .05f); HP.lineTo(cx + w * .1f, y + h * .1f); HP.close(); drawPath(HP, wh) }
+                  2 -> { HP.reset(); HP.moveTo(cx - w * .07f, y - h * .09f); HP.lineTo(cx + w * .1f, y); HP.lineTo(cx - w * .07f, y + h * .09f); HP.close(); drawPath(HP, wh) }
+                  3 -> { drawCircle(wh, w * .05f, Offset(cx - w * .04f, y + h * .07f)); drawLine(wh, Offset(cx + w * .01f, y + h * .07f), Offset(cx + w * .01f, y - h * .1f), w * .025f); drawLine(wh, Offset(cx + w * .01f, y - h * .1f), Offset(cx + w * .1f, y - h * .05f), w * .025f) }
+                  4 -> for (k in 0..2) drawRect(wh, Offset(cx - w * .03f + (k % 2) * w * .06f, y - h * .11f + k * h * .08f), Size(w * .06f, h * .05f))
+                  5 -> { drawArc(wh, 180f, 180f, true, Offset(cx - w * .12f, y - h * .02f), Size(w * .24f, h * .2f)); drawLine(wh, Offset(cx - w * .08f, y - h * .02f), Offset(cx - w * .12f, y - h * .1f), w * .02f); drawLine(wh, Offset(cx + w * .08f, y - h * .02f), Offset(cx + w * .12f, y - h * .1f), w * .02f) }
+                  6 -> { drawLine(wh, Offset(cx - w * .04f, y - h * .07f), Offset(cx - w * .11f, y), w * .03f); drawLine(wh, Offset(cx - w * .11f, y), Offset(cx - w * .04f, y + h * .07f), w * .03f); drawLine(wh, Offset(cx + w * .04f, y - h * .07f), Offset(cx + w * .11f, y), w * .03f); drawLine(wh, Offset(cx + w * .11f, y), Offset(cx + w * .04f, y + h * .07f), w * .03f) }
+                  7 -> for (k in 0..2) drawLine(wh, Offset(cx - w * .13f, y - h * .08f + k * h * .08f), Offset(cx + w * .13f - (k % 2) * w * .08f, y - h * .08f + k * h * .08f), w * .025f)
+                  else -> drawSpark(cx, y, w * .1f, wh)
+                }
+                fy = h * .68f + bob
+              }
+              val cx = w * .5f; val op = if ((t + kind * 1.3f) % 4f > 3.85f) .15f else 1f
+              for (sg in listOf(-1f, 1f)) drawOval(INK, Offset(cx + sg * w * .12f - w * .04f, fy - w * .05f * op), Size(w * .08f, w * .1f * op))
+              drawArc(INK, 20f, 140f, false, Offset(cx - w * .05f, fy + w * .02f), Size(w * .1f, w * .07f), style = Stroke(w * .025f, cap = StrokeCap.Round))
+              if (sel) drawHeart(w * .88f, h * .14f, w * .09f, Color(0xFFFF6B9A))
+            }
+          }
+
+          // ───────── rows, grid cells, pane ─────────
+          @Composable fun Rw(e: E, i: Int, sel: Boolean, jelly: () -> Float, tap: () -> Unit, lng: () -> Unit) {
+            val cf = LCfg.current; val ac = cf.ac; val fx = cf.fx
+            var on by remember { mutableStateOf(i >= 14 || fx == 0) }
+            if (!on) LaunchedEffect(Unit) { delay((i * cf.stag).toLong()); on = true }
+            val a by animateFloatAsState(if (on) 1f else 0f, spring(.6f, 300f), label = "a")
+            val sh = RoundedCornerShape((cf.rad * .8f).dp)
+            val sub = remember(e, cf.cSize, cf.cDate, cf.cPerm) { buildList { if (cf.cSize && !e.dir) add(Fx.sz(e.sz)); if (cf.cDate) add(Fx.dt(e.mt)); if (cf.cPerm) add(e.pm) }.joinToString(" · ") }
+            val pop by animateFloatAsState(if (sel) 1f else 0f, spring(.4f, 500f), label = "p")
+            Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 1.5.dp)
+              .graphicsLayer {
+                val k = a.coerceIn(0f, 1f)
+                alpha = k; scaleX = .9f + .1f * k; scaleY = .9f + .1f * k
+                translationX = (1f - a) * 70f + (if (fx == 2) jelly() * (if (i % 2 == 0) .35f else -.35f) else 0f)
+              }
+              .clip(sh).background(if (sel) ac.copy(alpha = .22f) else Color.Transparent)
+              .combinedClickable(onClick = tap, onLongClick = lng).padding(horizontal = 6.dp, vertical = cf.pad.dp),
+              verticalAlignment = Alignment.CenterVertically) {
+              Ico(e, 38.dp, sel)
+              Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                T(e.n, if (e.dir) ac else Th.fg, 13f, FontWeight.Medium)
+                if (sub.isNotEmpty()) T(sub, Th.dim, 10f)
+              }
+              if (pop > .01f) Canvas(Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }) { drawHeart(size.width / 2, size.height / 2, size.width * .3f, Color(0xFFFF6B9A)) }
+            }
+          }
+
+          @Composable fun Gc(e: E, sel: Boolean, tap: () -> Unit, lng: () -> Unit) {
+            val cf = LCfg.current; val sh = RoundedCornerShape(cf.rad.dp)
+            Column(Modifier.padding(3.dp).clip(sh).background(if (sel) cf.ac.copy(alpha = .22f) else Th.fg.copy(alpha = .04f))
+              .combinedClickable(onClick = tap, onLongClick = lng).padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+              Ico(e, 54.dp, sel)
+              Text(e.n, color = if (e.dir) cf.ac else Th.fg, fontSize = (10 * cf.fs).sp, fontFamily = cf.ff, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+            }
+          }
+
+          @Composable fun Stor() {
+            val cf = LCfg.current; val ac = cf.ac; val a2 = cf.ac2; val ck = LClock.current
+            val (tot, fr) = remember { Fx.stor() }
+            val used = if (tot > 0) (tot - fr).toFloat() / tot else 0f
+            val grow = remember { Animatable(0f) }
+            LaunchedEffect(Unit) { grow.animateTo(1f, tween(900, easing = Back)) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Canvas(Modifier.weight(1f).height(9.dp).clip(RoundedCornerShape(5.dp))) {
+                drawRect(Th.fg.copy(alpha = .1f))
+                val w = size.width * used * grow.value.coerceAtMost(1.04f)
+                drawRect(Brush.horizontalGradient(listOf(a2, ac)), size = Size(w, size.height))
+                if (cf.fx > 0 && w > 0f) {
+                  val x = ((ck.value * .5f) % 1f) * (w + 90f) - 90f
+                  clipRect(right = w) { drawRect(Brush.horizontalGradient(listOf(Color.Transparent, Color.White.copy(alpha = .5f), Color.Transparent), startX = x, endX = x + 90f), Offset(x, 0f), Size(90f, size.height)) }
+                }
+              }
+              T("${Fx.sz(tot - fr)} / ${Fx.sz(tot)}", Th.dim, 10f, null, Modifier.padding(start = 6.dp))
+            }
+          }
+
+          @Composable fun PaneView(p: Pane, on: Boolean, m: Modifier, go: (File) -> Unit, tap: (E) -> Unit, lng: (E) -> Unit) {
+            val cf = LCfg.current; val ac = cf.ac; val fx = cf.fx
+            val sw = remember { Animatable(1f) }
+            LaunchedEffect(p.snap.dir) { if (fx == 2) { sw.snapTo(0f); sw.animateTo(1f, tween(480)) } }
+            val jl = remember { Animatable(0f) }; val sc = rememberCoroutineScope()
+            val conn = remember {
+              object : NestedScrollConnection {
+                override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                  if (consumed.y != 0f && cf.fx == 2) sc.launch { jl.snapTo((jl.value * .7f + consumed.y * .3f).coerceIn(-40f, 40f)); jl.animateTo(0f, spring(.45f, 120f)) }
+                  return Offset.Zero
+                }
+              }
+            }
+            val sh = RoundedCornerShape(cf.rad.dp)
+            Column(m.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = .035f)).border(1.5.dp, if (on) ac.copy(alpha = .65f) else Th.fg.copy(alpha = .08f), sh)) {
+              val parts = remember(p.snap.dir) { val l = ArrayList<File>(); var f: File? = p.snap.dir; while (f != null) { l.add(0, f); f = f.parentFile }; l }
+              val bs = rememberScrollState()
+              LaunchedEffect(parts) { delay(60); bs.animateScrollTo(bs.maxValue) }
+              Row(Modifier.fillMaxWidth().horizontalScroll(bs).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                parts.forEach { f -> Bt(f.name.ifEmpty { "/" }, f == p.snap.dir) { go(f) }; Spacer(Modifier.width(3.dp)) }
+              }
+              Box(Modifier.weight(1f).fillMaxWidth()) {
+                AnimatedContent(p.snap, transitionSpec = {
+                  if (fx == 0 || initialState.dir == targetState.dir) EnterTransition.None togetherWith ExitTransition.None
+                  else {
+                    val d = if (targetState.dir.path.length < initialState.dir.path.length) -1 else 1
+                    if (fx == 1) fadeIn(tween(140)) togetherWith fadeOut(tween(90))
+                    else (slideInHorizontally(tween(340, easing = Back)) { it * d / 3 } + fadeIn(tween(220)) + scaleIn(tween(320, easing = Back), .92f)) togetherWith
+                      (slideOutHorizontally(tween(220)) { -it * d / 3 } + fadeOut(tween(120)))
+                  }
+                }, label = "nav", contentKey = { it.dir }) { s ->
+                  if (s.items.isEmpty()) Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) { Mochi(90.dp, 1); T("nothing here~ zzz", Th.dim) }
+                  else if (cf.grid) LazyVerticalGrid(GridCells.Adaptive(84.dp), Modifier.fillMaxSize().nestedScroll(conn)) {
+                    items(count = s.items.size, key = { s.items[it].f.path }) { i -> val e = s.items[i]; Gc(e, e.f.path in p.sel, { tap(e) }, { lng(e) }) }
+                  }
+                  else LazyColumn(Modifier.fillMaxSize().nestedScroll(conn)) {
+                    items(count = s.items.size, key = { s.items[it].f.path }, contentType = { if (s.items[it].dir) 0 else 1 }) { i ->
+                      val e = s.items[i]
+                      Rw(e, i, e.f.path in p.sel, { jl.value }, { tap(e) }, { lng(e) })
+                    }
+                  }
+                }
+                if (fx == 2) Canvas(Modifier.fillMaxSize()) {
+                  val v = sw.value
+                  if (v < 1f) {
+                    val y = size.height * v
+                    drawRect(Brush.verticalGradient(listOf(Color.Transparent, ac.copy(alpha = .4f * (1f - v)), Color.Transparent), startY = y - 36f, endY = y + 36f), Offset(0f, y - 36f), Size(size.width, 72f))
+                    for (k in 0..4) drawSpark(size.width * (k + .5f) / 5f, y + sin(k * 2f + v * 9f) * 12f, 7f, cf.ac2, 1f - v)
+                  }
+                }
+              }
+              val st = remember(p.snap) { p.snap.items.size.toString() + " items · " + Fx.sz(p.snap.items.sumOf { it.sz }) }
+              Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Scr(st, ac.copy(alpha = .9f), 10f)
+                Spacer(Modifier.weight(1f))
+                if (p.sel.isNotEmpty()) T("♡ ${p.sel.size}", cf.ac2, 11f, FontWeight.Bold)
+              }
+            }
+          }
+
+          // ───────── navigation, transitions, feedback ─────────
+          @Composable fun NavBar(tab: Int, go: (Int) -> Unit) {
+            val cf = LCfg.current; val ac = cf.ac
+            val idx = remember { Animatable(tab.toFloat()) }
+            LaunchedEffect(tab) { if (cf.fx > 0) idx.animateTo(tab.toFloat(), spring(.5f, 380f)) else idx.snapTo(tab.toFloat()) }
+            val items = listOf("🏠" to "home", "📁" to "files", "🔍" to "find", "🧰" to "tools", "🐾" to "me")
+            val sh = RoundedCornerShape(26.dp)
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp).clip(sh).background(Th.fg.copy(alpha = .07f)).border(1.5.dp, Th.fg.copy(alpha = .1f), sh)
+              .drawBehind {
+                val iw = size.width / 5f; val pd = 5.dp.toPx()
+                drawRoundRect(ac.copy(alpha = .3f), Offset(idx.value * iw + pd, pd), Size(iw - pd * 2, size.height - pd * 2), CornerRadius(22.dp.toPx()))
+              }) {
+              items.forEachIndexed { i, (ic, lb) ->
+                val s by animateFloatAsState(if (i == tab && cf.fx > 0) 1.28f else 1f, spring(.35f, 400f), label = "n")
+                Column(Modifier.weight(1f).clickable(remember { MutableInteractionSource() }, null) { go(i) }.padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                  Box(Modifier.graphicsLayer { scaleX = s; scaleY = s }) { T(ic, Th.fg, 19f) }
+                  T(lb, if (i == tab) ac else Th.dim, 9f, if (i == tab) FontWeight.Bold else null)
+                }
+              }
+            }
+          }
+
+          @Composable fun Wipe(tab: Int) {
+            val cf = LCfg.current
+            val pr = remember { Animatable(1f) }
+            var last by remember { mutableIntStateOf(tab) }
+            var dir by remember { mutableIntStateOf(1) }
+            val rnd = remember { List(16) { Triple(Random.nextFloat(), Random.nextFloat(), Random.nextFloat()) } }
+            LaunchedEffect(tab) {
+              if (tab != last && cf.fx == 2) { dir = if (tab > last) 1 else -1; last = tab; pr.snapTo(0f); pr.animateTo(1f, tween(640, easing = LinearEasing)) } else last = tab
+            }
+            Canvas(Modifier.fillMaxSize()) {
+              val p = pr.value
+              if (p < 1f) for ((k, r) in rnd.withIndex()) {
+                val q = (p * 1.35f - r.first * .35f).coerceIn(0f, 1f)
+                val x = if (dir > 0) size.width * (1.1f - q * 1.3f) else size.width * (-.1f + q * 1.3f)
+                val y = r.second * size.height; val bell = sin(q * 3.1416f)
+                val c = if (k % 2 == 0) cf.ac else cf.ac2
+                if (k % 4 == 3) drawHeart(x, y, size.width * .05f * (.5f + bell), c, bell * .6f)
+                else drawCircle(c.copy(alpha = bell * .4f), size.width * .1f * (.4f + r.third) * (.5f + bell), Offset(x, y))
+              }
+            }
+          }
+
+          @Composable fun Snack(msg: String?) {
+            val cf = LCfg.current
+            var last by remember { mutableStateOf("") }
+            if (msg != null && msg != last) SideEffect { last = msg }
+            Box(Modifier.fillMaxWidth().padding(top = 10.dp), Alignment.TopCenter) {
+              AnimatedVisibility(msg != null, enter = slideInVertically(spring(.5f, 400f)) { -it * 2 } + fadeIn(), exit = slideOutVertically { -it * 2 } + fadeOut()) {
+                val sh = RoundedCornerShape(24.dp)
+                Row(Modifier.clip(sh).background(Th.bg).border(1.5.dp, cf.ac, sh).padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                  T("♡ ", cf.ac, 13f); T(msg ?: last, Th.fg, 12f, FontWeight.Medium, ml = 2)
+                }
+              }
+            }
+          }
+
+          @Composable fun Dlg(d: Dg, close: () -> Unit) {
+            val cf = LCfg.current
+            val ok = d.onOk
+            AlertDialog(onDismissRequest = close, containerColor = Th.bg, shape = RoundedCornerShape(28.dp), tonalElevation = 0.dp,
+              title = { T(d.title, cf.ac, 15f, FontWeight.Bold) },
+              text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) { d.body() } },
+              confirmButton = { if (ok != null) Bt(d.ok, true) { ok(); close() } else Bt(d.ok, true) { close() } },
+              dismissButton = { if (ok != null) Bt("✕") { close() } })
+          }
+
+          // ───────── welcome ─────────
+          @Composable fun Welcome(ready: Boolean, access: Boolean, ask: () -> Unit, done: () -> Unit) {
+            val cf = LCfg.current; val ck = LClock.current
+            val tm = remember { Animatable(0f) }
+            val cap = rememberUpdatedState(if (ready && access) 1f else if (access) .9f else .5f)
+            val pop = remember { Animatable(0f) }
+            LaunchedEffect(Unit) { pop.animateTo(1f, spring(.4f, 150f)) }
+            LaunchedEffect(Unit) { tm.animateTo(1f, tween(2600, easing = LinearEasing)) }
+            LaunchedEffect(Unit) {
+              var n = 0; var tot = 0L; var last = withFrameNanos { it }
+              while (n < 50) { val t = withFrameNanos { it }; if (n >= 15) tot += t - last; last = t; n++ }
+              val avg = tot / 35 / 1e6
+              if (cf.auto) Th.cap = if (avg > 40) 0 else if (avg > 26) 1 else 2
+            }
+            LaunchedEffect(ready, access) { if (ready && access) { snapshotFlow { tm.value }.first { it >= 1f }; delay(300); done() } }
+            val steps = listOf("waking mochi up…", "sniffing your folders…", "counting storage crumbs…", "sprinkling sparkles…", "all set! ♡")
+            val step by remember { derivedStateOf { (minOf(tm.value, cap.value) * 4.99f).toInt().coerceIn(0, 4) } }
+            val h = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
+            val greet = when { h < 5 -> "still awake? (・ω・)"; h < 11 -> "good morning!"; h < 17 -> "hello hello!"; h < 21 -> "good evening~"; else -> "sleepy time soon…" }
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Th.bg, cf.ac.copy(alpha = .22f).compositeOver(Th.bg)))).pointerInput(Unit) { detectTapGestures { } }) {
+              Canvas(Modifier.fillMaxSize()) {
+                val t = ck.value
+                for (k in 0 until 16) {
+                  val x = size.width * (((k * 37) % 100) / 100f) + sin(t * .8f + k) * 18f
+                  val y = size.height - ((t * (18f + (k % 5) * 9f) + k * 90f) % (size.height + 80f)) + 40f
+                  val s = 5f + (k % 4) * 3f; val c = if (k % 2 == 0) cf.ac else cf.ac2
+                  when (k % 3) { 0 -> drawHeart(x, y, s, c, .35f); 1 -> drawSpark(x, y, s * 1.3f, c, .4f); else -> drawCircle(c.copy(alpha = .25f), s, Offset(x, y)) }
+                }
+              }
+              Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Mochi(160.dp, if (step < 1) 1 else if (step == 4) 3 else 0, Modifier.graphicsLayer { scaleX = pop.value; scaleY = pop.value })
+                Wave("NerdFM", 32f)
+                T(greet, cf.ac2, 14f, FontWeight.Medium)
+                T(steps[step], Th.dim, 12f)
+                Canvas(Modifier.size(220.dp, 30.dp)) {
+                  val p = minOf(tm.value, cap.value)
+                  for (i in 0 until 7) {
+                    val cx = size.width * (i + .5f) / 7f; val f = (p * 7f - i).coerceIn(0f, 1f)
+                    drawHeart(cx, size.height / 2, 9f, Th.fg, .15f)
+                    if (f > 0f) drawHeart(cx, size.height / 2, 9f * (.4f + .6f * f), cf.ac, f)
+                  }
+                }
+                if (!access) {
+                  T("mochi needs all-files access to peek into your folders ♡", Th.fg, 12f, null, Modifier.padding(top = 8.dp), 3)
+                  Bt("GIVE ACCESS ♡", true, Modifier, ask)
+                }
+              }
+            }
+          }
+          NFM_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic.xml <<'NFM_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+           <path android:fillColor="#2A1B2A" android:pathData="M0,0h108v108h-108z"/>
+           <path android:fillColor="#FF9CC2" android:pathData="M38,26 a7,7 0 1 0 0,14 a7,7 0 1 0 0,-14 z M70,26 a7,7 0 1 0 0,14 a7,7 0 1 0 0,-14 z"/>
+           <path android:fillColor="#FF9CC2" android:pathData="M34,38 h40 a14,14 0 0 1 14,14 v22 a14,14 0 0 1 -14,14 h-40 a14,14 0 0 1 -14,-14 v-22 a14,14 0 0 1 14,-14 z"/>
+           <path android:fillColor="#FFFFFF" android:fillAlpha="0.25" android:pathData="M32,44 h16 a4,4 0 0 1 0,8 h-16 a4,4 0 0 1 0,-8 z"/>
+           <path android:fillColor="#3B2A38" android:pathData="M40,54 a4,5.5 0 1 0 0,11 a4,5.5 0 1 0 0,-11 z M68,54 a4,5.5 0 1 0 0,11 a4,5.5 0 1 0 0,-11 z"/>
+           <path android:fillColor="#FFFFFF" android:pathData="M41,56 a1.6,1.6 0 1 0 0,3.2 a1.6,1.6 0 1 0 0,-3.2 z M69,56 a1.6,1.6 0 1 0 0,3.2 a1.6,1.6 0 1 0 0,-3.2 z"/>
+           <path android:fillColor="#FF6B9A" android:fillAlpha="0.6" android:pathData="M28,70 a5,4 0 1 0 0,8 a5,4 0 1 0 0,-8 z M80,70 a5,4 0 1 0 0,8 a5,4 0 1 0 0,-8 z"/>
+           <path android:strokeColor="#3B2A38" android:strokeWidth="2.4" android:strokeLineCap="round" android:pathData="M49,70 q5,5 10,0"/>
+          </vector>
+          NFM_EOF
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/paths.xml <<'NFM_EOF'
+          <paths><root-path name="r" path="."/></paths>
+          NFM_EOF
+          echo "$SV" > .nerdfm
+
+      - name: Build
+        run: |
+          G=$([ -f gradlew ] && echo ./gradlew || echo gradle)
+          $G assembleRelease -PvCode=${{ github.run_number }} -PvName=${{ steps.v.outputs.n }} --build-cache --parallel --console=plain -q
+          A=$(find . -path '*outputs/apk/release/*.apk' | head -1)
+          [ -n "$A" ] || { echo "::error::no APK produced"; exit 1; }
+          cp "$A" "NerdFM-${{ steps.v.outputs.n }}.apk"
+
+      - name: Verify
+        run: |
+          A=$(ls NerdFM-*.apk)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "$A" | head -2
+          S=$(stat -c%s "$A")
+          echo "### $A · $((S/1024)) KiB · sha256 \`$(sha256sum "$A" | cut -c1-16)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit bootstrap
+        if: steps.b.outputs.s == '1'
+        continue-on-error: true
+        run: |
+          git config user.name nerdfm-ci; git config user.email ci@users.noreply.github.com
+          git add -A; git reset -q -- ks.jks '*.apk' 2>/dev/null || true
+          git diff --cached --quiet || { git commit -qm "chore: scaffold SV=$SV [skip ci]" && git push; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 'NerdFM-${{ steps.v.outputs.n }}'
+          path: |
+            NerdFM-*.apk
+            app/build/outputs/mapping/release/mapping.txt
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
