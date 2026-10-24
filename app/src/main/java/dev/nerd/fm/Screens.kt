@@ -31,9 +31,11 @@ import kotlin.math.max
 private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type:arc", "type:apk", "type:code",
   "size>10m", "size>100m", "size<10k", "age<1d", "age<7d", "age>365d", "dir", "file", "depth:1", "depth:3")
 
-@Composable fun SearchScr(back: () -> Unit, root: File, hid: Boolean, go: (E) -> Unit) {
+@Composable fun SearchScr(here: File, all: File, hid: Boolean, initQ: String, go: (E) -> Unit) {
   val cf = LCfg.current
-  var q by remember { mutableStateOf("") }
+  var q by remember { mutableStateOf(initQ) }
+  var wide by remember { mutableStateOf(initQ.isNotEmpty()) }
+  val root = if (wide) all else here
   var rx by remember { mutableStateOf(false) }
   var cs by remember { mutableStateOf(false) }
   var res by remember { mutableStateOf(listOf<E>()) }
@@ -41,7 +43,7 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
   var ms by remember { mutableLongStateOf(0L) }
   var run by remember { mutableStateOf(false) }
   var bad by remember { mutableStateOf(false) }
-  LaunchedEffect(q, rx, cs) {
+  LaunchedEffect(q, rx, cs, wide) {
     res = emptyList(); scanned = 0; bad = false; run = false
     if (q.isBlank()) return@LaunchedEffect
     delay(400)
@@ -63,12 +65,12 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
   }
   fun tog(t: String) { val l = q.split(" ").filter { it.isNotEmpty() }; q = (if (t in l) l - t else l + t).joinToString(" ") }
   Column(Modifier.fillMaxSize()) {
-    Hdr("SEARCH", back)
+    Wave("FIND", 18f)
     Inp(q, { q = it }, "name* -skip  ext:jpg,png  size>10m  age<7d  c:text  type:img  depth:3", Modifier.fillMaxWidth())
     Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-      Bt(".*", rx) { rx = !rx }; Bt("Aa", cs) { cs = !cs }
+      Bt(".*", rx) { rx = !rx }; Bt("Aa", cs) { cs = !cs }; Bt(if (wide) "ALL" else "HERE", wide) { wide = !wide }
       if (run) Wave("scan", 11f)
-      T(if (bad) "bad regex" else "$scanned scanned · ${res.size} hits · ${ms}ms", Color.Gray, 10f)
+      T(if (bad) "bad regex" else "$scanned scanned · ${res.size} hits · ${ms}ms", Th.dim, 10f)
     }
     val toks = q.split(" ")
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -78,61 +80,13 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
       items(res, key = { it.f.path }) { e ->
         Column(Modifier.fillMaxWidth().clickable { go(e) }.padding(vertical = 4.dp, horizontal = 4.dp)) {
           Row {
-            T(Fx.gl(e) + " " + e.n, if (e.dir) cf.ac else Color.White, 13f, null, Modifier.weight(1f))
-            if (!e.dir) T(Fx.sz(e.sz), Color.Gray, 10f)
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) { Ico(e, 28.dp); Spacer(Modifier.width(6.dp)); T(e.n, if (e.dir) cf.ac else Th.fg, 13f, null, Modifier.weight(1f)) }
+            if (!e.dir) T(Fx.sz(e.sz), Th.dim, 10f)
           }
-          T(e.f.parent ?: "", Color.Gray, 9f)
+          T(e.f.parent ?: "", Th.dim, 9f)
         }
       }
     }
-  }
-}
-
-@Composable fun SetScr(back: () -> Unit) {
-  val cf = LCfg.current
-  Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-    Hdr("SETTINGS", back)
-    Wave("PREVIEW//Ab12", 22f)
-    Sec("THEME")
-    Sl("hue", cf.hue, 0f..360f) { cf.hue = it }
-    Sl("sat", cf.sat, 0f..1f) { cf.sat = it }
-    Sl("bg", cf.bg, 0f..0.15f) { cf.bg = it }
-    Sl("font x", cf.fs, .7f..1.6f) { cf.fs = it }
-    Sl("pad", cf.pad, 0f..18f) { cf.pad = it }
-    Sl("radius", cf.rad, 0f..24f) { cf.rad = it }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("MONO", "SANS", "SERIF").forEachIndexed { i, s -> Bt(s, cf.font == i) { cf.font = i } } }
-    Sec("MOTION")
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("OFF", "LOW", "HIGH").forEachIndexed { i, s -> Bt(s, cf.anim == i) { cf.anim = i } } }
-    Sl("wave", cf.amp, 0f..12f) { cf.amp = it }
-    Sl("speed s", cf.spd, .6f..6f) { cf.spd = it }
-    Sl("stagger", cf.stag, 0f..60f) { cf.stag = it }
-    Sec("VIEW")
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-      Bt("HIDDEN", cf.hidden) { cf.hidden = !cf.hidden }
-      Bt("SIZE", cf.cSize) { cf.cSize = !cf.cSize }
-      Bt("DATE", cf.cDate) { cf.cDate = !cf.cDate }
-      Bt("PERM", cf.cPerm) { cf.cPerm = !cf.cPerm }
-      Bt("DUAL", cf.dual) { cf.dual = !cf.dual }
-    }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-      listOf("NAME", "SIZE", "DATE", "EXT").forEachIndexed { i, s -> Bt(s, cf.sort == i) { cf.sort = i } }
-      Bt("DESC", cf.desc) { cf.desc = !cf.desc }
-    }
-    Spacer(Modifier.height(8.dp))
-    Bt("RESET ALL") { cf.reset() }
-  }
-}
-
-@Composable fun ToolsScr(back: () -> Unit, nav: (String) -> Unit, act: (String) -> Unit) {
-  Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-    Hdr("TOOLS", back)
-    Cd("⌕ SEARCH", "regex/glob · size · age · type · content grep · depth") { nav("search") }
-    Cd("▤ ANALYZER", "biggest items in current folder, live bars") { nav("ana") }
-    Cd("⧉ DUPLICATES", "size → MD5(64K) → SHA-1, auto-mark extras") { nav("dupe") }
-    Cd("∅ EMPTY FOLDERS", "find & purge empty directory trees") { nav("empty") }
-    Cd("✎ BATCH RENAME", "regex + {n} counter on selection") { act("batch") }
-    Cd("★ BOOKMARKS", "saved folders") { act("bm") }
-    Cd("⚙ SETTINGS", "theme, motion, view — all live") { nav("set") }
   }
 }
 
@@ -146,7 +100,7 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
   LaunchedEffect(r) { go0 = false; delay(30); go0 = true }
   Column(Modifier.fillMaxSize()) {
     Hdr("ANALYZER", back)
-    T(dir.path, Color.Gray, 10f)
+    T(dir.path, Th.dim, 10f)
     if (r == null) Wave("measuring…", 14f) else {
       val tot = r.sumOf { it.second }.coerceAtLeast(1L)
       T("total " + Fx.sz(tot), cf.ac2, 12f)
@@ -156,8 +110,8 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
           Box(Modifier.fillMaxWidth().clickable(enabled = f.isDirectory) { go(f) }.padding(vertical = 2.dp)) {
             Box(Modifier.fillMaxWidth(fr.coerceIn(0.005f, 1f)).height(26.dp).background(cf.ac.copy(alpha = .25f)))
             Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
-              T((if (f.isDirectory) "▸ " else "· ") + f.name, Color.White, 12f, null, Modifier.weight(1f))
-              T(Fx.sz(s) + "  " + (s * 100 / tot) + "%", Color.Gray, 10f)
+              T((if (f.isDirectory) "▸ " else "· ") + f.name, Th.fg, 12f, null, Modifier.weight(1f))
+              T(Fx.sz(s) + "  " + (s * 100 / tot) + "%", Th.dim, 10f)
             }
           }
         }
@@ -174,7 +128,7 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
   Column(Modifier.fillMaxSize()) {
     Hdr("DUPLICATES", back)
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-      T("min", Color.Gray, 11f)
+      T("min", Th.dim, 11f)
       listOf(1024L to ">1K", 102400L to ">100K", 1048576L to ">1M").forEach { (v, l) -> Bt(l, mn == v) { mn = v } }
     }
     if (g == null) Wave("hashing…", 14f) else {
@@ -182,7 +136,7 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
         Bt("AUTO") { mk = g.flatMap { it.drop(1) }.map { it.path }.toSet() }
         Bt("CLEAR") { mk = emptySet() }
         Bt("DEL ${mk.size}", mk.isNotEmpty()) { onDel(g.flatten().filter { it.path in mk }) }
-        T("${g.size} grp · ${Fx.sz(g.sumOf { (it.size - 1) * it[0].length() })} wasted", Color.Gray, 10f)
+        T("${g.size} grp · ${Fx.sz(g.sumOf { (it.size - 1) * it[0].length() })} wasted", Th.dim, 10f)
       }
       LazyColumn(Modifier.weight(1f)) {
         g.forEachIndexed { gi, grp ->
@@ -191,7 +145,7 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
             val on = f.path in mk
             Box(Modifier.fillMaxWidth().background(if (on) Color.Red.copy(alpha = .22f) else Color.Transparent)
               .clickable { mk = if (on) mk - f.path else mk + f.path }.padding(horizontal = 4.dp, vertical = 3.dp)) {
-              T(f.path.removePrefix(root.path), if (on) Color(0xFFFF8080) else Color.White, 11f, ml = 2)
+              T(f.path.removePrefix(root.path), if (on) Color(0xFFFF8080) else Th.fg, 11f, ml = 2)
             }
           }
         }
@@ -205,9 +159,9 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
   Column(Modifier.fillMaxSize()) {
     Hdr("EMPTY FOLDERS", back) { if (!l.isNullOrEmpty()) Bt("PURGE ${l.size}", true) { onDel(l) } }
     if (l == null) Wave("scanning…", 14f)
-    else if (l.isEmpty()) T("∅ none", Color.Gray)
+    else if (l.isEmpty()) T("∅ none", Th.dim)
     else LazyColumn(Modifier.weight(1f)) {
-      items(l, key = { it.path }) { f -> Box(Modifier.fillMaxWidth().clickable { go(f.parentFile ?: f) }.padding(4.dp)) { T(f.path.removePrefix(root.path), Color.White, 11f, ml = 2) } }
+      items(l, key = { it.path }) { f -> Box(Modifier.fillMaxWidth().clickable { go(f.parentFile ?: f) }.padding(4.dp)) { T(f.path.removePrefix(root.path), Th.fg, 11f, ml = 2) } }
     }
   }
 }
@@ -224,11 +178,11 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
         scope.launch { withContext(Dispatchers.IO) { f.writeText(tx) }; msg("saved ${tx.length} chars") }
       }
     }
-    if (big) T("file > 256 KB · use HEX", Color.Gray)
+    if (big) T("file > 256 KB · use HEX", Th.dim)
     else if (init == null) Wave("loading…", 14f)
-    else Box(Modifier.weight(1f).fillMaxWidth().background(Color.White.copy(alpha = .04f)).padding(6.dp)) {
+    else Box(Modifier.weight(1f).fillMaxWidth().background(Th.fg.copy(alpha = .04f)).padding(6.dp)) {
       BasicTextField(tx, { tx = it }, Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-        textStyle = TextStyle(color = Color.White, fontSize = (12 * cf.fs).sp, fontFamily = FontFamily.Monospace), cursorBrush = SolidColor(cf.ac))
+        textStyle = TextStyle(color = Th.fg, fontSize = (12 * cf.fs).sp, fontFamily = FontFamily.Monospace), cursorBrush = SolidColor(cf.ac))
     }
   }
 }
@@ -244,7 +198,7 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
       T("0x" + java.lang.Long.toHexString(off) + " / " + Fx.sz(f.length()), cf.ac2, 10f)
     }
     LazyColumn(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
-      items(lines) { Text(it, color = Color.White, fontSize = 8.5.sp, fontFamily = FontFamily.Monospace, softWrap = false, maxLines = 1) }
+      items(lines) { Text(it, color = Th.fg, fontSize = 8.5.sp, fontFamily = FontFamily.Monospace, softWrap = false, maxLines = 1) }
     }
   }
 }
@@ -278,20 +232,10 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
   val cf = LCfg.current
   val sz = produceState(-1L, fs) { value = withContext(Dispatchers.IO) { fs.sumOf { Fx.du(it) } } }.value
   val n = produceState(-1, fs) { value = withContext(Dispatchers.IO) { fs.sumOf { if (it.isDirectory) it.walkTopDown().count() - 1 else 1 } } }.value
-  @Composable fun kv(k: String, v: String) { Row { T(k, Color.Gray, 11f, null, Modifier.width(52.dp)); T(v, Color.White, 11f, ml = 4) } }
+  @Composable fun kv(k: String, v: String) { Row { T(k, Th.dim, 11f, null, Modifier.width(52.dp)); T(v, Th.fg, 11f, ml = 4) } }
   val f = fs[0]
   kv("path", f.parent ?: "/")
   kv("size", if (sz < 0) "…" else Fx.sz(sz) + " (" + sz + " B)")
   kv("files", if (n < 0) "…" else n.toString())
   if (fs.size == 1) { kv("mod", Fx.dt(f.lastModified())); kv("perm", E(f).pm + if (f.isHidden) " hidden" else ""); kv("mime", if (f.isDirectory) "dir" else Fx.mime(f)) }
-}
-
-@Composable fun HashBody(f: File) {
-  val cf = LCfg.current
-  val r = produceState(listOf<Pair<String, String>>(), f) {
-    val o = ArrayList<Pair<String, String>>()
-    for (a in listOf("MD5", "SHA-1", "SHA-256")) { o.add(a to withContext(Dispatchers.IO) { Fx.hash(f, a, Long.MAX_VALUE) }); value = o.toList() }
-  }.value
-  if (r.isEmpty()) Wave("hashing…", 12f)
-  r.forEach { (a, h) -> T(a, cf.ac2, 10f, FontWeight.Bold); T(h, Color.White, 10f, ml = 3) }
 }

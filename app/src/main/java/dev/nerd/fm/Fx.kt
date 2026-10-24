@@ -1,6 +1,7 @@
 package dev.nerd.fm
 
 import android.os.Build
+import androidx.compose.runtime.Immutable
 import android.os.Environment
 import android.os.StatFs
 import android.webkit.MimeTypeMap
@@ -14,7 +15,7 @@ import java.util.Locale
 import java.util.zip.*
 import kotlin.math.min
 
-class E(val f: File) {
+@Immutable class E(val f: File) {
   val dir = f.isDirectory
   val n: String = f.name
   val sz = if (dir) 0L else f.length()
@@ -116,6 +117,7 @@ object Fx {
     while (v >= 1024 && i < 3) { v /= 1024; i++ }
     return String.format(Locale.US, "%.1f%c", v, "KMGT"[i])
   }
+  fun kind(e: E): Int = if (e.dir) 0 else when { e.ex in IMG -> 1; e.ex in VID -> 2; e.ex in AUD -> 3; e.ex in ARC -> 4; e.ex == "apk" -> 5; e.ex in CODE -> 6; e.ex in DOC -> 7; else -> 8 }
   fun gl(e: E): String = if (e.dir) "▸" else when (e.ex) {
     in IMG -> "◧"; in VID -> "▶"; in AUD -> "♪"; in ARC -> "▤"; "apk" -> "◆"; in CODE -> "‹›"; in DOC -> "≡"; else -> "·"
   }
@@ -431,5 +433,35 @@ object Ar {
       } catch (e: EOFException) { }
     }
     return cnt
+  }
+
+  fun list(f: File): List<Pair<String, Long>> {
+    val out = ArrayList<Pair<String, Long>>()
+    val k = kind(f)
+    if (k == "zip") ZipFile(f).use { z -> val en = z.entries(); while (en.hasMoreElements() && out.size < 1000) { val e = en.nextElement(); out.add(e.name to e.size) } }
+    else if (k == "tgz" || k == "tar") {
+      val raw = BufferedInputStream(FileInputStream(f), 65536)
+      val i = DataInputStream(if (k == "tgz") BufferedInputStream(GZIPInputStream(raw, 65536), 65536) else raw)
+      i.use {
+        val h = ByteArray(512)
+        var ln: String? = null
+        try {
+          while (out.size < 1000) {
+            i.readFully(h)
+            if (h.all { it.toInt() == 0 }) break
+            val size = str(h, 124, 12).trim().toLongOrNull(8) ?: 0L
+            val ty = h[156].toInt().toChar()
+            val pre = str(h, 345, 155); val nm0 = str(h, 0, 100)
+            val pad = (512 - size % 512) % 512
+            if (ty == 'L') { val b = ByteArray(size.toInt()); i.readFully(b); skipN(i, pad); ln = String(b, Charsets.UTF_8).trimEnd('\u0000'); continue }
+            val name = ln ?: (if (pre.isNotEmpty()) "$pre/$nm0" else nm0)
+            ln = null
+            if (ty != 'x' && ty != 'g') out.add(name to size)
+            skipN(i, size + pad)
+          }
+        } catch (e: EOFException) { }
+      }
+    } else if (k == "gz") out.add(f.nameWithoutExtension to f.length())
+    return out
   }
 }
