@@ -25,26 +25,31 @@ import java.io.File
 import java.util.Calendar
 
 private val TILES = listOf(
-  Triple("🕘", "Recent", "q:file age<3d"), Triple("🖼️", "Photos", "q:type:img"), Triple("🎬", "Videos", "q:type:vid"),
-  Triple("🎵", "Music", "q:type:aud"), Triple("📄", "Docs", "q:type:doc"), Triple("📦", "Archives", "q:type:arc"),
-  Triple("🤖", "APKs", "q:type:apk"), Triple("🐘", "Big files", "q:size>100m"), Triple("⬇️", "Downloads", "go:Download"),
-  Triple("🧹", "Cleaner", "nav:clean"), Triple("🗑️", "Trash", "nav:trash"), Triple("👯", "Dupes", "nav:dupe")
+  Triple("clock", "Recent", "q:file age<3d"), Triple("photo", "Photos", "q:type:img"), Triple("video", "Videos", "q:type:vid"),
+  Triple("music", "Music", "q:type:aud"), Triple("doc", "Docs", "q:type:doc"), Triple("box", "Archives", "q:type:arc"),
+  Triple("droid", "APKs", "q:type:apk"), Triple("big", "Big files", "q:size>100m"), Triple("down", "Downloads", "go:Download"),
+  Triple("broom", "Cleaner", "nav:clean"), Triple("trash", "Trash", "nav:trash"), Triple("dup", "Dupes", "nav:dupe")
 )
 
-@Composable fun Tile(ic: String, lb: String, i: Int, m: Modifier, f: () -> Unit) {
+@Composable fun Tile(ic: String, lb: String, i: Int, m: Modifier, subs: Subs, f: () -> Unit) {
   val cf = LCfg.current
   val src = remember { MutableInteractionSource() }
   val pr by src.collectIsPressedAsState()
   val sx by animateFloatAsState(if (pr) .88f else 1f, spring(.35f, 400f), label = "t")
   val hue = (cf.hue + i * 31f) % 360f; val lt = Th.pal.light
-  val sh = RoundedCornerShape(cf.rad.dp + 4.dp)
+  val sh = RoundedCornerShape(Sk.f("tile.round", 20f).dp)
+  var menu by remember { mutableStateOf(false) }
+  val tint = Sk.f("tile.tint", .4f)
   Pop(i, m) {
-    Column(Modifier.fillMaxWidth().graphicsLayer { scaleX = sx; scaleY = sx }.clip(sh)
-      .background(Color.hsv(hue, .4f, if (lt) .97f else .3f))
-      .border(1.5.dp, Color.hsv(hue, .5f, if (lt) .8f else .9f).copy(alpha = .6f), sh)
-      .clickable(src, null) { f() }.padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-      T(ic, Th.fg, 26f); T(lb, Th.fg, 11f, FontWeight.Medium)
+    Column(Modifier.fillMaxWidth().graphicsLayer { scaleX = sx; scaleY = sx }.ed("tile").clip(sh)
+      .background(Color.hsv(hue, tint, if (lt) .97f else .3f))
+      .border(1.5.dp, Color.hsv(hue, (tint + .1f).coerceAtMost(1f), if (lt) .8f else .9f).copy(alpha = .6f), sh)
+      .combinedClickable(src, null, onClick = { f() }, onLongClick = if (subs.isEmpty()) null else ({ menu = true }))
+      .padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+      Gly(ic, Sk.f("tile.icon", 40f).dp, pr)
+      T(lb, Th.fg, 11f, FontWeight.Medium)
     }
+    if (menu) SubMenu(subs) { menu = false }
   }
 }
 
@@ -62,8 +67,7 @@ private val TILES = listOf(
   val sh = RoundedCornerShape(cf.rad.dp + 6.dp)
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-      Mochi(104.dp, 0, Modifier, mochiTap)
-      Spacer(Modifier.width(8.dp))
+      if (Sk.b("mochi.show", true)) { Mochi(Sk.f("mochi.home", 104f).dp, if (used > .9f) 2 else 0, Modifier, mochiTap, mochiSubs(cf)); Spacer(Modifier.width(8.dp)) }
       Column(Modifier.weight(1f).clip(sh).background(Th.fg.copy(alpha = .07f)).border(1.5.dp, ac.copy(alpha = .3f), sh).padding(12.dp)) {
         T(greet, ac, 15f, FontWeight.Bold)
         AnimatedContent(tip, label = "tip") { T(tips[it], Th.dim, 11f, ml = 3) }
@@ -86,7 +90,7 @@ private val TILES = listOf(
     }
     TILES.chunked(3).forEachIndexed { r, row ->
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        row.forEachIndexed { c, t -> Tile(t.first, t.second, r * 3 + c, Modifier.weight(1f)) { act(t.third) } }
+        row.forEachIndexed { c, t -> Tile(t.first, t.second, r * 3 + c, Modifier.weight(1f), if (t.third.startsWith("q:")) listOf<Pair<String, () -> Unit>>("this folder only" to { act("q:~" + t.third.substring(2)) }) else emptyList()) { act(t.third) } }
         repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
       }
     }
@@ -97,16 +101,17 @@ private val TILES = listOf(
 @Composable fun ToolsScr(act: (String) -> Unit) {
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     Wave("TOOLS", 18f)
-    Cd("🧹 CLEANER", "junk · leftover APKs · big & old · caches · empty folders, one tap each") { act("nav:clean") }
-    Cd("📊 BREAKDOWN", "where did my storage go? images / videos / audio / docs…") { act("nav:break") }
-    Cd("🔎 ANALYZER", "biggest items in the current folder, live bars") { act("nav:ana") }
-    Cd("👯 DUPLICATES", "size → MD5 → SHA-1, auto-mark extras") { act("nav:dupe") }
-    Cd("📂 EMPTY FOLDERS", "find & purge empty directory trees") { act("nav:empty") }
-    Cd("🗑️ TRASH", "restore deleted things, or empty it for good") { act("nav:trash") }
-    Cd("⇄ COMPARE PANES", "diff both panes, sync A→B or B→A") { act("nav:cmp") }
-    Cd("✎ BATCH RENAME", "regex + {n} counter on selected files") { act("batch") }
-    Cd("🗜️ SQUISH PHOTOS", "shrink selected images (JPG/WEBP, quality + size)") { act("squish") }
-    Cd("★ BOOKMARKS", "saved folders") { act("bm") }
+    Cd("broom", "CLEANER", "junk · leftover APKs · big & old · caches · empty folders, one tap each") { act("nav:clean") }
+    Cd("chart", "BREAKDOWN", "where did my storage go? images / videos / audio / docs…") { act("nav:break") }
+    Cd("lens", "ANALYZER", "biggest items in the current folder, live bars") { act("nav:ana") }
+    Cd("dup", "DUPLICATES", "size → MD5 → SHA-1, auto-mark extras") { act("nav:dupe") }
+    Cd("folderx", "EMPTY FOLDERS", "find & purge empty directory trees") { act("nav:empty") }
+    Cd("trash", "TRASH", "restore deleted things, or empty it for good") { act("nav:trash") }
+    Cd("cmp", "COMPARE PANES", "diff both panes, sync A→B or B→A") { act("nav:cmp") }
+    Cd("edit", "BATCH RENAME", "regex + {n} counter on selected files") { act("batch") }
+    Cd("squish", "SQUISH PHOTOS", "shrink selected images (JPG/WEBP, quality + size)") { act("squish") }
+    Cd("star", "BOOKMARKS", "saved folders") { act("bm") }
+    Cd("edit", "ROOT EDITOR", "restyle every part of the UI · templates · save presets") { act("edit") }
   }
 }
 
@@ -117,7 +122,7 @@ private val TILES = listOf(
   val sh = RoundedCornerShape(cf.rad.dp + 6.dp)
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
     Row(Modifier.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = .06f)).border(1.5.dp, ac.copy(alpha = .3f), sh).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-      Mochi(84.dp, 0, Modifier, mochiTap)
+      Mochi(84.dp, 0, Modifier, mochiTap, mochiSubs(cf))
       Column(Modifier.padding(start = 12.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         T("Mochi · Lv $lv", ac, 15f, FontWeight.Bold)
         Box(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)).background(Th.fg.copy(alpha = .1f))) {
@@ -127,6 +132,10 @@ private val TILES = listOf(
         T("${cf.streak}-day streak · cleaned ${Fx.sz(cf.cleaned)}", Th.dim, 10f)
       }
     }
+    Bt("✎ ROOT EDITOR · customize everything", true) { Ed.on = true }
+    Sec("TRANSITIONS & FX")
+    TokControls("motion")
+    TokControls("fx")
     Sec("THEME")
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { Th.pals.forEachIndexed { i, p -> Bt(p.name, cf.preset == i) { cf.applyPreset(i) } } }
     Sl("hue", cf.hue, 0f..360f) { cf.hue = it }

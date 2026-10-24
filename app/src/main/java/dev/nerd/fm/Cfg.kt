@@ -85,6 +85,9 @@ class Cfg(ctx: Context) {
   var haptic by pv("haptic", true)
   var sparkle by pv("sparkle", true)
   var auto by pv("auto", true)
+  var sk by Pv(sp, "sk", "")
+  var presets by Pv(sp, "presets", "")
+  var qh by Pv(sp, "qh", "")
   var preset by Pv(sp, "preset", 0)
   var bm by Pv(sp, "bm", "")
   var xp by Pv(sp, "xp", 0)
@@ -102,9 +105,20 @@ class Cfg(ctx: Context) {
 
   fun applyPreset(i: Int) { preset = i; Th.pal = Th.pals[i]; hue = Th.pal.hue; sat = Th.pal.sat }
   fun addXp(n: Int) { if (n > 0) xp += n }
-  fun reset() { all.forEach { it.reset() }; applyPreset(0) }
+  fun snap(): String = listOf("hue" to hue, "sat" to sat, "font" to font.toFloat(), "fs" to fs, "pad" to pad, "rad" to rad, "anim" to anim.toFloat(), "amp" to amp, "spd" to spd, "stag" to stag, "preset" to preset.toFloat())
+    .joinToString(";") { it.first + "=" + it.second } + "|" + Sk.ser()
+  fun restore(s: String) {
+    val m = Sk.parse(s.substringBefore('|'))
+    m["preset"]?.let { applyPreset(it.toInt().coerceIn(0, Th.pals.size - 1)) }
+    m["hue"]?.let { hue = it }; m["sat"]?.let { sat = it }; m["font"]?.let { font = it.toInt() }; m["fs"]?.let { fs = it }
+    m["pad"]?.let { pad = it }; m["rad"]?.let { rad = it }; m["anim"]?.let { anim = it.toInt() }; m["amp"]?.let { amp = it }
+    m["spd"]?.let { spd = it }; m["stag"]?.let { stag = it }
+    Sk.load(s.substringAfter('|', ""))
+  }
+  fun reset() { all.forEach { it.reset() }; applyPreset(0); Sk.resetAll() }
 
   init {
+    Sk.bind(this)
     Th.pal = Th.pals[preset.coerceIn(0, Th.pals.size - 1)]
     val today = (System.currentTimeMillis() / 86400000L).toInt()
     if (lastDay != today) { streak = if (lastDay == today - 1) streak + 1 else 1; lastDay = today }

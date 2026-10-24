@@ -33,8 +33,8 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
 
 @Composable fun SearchScr(here: File, all: File, hid: Boolean, initQ: String, go: (E) -> Unit) {
   val cf = LCfg.current
-  var q by remember { mutableStateOf(initQ) }
-  var wide by remember { mutableStateOf(initQ.isNotEmpty()) }
+  var q by remember { mutableStateOf(initQ.removePrefix("~")) }
+  var wide by remember { mutableStateOf(initQ.isNotEmpty() && !initQ.startsWith("~")) }
   val root = if (wide) all else here
   var rx by remember { mutableStateOf(false) }
   var cs by remember { mutableStateOf(false) }
@@ -62,6 +62,8 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
     res = res + buf.toList()
     ms = System.currentTimeMillis() - t0
     run = false
+    val qt = q.trim()
+    if (qt.length > 2 && res.isNotEmpty()) cf.qh = (listOf(qt) + cf.qh.split('\n').filter { it.isNotEmpty() && it != qt }).take(6).joinToString("\n")
   }
   fun tog(t: String) { val l = q.split(" ").filter { it.isNotEmpty() }; q = (if (t in l) l - t else l + t).joinToString(" ") }
   Column(Modifier.fillMaxSize()) {
@@ -72,6 +74,8 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
       if (run) Wave("scan", 11f)
       T(if (bad) "bad regex" else "$scanned scanned · ${res.size} hits · ${ms}ms", Th.dim, 10f)
     }
+    val hq = cf.qh.split('\n').filter { it.isNotEmpty() }
+    if (hq.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) { hq.forEach { h -> Bt("↺ " + h) { q = h } } }
     val toks = q.split(" ")
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
       CHIPS.forEach { c -> Bt(c, c in toks) { tog(c) } }

@@ -18,6 +18,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -52,10 +54,12 @@ val LCfg = staticCompositionLocalOf<Cfg> { error("cfg") }
 val LClock = staticCompositionLocalOf<State<Float>> { mutableStateOf(0f) }
 private val Back = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
 private val INK = Color(0xFF3B2A38)
-private val HP = Path()
+internal val HP = Path()
 
 @Immutable class Snap(val dir: File, val items: List<E>)
 class Pane(d: File) {
+  val hist = arrayListOf(d)
+  var hi by mutableIntStateOf(0)
   var snap by mutableStateOf(Snap(d, emptyList()))
   var sel by mutableStateOf(setOf<String>())
   var job: Job? = null
@@ -92,18 +96,26 @@ fun DrawScope.drawSpark(cx: Float, cy: Float, s: Float, c: Color, a: Float = 1f)
   Text(s, m, color = c, fontSize = (sz * cf.fs).sp, fontFamily = cf.ff, fontWeight = w, maxLines = ml, overflow = TextOverflow.Ellipsis)
 }
 
-@Composable fun Bt(s: String, on: Boolean = false, m: Modifier = Modifier, f: () -> Unit) {
+@Composable fun Bt(s: String, on: Boolean = false, m: Modifier = Modifier, subs: Subs = emptyList(), f: () -> Unit) {
   val cf = LCfg.current; val ac = cf.ac; val hp = LocalHapticFeedback.current; val fx = cf.fx
   val src = remember { MutableInteractionSource() }
   val pr by src.collectIsPressedAsState()
-  val sx by animateFloatAsState(if (pr && fx > 0) .86f else 1f, spring(.35f, Spring.StiffnessMedium), label = "bx")
-  val sy by animateFloatAsState(if (pr && fx > 0) .78f else 1f, spring(.35f, Spring.StiffnessMedium), label = "by")
-  val sh = RoundedCornerShape(cf.rad.dp)
-  Box(m.graphicsLayer { scaleX = sx; scaleY = sy }.clip(sh)
-    .background(if (on) ac.copy(alpha = .28f) else Th.fg.copy(alpha = .08f))
-    .border(1.5.dp, if (on) ac else Th.fg.copy(alpha = .14f), sh)
-    .clickable(src, null) { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.TextHandleMove); f() }
-    .padding(horizontal = 11.dp, vertical = 6.dp)) { T(s, if (on) ac else Th.fg, 12f, FontWeight.Medium) }
+  val sq = Sk.f("btn.squish", 1f)
+  val sx by animateFloatAsState(if (pr && fx > 0) 1f - .14f * sq else 1f, spring(.35f, Spring.StiffnessMedium), label = "bx")
+  val sy by animateFloatAsState(if (pr && fx > 0) 1f - .22f * sq else 1f, spring(.35f, Spring.StiffnessMedium), label = "by")
+  val sh = RoundedCornerShape(Sk.f("btn.round", 16f).dp)
+  val bd = Sk.f("btn.border", 1.5f)
+  var menu by remember { mutableStateOf(false) }
+  val lc: (() -> Unit)? = if (subs.isEmpty()) null else ({ if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.LongPress); menu = true })
+  Box(m.graphicsLayer { scaleX = sx; scaleY = sy }.ed("btn").clip(sh)
+    .background(if (on) ac.copy(alpha = .28f) else Th.fg.copy(alpha = Sk.f("btn.fill", .08f)))
+    .then(if (bd > .05f) Modifier.border(bd.dp, if (on) ac else Th.fg.copy(alpha = .14f), sh) else Modifier)
+    .combinedClickable(src, null, onClick = { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.TextHandleMove); f() }, onLongClick = lc)
+    .padding(horizontal = Sk.f("btn.padx", 11f).dp, vertical = Sk.f("btn.pady", 6f).dp)) {
+    T(s, if (on) ac else Th.fg, 12f * Sk.f("btn.text", 1f), FontWeight.Medium)
+    if (subs.isNotEmpty()) Box(Modifier.align(Alignment.TopEnd).size(4.dp).clip(CircleShape).background(cf.ac2))
+    if (menu) SubMenu(subs) { menu = false }
+  }
 }
 
 @Composable fun Inp(v: String, ch: (String) -> Unit, hint: String, m: Modifier = Modifier, one: Boolean = true) {
@@ -157,14 +169,15 @@ fun DrawScope.drawSpark(cx: Float, cy: Float, s: Float, c: Color, a: Float = 1f)
 
 @Composable fun Hdr(t: String, back: () -> Unit, extra: @Composable RowScope.() -> Unit = {}) {
   Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-    Bt("‹", false, Modifier, back); Spacer(Modifier.width(8.dp)); Wave(t, 16f); Spacer(Modifier.weight(1f)); extra()
+    Bt("‹", f = back); Spacer(Modifier.width(8.dp)); Wave(t, 16f); Spacer(Modifier.weight(1f)); extra()
   }
 }
 
-@Composable fun Cd(t: String, d: String, f: () -> Unit) {
+@Composable fun Cd(g: String, t: String, d: String, f: () -> Unit) {
   val cf = LCfg.current; val sh = RoundedCornerShape(cf.rad.dp)
-  Column(Modifier.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = .05f)).border(1.5.dp, cf.ac.copy(alpha = .3f), sh).clickable { f() }.padding(12.dp)) {
-    T(t, cf.ac, 13f, FontWeight.Bold); T(d, Th.dim, 11f, ml = 2)
+  Row(Modifier.fillMaxWidth().ed("tile").clip(sh).background(Th.fg.copy(alpha = .05f)).border(1.5.dp, cf.ac.copy(alpha = .3f), sh).clickable { f() }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+    Gly(g, 38.dp)
+    Column(Modifier.padding(start = 12.dp)) { T(t, cf.ac, 13f, FontWeight.Bold); T(d, Th.dim, 11f, ml = 2) }
   }
 }
 
@@ -213,11 +226,14 @@ class Burst {
 }
 
 // ───────── mascot ─────────
-@Composable fun Mochi(sz: Dp, mood: Int = 0, m: Modifier = Modifier, tap: () -> Unit = {}) {
+@Composable fun Mochi(sz: Dp, mood: Int = 0, m: Modifier = Modifier, tap: () -> Unit = {}, subs: Subs = emptyList()) {
   val ck = LClock.current; val cf = LCfg.current; val ac = cf.ac; val ac2 = cf.ac2
   val jump = remember { Animatable(0f) }; val sc = rememberCoroutineScope()
   val src = remember { MutableInteractionSource() }
-  Canvas(m.size(sz).clickable(src, null) { sc.launch { jump.snapTo(0f); jump.animateTo(1f, tween(560, easing = FastOutSlowInEasing)) }; tap() }) {
+  var menu by remember { mutableStateOf(false) }
+  Box(m.size(sz).ed("mochi").combinedClickable(src, null, onClick = { sc.launch { jump.snapTo(0f); jump.animateTo(1f, tween(560, easing = FastOutSlowInEasing)) }; tap() }, onLongClick = if (subs.isEmpty()) null else ({ menu = true }))) {
+  if (menu) SubMenu(subs) { menu = false }
+  Canvas(Modifier.fillMaxSize()) {
     val t = ck.value; val w = size.width; val h = size.height; val j = jump.value
     val hop = if (j > 0f && j < 1f) sin(j * 3.1416f) * h * .24f else 0f
     val sq = if (j > 0f && j < .12f) 1f else 0f
@@ -252,79 +268,101 @@ class Burst {
       else -> drawArc(INK, 20f, 140f, false, Offset(cx - w * .04f, my - w * .03f), Size(w * .08f, w * .06f), style = Stroke(w * .018f, cap = StrokeCap.Round))
     }
   }
+  }
 }
 
 // ───────── procedural cute file icons ─────────
-@Composable fun Ico(e: E, sz: Dp, sel: Boolean = false, m: Modifier = Modifier) {
+@Composable fun Ico(e: E, sz: Dp, sel: Boolean = false, act: Boolean = false, m: Modifier = Modifier) {
   val ck = LClock.current; val cf = LCfg.current; val ctx = LocalContext.current
   val kind = Fx.kind(e)
+  val tone = Sk.f("icon.tone", 1f); val idle = Sk.f("icon.idle", 1f); val face = Sk.b("icon.face", true)
   val hue = floatArrayOf(cf.hue, 330f, 265f, 195f, 40f, 125f, 215f, 20f, 0f)[kind]
   val lt = Th.pal.light
-  val col = Color.hsv(hue, if (kind == 8) .12f else if (lt) .55f else .5f, if (lt) .92f else 1f)
-  val dk = Color.hsv(hue, if (kind == 8) .15f else .6f, if (lt) .7f else .82f)
+  val bs = if (kind == 8) .12f else (if (lt) .55f else .5f) * tone
+  val col = Color.hsv(hue, bs.coerceIn(0f, 1f), if (lt) .92f else 1f)
+  val dk = Color.hsv(hue, (if (kind == 8) .15f else .6f * tone).coerceIn(0f, 1f), if (lt) .7f else .82f)
   val th = if (Thumbs.ok(e)) produceState<ImageBitmap?>(null, e.f.path) { value = withContext(Dispatchers.IO) { Thumbs.get(ctx.packageManager, e.f, 96)?.asImageBitmap() } }.value else null
   val wh = Color.White.copy(alpha = .9f)
-  Canvas(m.size(sz).graphicsLayer { rotationZ = if (sel && cf.fx > 0) sin(ck.value * 9f) * 6f else 0f }) {
-    val w = size.width; val h = size.height; val t = ck.value
+  val open by animateFloatAsState(if (act || sel) 1f else 0f, spring(.45f, 380f), label = "ico")
+  Canvas(m.size(sz).graphicsLayer { rotationZ = if (sel && cf.fx > 0) sin(ck.value * 9f) * 6f else 0f; val s = 1f + .12f * open; scaleX = s; scaleY = s }) {
+    val w = size.width; val h = size.height; val t = ck.value; val o = open
     if (th != null) {
       val s = min(th.width, th.height)
       drawRoundRect(col, Offset.Zero, size, CornerRadius(w * .24f))
       drawImage(th, IntOffset((th.width - s) / 2, (th.height - s) / 2), IntSize(s, s), IntOffset(w.toInt() / 16, w.toInt() / 16), IntSize(w.toInt() * 7 / 8, h.toInt() * 7 / 8))
+      if (sel) drawHeart(w * .88f, h * .14f, w * .09f, Color(0xFFFF6B9A))
       return@Canvas
     }
-    val bob = if (cf.fx > 0) sin(t * 3f + kind) * h * .015f else 0f
+    val ph = t * idle
+    val bob = if (cf.fx > 0) sin(ph * 3f + kind) * h * .015f else 0f
     var fy = h * .64f
     if (kind == 0) {
-      drawRoundRect(dk, Offset(w * .06f, h * .16f + bob), Size(w * .42f, h * .2f), CornerRadius(w * .09f))
-      drawRoundRect(col, Offset(w * .06f, h * .27f + bob), Size(w * .88f, h * .62f), CornerRadius(w * .18f))
-      fy = h * .6f + bob
+      drawRoundRect(dk, Offset(w * .06f, h * .2f + bob), Size(w * .88f, h * .5f), CornerRadius(w * .14f))
+      drawRoundRect(dk, Offset(w * .06f, h * .14f + bob), Size(w * .4f, h * .2f), CornerRadius(w * .09f))
+      if (o > .05f) drawRoundRect(wh, Offset(w * .2f, h * (.3f - .1f * o) + bob), Size(w * .6f, h * .3f), CornerRadius(w * .06f))
+      rotate(-9f * o, Offset(w * .06f, h * .89f + bob)) { drawRoundRect(col, Offset(w * .06f, h * .34f + bob), Size(w * .88f, h * .55f), CornerRadius(w * .16f)) }
+      fy = h * .64f + bob
     } else {
       drawRoundRect(col, Offset(w * .17f, h * .08f + bob), Size(w * .66f, h * .84f), CornerRadius(w * .14f))
       drawRoundRect(dk, Offset(w * .6f, h * .08f + bob), Size(w * .23f, h * .22f), CornerRadius(w * .08f))
       val cx = w * .5f; val y = h * .31f + bob
       when (kind) {
-        1 -> { drawCircle(wh, w * .06f, Offset(cx + w * .1f, y - h * .04f)); HP.reset(); HP.moveTo(cx - w * .2f, y + h * .1f); HP.lineTo(cx - w * .05f, y - h * .05f); HP.lineTo(cx + w * .1f, y + h * .1f); HP.close(); drawPath(HP, wh) }
-        2 -> { HP.reset(); HP.moveTo(cx - w * .07f, y - h * .09f); HP.lineTo(cx + w * .1f, y); HP.lineTo(cx - w * .07f, y + h * .09f); HP.close(); drawPath(HP, wh) }
-        3 -> { drawCircle(wh, w * .05f, Offset(cx - w * .04f, y + h * .07f)); drawLine(wh, Offset(cx + w * .01f, y + h * .07f), Offset(cx + w * .01f, y - h * .1f), w * .025f); drawLine(wh, Offset(cx + w * .01f, y - h * .1f), Offset(cx + w * .1f, y - h * .05f), w * .025f) }
-        4 -> for (k in 0..2) drawRect(wh, Offset(cx - w * .03f + (k % 2) * w * .06f, y - h * .11f + k * h * .08f), Size(w * .06f, h * .05f))
-        5 -> { drawArc(wh, 180f, 180f, true, Offset(cx - w * .12f, y - h * .02f), Size(w * .24f, h * .2f)); drawLine(wh, Offset(cx - w * .08f, y - h * .02f), Offset(cx - w * .12f, y - h * .1f), w * .02f); drawLine(wh, Offset(cx + w * .08f, y - h * .02f), Offset(cx + w * .12f, y - h * .1f), w * .02f) }
-        6 -> { drawLine(wh, Offset(cx - w * .04f, y - h * .07f), Offset(cx - w * .11f, y), w * .03f); drawLine(wh, Offset(cx - w * .11f, y), Offset(cx - w * .04f, y + h * .07f), w * .03f); drawLine(wh, Offset(cx + w * .04f, y - h * .07f), Offset(cx + w * .11f, y), w * .03f); drawLine(wh, Offset(cx + w * .11f, y), Offset(cx + w * .04f, y + h * .07f), w * .03f) }
-        7 -> for (k in 0..2) drawLine(wh, Offset(cx - w * .13f, y - h * .08f + k * h * .08f), Offset(cx + w * .13f - (k % 2) * w * .08f, y - h * .08f + k * h * .08f), w * .025f)
-        else -> drawSpark(cx, y, w * .1f, wh)
+        1 -> { drawCircle(wh, w * .06f * (1f + .15f * sin(ph * 3f) + .3f * o), Offset(cx + w * .1f, y - h * .04f)); HP.reset(); HP.moveTo(cx - w * .2f, y + h * .1f); HP.lineTo(cx - w * .05f, y - h * .05f); HP.lineTo(cx + w * .1f, y + h * .1f); HP.close(); drawPath(HP, wh) }
+        2 -> { val ps = 1f + .12f * sin(ph * 4f) + .3f * o; HP.reset(); HP.moveTo(cx - w * .07f * ps, y - h * .09f * ps); HP.lineTo(cx + w * .1f * ps, y); HP.lineTo(cx - w * .07f * ps, y + h * .09f * ps); HP.close(); drawPath(HP, wh) }
+        3 -> { val nb = sin(ph * 5f) * h * .02f; drawCircle(wh, w * .05f, Offset(cx - w * .04f, y + h * .07f + nb)); drawLine(wh, Offset(cx + w * .01f, y + h * .07f + nb), Offset(cx + w * .01f, y - h * .1f), w * .025f); drawLine(wh, Offset(cx + w * .01f, y - h * .1f), Offset(cx + w * .1f, y - h * .05f + nb), w * .025f) }
+        4 -> { val zs = if (o > .5f) ((ph * 1.5f) % 1f) * h * .08f else 0f; for (k in 0..2) drawRect(wh, Offset(cx - w * .03f + (k % 2) * w * .06f, y - h * .11f + k * h * .08f + zs), Size(w * .06f, h * .05f)) }
+        5 -> { val wg = sin(ph * 4f) * w * .02f; drawArc(wh, 180f, 180f, true, Offset(cx - w * .12f, y - h * .02f), Size(w * .24f, h * .2f)); drawLine(wh, Offset(cx - w * .08f, y - h * .02f), Offset(cx - w * .12f + wg, y - h * .1f), w * .02f); drawLine(wh, Offset(cx + w * .08f, y - h * .02f), Offset(cx + w * .12f - wg, y - h * .1f), w * .02f) }
+        6 -> { val sp = w * .02f * sin(ph * 3f); drawLine(wh, Offset(cx - w * .04f - sp, y - h * .07f), Offset(cx - w * .11f - sp, y), w * .03f); drawLine(wh, Offset(cx - w * .11f - sp, y), Offset(cx - w * .04f - sp, y + h * .07f), w * .03f); drawLine(wh, Offset(cx + w * .04f + sp, y - h * .07f), Offset(cx + w * .11f + sp, y), w * .03f); drawLine(wh, Offset(cx + w * .11f + sp, y), Offset(cx + w * .04f + sp, y + h * .07f), w * .03f) }
+        7 -> for (k in 0..2) { val ex = if (k == 2) cx + w * (-.05f + .12f * (.5f + .5f * sin(ph * 3f))) else cx + w * (.13f - (k % 2) * .08f); drawLine(wh, Offset(cx - w * .13f, y - h * .08f + k * h * .08f), Offset(ex, y - h * .08f + k * h * .08f), w * .025f) }
+        else -> drawSpark(cx, y, w * .1f * (1f + .2f * sin(ph * 3f)), wh)
       }
       fy = h * .68f + bob
     }
-    val cx = w * .5f; val op = if ((t + kind * 1.3f) % 4f > 3.85f) .15f else 1f
-    for (sg in listOf(-1f, 1f)) drawOval(INK, Offset(cx + sg * w * .12f - w * .04f, fy - w * .05f * op), Size(w * .08f, w * .1f * op))
-    drawArc(INK, 20f, 140f, false, Offset(cx - w * .05f, fy + w * .02f), Size(w * .1f, w * .07f), style = Stroke(w * .025f, cap = StrokeCap.Round))
+    if (face) {
+      val cx = w * .5f; val op = if ((t + kind * 1.3f) % 4f > 3.85f) .15f else 1f
+      for (sg in listOf(-1f, 1f)) drawOval(INK, Offset(cx + sg * w * .12f - w * .04f, fy - w * .05f * op), Size(w * .08f, w * .1f * op))
+      if (o > .5f) drawOval(INK, Offset(cx - w * .035f, fy + w * .03f), Size(w * .07f, w * .08f))
+      else drawArc(INK, 20f, 140f, false, Offset(cx - w * .05f, fy + w * .02f), Size(w * .1f, w * .07f), style = Stroke(w * .025f, cap = StrokeCap.Round))
+    }
     if (sel) drawHeart(w * .88f, h * .14f, w * .09f, Color(0xFFFF6B9A))
   }
 }
 
 // ───────── rows, grid cells, pane ─────────
-@Composable fun Rw(e: E, i: Int, sel: Boolean, jelly: () -> Float, tap: () -> Unit, lng: () -> Unit) {
+@Composable fun Rw(e: E, i: Int, sel: Boolean, anySel: Boolean, jelly: () -> Float, tap: () -> Unit, lng: () -> Unit, quick: Subs) {
   val cf = LCfg.current; val ac = cf.ac; val fx = cf.fx
   var on by remember { mutableStateOf(i >= 14 || fx == 0) }
   if (!on) LaunchedEffect(Unit) { delay((i * cf.stag).toLong()); on = true }
   val a by animateFloatAsState(if (on) 1f else 0f, spring(.6f, 300f), label = "a")
-  val sh = RoundedCornerShape((cf.rad * .8f).dp)
+  val sh = RoundedCornerShape(Sk.f("row.round", 14f).dp)
+  val src = remember { MutableInteractionSource() }
+  val pr by src.collectIsPressedAsState()
+  var menu by remember { mutableStateOf(false) }
+  val hp = LocalHapticFeedback.current
+  val showSub = Sk.b("row.sub", true)
   val sub = remember(e, cf.cSize, cf.cDate, cf.cPerm) { buildList { if (cf.cSize && !e.dir) add(Fx.sz(e.sz)); if (cf.cDate) add(Fx.dt(e.mt)); if (cf.cPerm) add(e.pm) }.joinToString(" · ") }
   val pop by animateFloatAsState(if (sel) 1f else 0f, spring(.4f, 500f), label = "p")
-  Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 1.5.dp)
-    .graphicsLayer {
-      val k = a.coerceIn(0f, 1f)
-      alpha = k; scaleX = .9f + .1f * k; scaleY = .9f + .1f * k
-      translationX = (1f - a) * 70f + (if (fx == 2) jelly() * (if (i % 2 == 0) .35f else -.35f) else 0f)
+  val press by animateFloatAsState(if (pr && fx > 0) .965f else 1f, spring(.5f, 500f), label = "pr")
+  val jel = fx == 2 && Sk.b("fx.jelly", true)
+  Box {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 1.5.dp)
+      .graphicsLayer {
+        val k = a.coerceIn(0f, 1f)
+        alpha = k; scaleX = (.9f + .1f * k) * press; scaleY = (.9f + .1f * k) * press
+        translationX = (1f - a) * 70f + (if (jel) jelly() * (if (i % 2 == 0) .35f else -.35f) else 0f)
+      }
+      .ed("row").clip(sh).background(if (sel) ac.copy(alpha = Sk.f("row.sel", .22f)) else Color.Transparent)
+      .combinedClickable(src, LocalIndication.current, onClick = tap, onLongClick = { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.LongPress); lng(); if (!anySel && quick.isNotEmpty()) menu = true })
+      .padding(horizontal = 6.dp, vertical = (cf.pad + Sk.f("row.pad", 0f)).coerceAtLeast(0f).dp),
+      verticalAlignment = Alignment.CenterVertically) {
+      Ico(e, Sk.f("row.icon", 38f).dp, sel, pr)
+      Column(Modifier.weight(1f).padding(start = 10.dp)) {
+        T(e.n, if (e.dir) ac else Th.fg, 13f, FontWeight.Medium)
+        if (showSub && sub.isNotEmpty()) T(sub, Th.dim, 10f)
+      }
+      if (pop > .01f) Canvas(Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }) { drawHeart(size.width / 2, size.height / 2, size.width * .3f, Color(0xFFFF6B9A)) }
     }
-    .clip(sh).background(if (sel) ac.copy(alpha = .22f) else Color.Transparent)
-    .combinedClickable(onClick = tap, onLongClick = lng).padding(horizontal = 6.dp, vertical = cf.pad.dp),
-    verticalAlignment = Alignment.CenterVertically) {
-    Ico(e, 38.dp, sel)
-    Column(Modifier.weight(1f).padding(start = 10.dp)) {
-      T(e.n, if (e.dir) ac else Th.fg, 13f, FontWeight.Medium)
-      if (sub.isNotEmpty()) T(sub, Th.dim, 10f)
-    }
-    if (pop > .01f) Canvas(Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }) { drawHeart(size.width / 2, size.height / 2, size.width * .3f, Color(0xFFFF6B9A)) }
+    if (menu) SubMenu(quick) { menu = false }
   }
 }
 
@@ -338,26 +376,29 @@ class Burst {
 }
 
 @Composable fun Stor() {
+  if (!Sk.b("stor.show", true)) return
   val cf = LCfg.current; val ac = cf.ac; val a2 = cf.ac2; val ck = LClock.current
   val (tot, fr) = remember { Fx.stor() }
   val used = if (tot > 0) (tot - fr).toFloat() / tot else 0f
   val grow = remember { Animatable(0f) }
   LaunchedEffect(Unit) { grow.animateTo(1f, tween(900, easing = Back)) }
-  Row(verticalAlignment = Alignment.CenterVertically) {
-    Canvas(Modifier.weight(1f).height(9.dp).clip(RoundedCornerShape(5.dp))) {
-      drawRect(Th.fg.copy(alpha = .1f))
-      val w = size.width * used * grow.value.coerceAtMost(1.04f)
-      drawRect(Brush.horizontalGradient(listOf(a2, ac)), size = Size(w, size.height))
-      if (cf.fx > 0 && w > 0f) {
-        val x = ((ck.value * .5f) % 1f) * (w + 90f) - 90f
-        clipRect(right = w) { drawRect(Brush.horizontalGradient(listOf(Color.Transparent, Color.White.copy(alpha = .5f), Color.Transparent), startX = x, endX = x + 90f), Offset(x, 0f), Size(90f, size.height)) }
+  Hold(listOf<Pair<String, () -> Unit>>("breakdown" to { Hub.act("nav:break") }, "cleaner" to { Hub.act("nav:clean") }), Modifier.ed("stor")) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Canvas(Modifier.weight(1f).height(Sk.f("stor.h", 9f).dp).clip(RoundedCornerShape(5.dp))) {
+        drawRect(Th.fg.copy(alpha = .1f))
+        val w = size.width * used * grow.value.coerceAtMost(1.04f)
+        drawRect(Brush.horizontalGradient(listOf(a2, ac)), size = Size(w, size.height))
+        if (cf.fx > 0 && w > 0f) {
+          val x = ((ck.value * .5f) % 1f) * (w + 90f) - 90f
+          clipRect(right = w) { drawRect(Brush.horizontalGradient(listOf(Color.Transparent, Color.White.copy(alpha = .5f), Color.Transparent), startX = x, endX = x + 90f), Offset(x, 0f), Size(90f, size.height)) }
+        }
       }
+      T("${Fx.sz(tot - fr)} / ${Fx.sz(tot)}", Th.dim, 10f, null, Modifier.padding(start = 6.dp))
     }
-    T("${Fx.sz(tot - fr)} / ${Fx.sz(tot)}", Th.dim, 10f, null, Modifier.padding(start = 6.dp))
   }
 }
 
-@Composable fun PaneView(p: Pane, on: Boolean, m: Modifier, go: (File) -> Unit, tap: (E) -> Unit, lng: (E) -> Unit) {
+@Composable fun PaneView(p: Pane, on: Boolean, m: Modifier, go: (File) -> Unit, tap: (E) -> Unit, lng: (E) -> Unit, crumb: (File) -> Subs, quick: (E) -> Subs) {
   val cf = LCfg.current; val ac = cf.ac; val fx = cf.fx
   val sw = remember { Animatable(1f) }
   LaunchedEffect(p.snap.dir) { if (fx == 2) { sw.snapTo(0f); sw.animateTo(1f, tween(480)) } }
@@ -370,23 +411,22 @@ class Burst {
       }
     }
   }
-  val sh = RoundedCornerShape(cf.rad.dp)
-  Column(m.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = .035f)).border(1.5.dp, if (on) ac.copy(alpha = .65f) else Th.fg.copy(alpha = .08f), sh)) {
-    val parts = remember(p.snap.dir) { val l = ArrayList<File>(); var f: File? = p.snap.dir; while (f != null) { l.add(0, f); f = f.parentFile }; l }
-    val bs = rememberScrollState()
-    LaunchedEffect(parts) { delay(60); bs.animateScrollTo(bs.maxValue) }
-    Row(Modifier.fillMaxWidth().horizontalScroll(bs).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
-      parts.forEach { f -> Bt(f.name.ifEmpty { "/" }, f == p.snap.dir) { go(f) }; Spacer(Modifier.width(3.dp)) }
+  val sh = RoundedCornerShape(Sk.f("pane.round", 16f).dp)
+  val pb = Sk.f("pane.border", 1.5f)
+  Column(m.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = Sk.f("pane.fill", .035f)))
+    .then(if (pb > .05f) Modifier.border(pb.dp, if (on) ac.copy(alpha = .65f) else Th.fg.copy(alpha = .08f), sh) else Modifier)) {
+    if (Sk.b("crumb.show", true)) {
+      val parts = remember(p.snap.dir) { val l = ArrayList<File>(); var f: File? = p.snap.dir; while (f != null) { l.add(0, f); f = f.parentFile }; l }
+      val bs = rememberScrollState()
+      LaunchedEffect(parts) { delay(60); bs.animateScrollTo(bs.maxValue) }
+      Row(Modifier.fillMaxWidth().horizontalScroll(bs).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        parts.forEach { f -> Bt(f.name.ifEmpty { "/" }, f == p.snap.dir, subs = crumb(f)) { go(f) }; Spacer(Modifier.width(3.dp)) }
+      }
     }
     Box(Modifier.weight(1f).fillMaxWidth()) {
       AnimatedContent(p.snap, transitionSpec = {
-        if (fx == 0 || initialState.dir == targetState.dir) EnterTransition.None togetherWith ExitTransition.None
-        else {
-          val d = if (targetState.dir.path.length < initialState.dir.path.length) -1 else 1
-          if (fx == 1) fadeIn(tween(140)) togetherWith fadeOut(tween(90))
-          else (slideInHorizontally(tween(340, easing = Back)) { it * d / 3 } + fadeIn(tween(220)) + scaleIn(tween(320, easing = Back), .92f)) togetherWith
-            (slideOutHorizontally(tween(220)) { -it * d / 3 } + fadeOut(tween(120)))
-        }
+        if (initialState.dir == targetState.dir) EnterTransition.None togetherWith ExitTransition.None
+        else Tr.folder(fx, if (targetState.dir.path.length < initialState.dir.path.length) -1 else 1)
       }, label = "nav", contentKey = { it.dir }) { s ->
         if (s.items.isEmpty()) Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) { Mochi(90.dp, 1); T("nothing here~ zzz", Th.dim) }
         else if (cf.grid) LazyVerticalGrid(GridCells.Adaptive(84.dp), Modifier.fillMaxSize().nestedScroll(conn)) {
@@ -395,7 +435,7 @@ class Burst {
         else LazyColumn(Modifier.fillMaxSize().nestedScroll(conn)) {
           items(count = s.items.size, key = { s.items[it].f.path }, contentType = { if (s.items[it].dir) 0 else 1 }) { i ->
             val e = s.items[i]
-            Rw(e, i, e.f.path in p.sel, { jl.value }, { tap(e) }, { lng(e) })
+            Rw(e, i, e.f.path in p.sel, p.sel.isNotEmpty(), { jl.value }, { tap(e) }, { lng(e) }, quick(e))
           }
         }
       }
@@ -418,22 +458,25 @@ class Burst {
 }
 
 // ───────── navigation, transitions, feedback ─────────
-@Composable fun NavBar(tab: Int, go: (Int) -> Unit) {
+@Composable fun NavBar(tab: Int, subs: (Int) -> Subs, go: (Int) -> Unit) {
   val cf = LCfg.current; val ac = cf.ac
   val idx = remember { Animatable(tab.toFloat()) }
   LaunchedEffect(tab) { if (cf.fx > 0) idx.animateTo(tab.toFloat(), spring(.5f, 380f)) else idx.snapTo(tab.toFloat()) }
-  val items = listOf("🏠" to "home", "📁" to "files", "🔍" to "find", "🧰" to "tools", "🐾" to "me")
-  val sh = RoundedCornerShape(26.dp)
-  Row(Modifier.fillMaxWidth().padding(top = 4.dp).clip(sh).background(Th.fg.copy(alpha = .07f)).border(1.5.dp, Th.fg.copy(alpha = .1f), sh)
+  val items = listOf("home" to "home", "folder" to "files", "search" to "find", "tools" to "tools", "paw" to "me")
+  val r = Sk.f("nav.round", 26f); val sh = RoundedCornerShape(r.dp)
+  val labels = Sk.b("nav.labels", true); val isz = 24f * Sk.f("nav.icon", 1f)
+  Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).ed("nav").clip(sh).background(Th.fg.copy(alpha = Sk.f("nav.fill", .07f))).border(1.5.dp, Th.fg.copy(alpha = .1f), sh)
     .drawBehind {
       val iw = size.width / 5f; val pd = 5.dp.toPx()
-      drawRoundRect(ac.copy(alpha = .3f), Offset(idx.value * iw + pd, pd), Size(iw - pd * 2, size.height - pd * 2), CornerRadius(22.dp.toPx()))
+      drawRoundRect(ac.copy(alpha = .3f), Offset(idx.value * iw + pd, pd), Size(iw - pd * 2, size.height - pd * 2), CornerRadius(r.dp.toPx() * .85f))
     }) {
-    items.forEachIndexed { i, (ic, lb) ->
+    items.forEachIndexed { i, (g, lb) ->
       val s by animateFloatAsState(if (i == tab && cf.fx > 0) 1.28f else 1f, spring(.35f, 400f), label = "n")
-      Column(Modifier.weight(1f).clickable(remember { MutableInteractionSource() }, null) { go(i) }.padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(Modifier.graphicsLayer { scaleX = s; scaleY = s }) { T(ic, Th.fg, 19f) }
-        T(lb, if (i == tab) ac else Th.dim, 9f, if (i == tab) FontWeight.Bold else null)
+      Hold(subs(i), Modifier.weight(1f), { go(i) }) {
+        Column(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+          Gly(g, isz.dp, i == tab, Modifier.graphicsLayer { scaleX = s; scaleY = s })
+          if (labels) T(lb, if (i == tab) ac else Th.dim, 9f, if (i == tab) FontWeight.Bold else null)
+        }
       }
     }
   }
@@ -445,8 +488,10 @@ class Burst {
   var last by remember { mutableIntStateOf(tab) }
   var dir by remember { mutableIntStateOf(1) }
   val rnd = remember { List(16) { Triple(Random.nextFloat(), Random.nextFloat(), Random.nextFloat()) } }
+  val sty = Sk.f("tr.wipe", 0f).toInt()
+  val sp = Sk.f("tr.speed", 1f)
   LaunchedEffect(tab) {
-    if (tab != last && cf.fx == 2) { dir = if (tab > last) 1 else -1; last = tab; pr.snapTo(0f); pr.animateTo(1f, tween(640, easing = LinearEasing)) } else last = tab
+    if (tab != last && cf.fx == 2 && sty != 3) { dir = if (tab > last) 1 else -1; last = tab; pr.snapTo(0f); pr.animateTo(1f, tween((640 / sp).toInt().coerceAtLeast(120), easing = LinearEasing)) } else last = tab
   }
   Canvas(Modifier.fillMaxSize()) {
     val p = pr.value
@@ -455,21 +500,27 @@ class Burst {
       val x = if (dir > 0) size.width * (1.1f - q * 1.3f) else size.width * (-.1f + q * 1.3f)
       val y = r.second * size.height; val bell = sin(q * 3.1416f)
       val c = if (k % 2 == 0) cf.ac else cf.ac2
-      if (k % 4 == 3) drawHeart(x, y, size.width * .05f * (.5f + bell), c, bell * .6f)
-      else drawCircle(c.copy(alpha = bell * .4f), size.width * .1f * (.4f + r.third) * (.5f + bell), Offset(x, y))
+      when {
+        sty == 1 || (sty == 0 && k % 4 == 3) -> drawHeart(x, y, size.width * .05f * (.5f + bell), c, bell * .7f)
+        sty == 2 -> drawSpark(x, y, size.width * .06f * (.4f + bell), c, bell * .8f)
+        else -> drawCircle(c.copy(alpha = bell * .4f), size.width * .1f * (.4f + r.third) * (.5f + bell), Offset(x, y))
+      }
     }
   }
 }
 
-@Composable fun Snack(msg: String?) {
+@Composable fun Snack(msg: String?, actLabel: String?, onAct: () -> Unit) {
   val cf = LCfg.current
   var last by remember { mutableStateOf("") }
-  if (msg != null && msg != last) SideEffect { last = msg }
+  var lastAct by remember { mutableStateOf<String?>(null) }
+  if (msg != null) SideEffect { last = msg; lastAct = actLabel }
   Box(Modifier.fillMaxWidth().padding(top = 10.dp), Alignment.TopCenter) {
     AnimatedVisibility(msg != null, enter = slideInVertically(spring(.5f, 400f)) { -it * 2 } + fadeIn(), exit = slideOutVertically { -it * 2 } + fadeOut()) {
       val sh = RoundedCornerShape(24.dp)
       Row(Modifier.clip(sh).background(Th.bg).border(1.5.dp, cf.ac, sh).padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         T("♡ ", cf.ac, 13f); T(msg ?: last, Th.fg, 12f, FontWeight.Medium, ml = 2)
+        val la = actLabel ?: lastAct
+        if (la != null) { Spacer(Modifier.width(8.dp)); Bt(la, true) { onAct() } }
       }
     }
   }
@@ -478,11 +529,11 @@ class Burst {
 @Composable fun Dlg(d: Dg, close: () -> Unit) {
   val cf = LCfg.current
   val ok = d.onOk
-  AlertDialog(onDismissRequest = close, containerColor = Th.bg, shape = RoundedCornerShape(28.dp), tonalElevation = 0.dp,
+  CompositionLocalProvider(LNoEd provides true) { AlertDialog(onDismissRequest = close, containerColor = Th.bg, shape = RoundedCornerShape(Sk.f("dlg.round", 28f).dp), tonalElevation = 0.dp,
     title = { T(d.title, cf.ac, 15f, FontWeight.Bold) },
     text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) { d.body() } },
     confirmButton = { if (ok != null) Bt(d.ok, true) { ok(); close() } else Bt(d.ok, true) { close() } },
-    dismissButton = { if (ok != null) Bt("✕") { close() } })
+    dismissButton = { if (ok != null) Bt("✕") { close() } }) }
 }
 
 // ───────── welcome ─────────
@@ -529,7 +580,7 @@ class Burst {
       }
       if (!access) {
         T("mochi needs all-files access to peek into your folders ♡", Th.fg, 12f, null, Modifier.padding(top = 8.dp), 3)
-        Bt("GIVE ACCESS ♡", true, Modifier, ask)
+        Bt("GIVE ACCESS ♡", true, f = ask)
       }
     }
   }
