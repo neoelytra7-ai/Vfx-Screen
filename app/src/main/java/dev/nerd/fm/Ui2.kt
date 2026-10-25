@@ -24,6 +24,9 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.Dp
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -45,17 +48,87 @@ private val AbovePos = object : PopupPositionProvider {
   }
 }
 
-@Composable fun SubMenu(subs: Subs, close: () -> Unit) {
+private val LeftPos = object : PopupPositionProvider {
+  override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
+    val x = (anchorBounds.left - popupContentSize.width - 10).coerceAtLeast(8)
+    val y = (anchorBounds.center.y - popupContentSize.height / 2).coerceIn(8, (windowSize.height - popupContentSize.height - 8).coerceAtLeast(8))
+    return IntOffset(x, y)
+  }
+}
+
+@Composable fun SubChip(g: String, lb: String, i: Int, f: () -> Unit) {
+  val cf = LCfg.current; val sh = RoundedCornerShape(14.dp)
+  Pop(i) {
+    Row(Modifier.clip(sh).background(cf.ac.copy(alpha = .10f)).border(1.dp, cf.ac.copy(alpha = .4f), sh).clickable { f() }.padding(horizontal = 9.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+      if (g.isNotEmpty()) { Gly(g, 20.dp); Spacer(Modifier.width(5.dp)) }
+      T(lb, Th.fg, 11f, FontWeight.Medium)
+    }
+  }
+}
+
+@Composable fun SubMenu(subs: Subs, left: Boolean = false, close: () -> Unit) {
   val cf = LCfg.current
-  val s = remember { Animatable(.4f) }
-  LaunchedEffect(Unit) { s.animateTo(1f, spring(.45f, 420f)) }
-  Popup(popupPositionProvider = AbovePos, onDismissRequest = close, properties = PopupProperties(focusable = true)) { CompositionLocalProvider(LNoEd provides true) {
-    val sh = RoundedCornerShape(20.dp)
+  val s = remember { Animatable(.6f) }
+  LaunchedEffect(Unit) { s.animateTo(1f, spring(.55f, 600f)) }
+  Popup(popupPositionProvider = if (left) LeftPos else AbovePos, onDismissRequest = close, properties = PopupProperties(focusable = true)) { CompositionLocalProvider(LNoEd provides true) {
+    val sh = RoundedCornerShape(22.dp)
+    val cols = if (subs.size > 3) 2 else 1
     Column(Modifier.graphicsLayer { scaleX = s.value; scaleY = s.value; alpha = s.value.coerceIn(0f, 1f) }
-      .clip(sh).background(Th.bg).border(1.5.dp, cf.ac.copy(alpha = .6f), sh).padding(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-      subs.forEachIndexed { i, (n, f) -> Pop(i) { Bt(n) { close(); f() } } }
+      .clip(sh).background(Th.bg).border(1.5.dp, cf.ac.copy(alpha = .55f), sh).padding(8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+      subs.chunked(cols).forEachIndexed { r, row ->
+        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+          row.forEachIndexed { c, (n, f) -> SubChip(n.substringBefore('|', ""), n.substringAfter('|'), r * cols + c) { close(); f() } }
+        }
+      }
     }
   } }
+}
+
+class SItem(val g: String, val label: String, val on: Boolean = false, val subs: Subs = emptyList(), val tapMenu: Boolean = false, val click: () -> Unit)
+
+@Composable fun SideItem(si: SItem) {
+  val cf = LCfg.current; val hp = LocalHapticFeedback.current
+  val src = remember { MutableInteractionSource() }
+  val pr by src.collectIsPressedAsState()
+  val sq by animateFloatAsState(if (pr && cf.fx > 0) .88f else 1f, spring(.4f, 600f), label = "si")
+  var menu by remember { mutableStateOf(false) }
+  val sh = RoundedCornerShape(14.dp)
+  Box(Modifier.fillMaxWidth().graphicsLayer { scaleX = sq; scaleY = sq }.clip(sh)
+    .background(if (si.on) cf.ac.copy(alpha = .22f) else Th.fg.copy(alpha = .04f))
+    .border(1.dp, if (si.on) cf.ac.copy(alpha = .7f) else cf.ac.copy(alpha = .22f), sh)
+    .combinedClickable(src, null, onClick = { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.TextHandleMove); if (si.tapMenu) menu = true else si.click() },
+      onLongClick = if (si.subs.isEmpty()) null else ({ if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.LongPress); menu = true }))
+    .padding(vertical = 4.dp)) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+      Gly(si.g, 24.dp, si.on)
+      T(si.label, if (si.on) cf.ac else Th.dim, 8f)
+    }
+    if (menu) SubMenu(si.subs, true) { menu = false }
+  }
+}
+
+@Composable fun SideBar(items: List<SItem>, m: Modifier = Modifier) {
+  val cf = LCfg.current; val sh = RoundedCornerShape(18.dp)
+  Column(m.width(54.dp).clip(sh).background(Th.fg.copy(alpha = .03f)).border(1.5.dp, cf.ac.copy(alpha = .35f), sh).verticalScroll(rememberScrollState()).padding(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+    items.forEach { SideItem(it) }
+  }
+}
+
+@Composable fun IconBtn(g: String, subs: Subs = emptyList(), tapMenu: Boolean = false, on: Boolean = false, click: () -> Unit) {
+  val cf = LCfg.current; val hp = LocalHapticFeedback.current
+  val src = remember { MutableInteractionSource() }
+  val pr by src.collectIsPressedAsState()
+  val sq by animateFloatAsState(if (pr && cf.fx > 0) .85f else 1f, spring(.4f, 600f), label = "ib")
+  var menu by remember { mutableStateOf(false) }
+  val sh = RoundedCornerShape(14.dp)
+  Box(Modifier.graphicsLayer { scaleX = sq; scaleY = sq }.clip(sh).background(if (on) cf.ac.copy(alpha = .22f) else Th.fg.copy(alpha = .04f))
+    .border(1.dp, if (on) cf.ac.copy(alpha = .7f) else cf.ac.copy(alpha = .3f), sh)
+    .combinedClickable(src, null, onClick = { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.TextHandleMove); if (tapMenu) menu = true else click() },
+      onLongClick = if (subs.isEmpty()) null else ({ if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.LongPress); menu = true }))
+    .padding(5.dp)) {
+    Gly(g, 24.dp, on)
+    if (menu) SubMenu(subs) { menu = false }
+  }
 }
 
 @Composable fun Hold(subs: Subs, m: Modifier = Modifier, click: () -> Unit = {}, content: @Composable BoxScope.() -> Unit) {
@@ -89,23 +162,22 @@ private val AbovePos = object : PopupPositionProvider {
 
 object Tr {
   fun make(style: Int, dir: Int, spd: Float, b: Float): ContentTransform {
-    val e = CubicBezierEasing(.34f, 1f + 1.1f * b, .64f, 1f)
-    val d = (360 / spd).toInt().coerceAtLeast(60); val d2 = d * 2 / 3; val d3 = d / 2
+    val e: Easing = if (b < .3f) FastOutSlowInEasing else CubicBezierEasing(.34f, 1f + 1.1f * b, .64f, 1f)
+    val d = (300 / spd).toInt().coerceAtLeast(60); val d2 = d * 2 / 3; val d3 = d / 2
     return when (style) {
-      1 -> (scaleIn(tween(d, easing = e), .75f) + fadeIn(tween(d2))) togetherWith (scaleOut(tween(d2), 1.12f) + fadeOut(tween(d3)))
-      2 -> (scaleIn(tween(d, easing = e), 1.25f) + fadeIn(tween(d2))) togetherWith (scaleOut(tween(d2), .8f) + fadeOut(tween(d3)))
-      3 -> (slideInVertically(tween(d, easing = e)) { -it / 2 * dir } + fadeIn(tween(d2))) togetherWith (slideOutVertically(tween(d2)) { it / 3 * dir } + fadeOut(tween(d3)))
-      4 -> fadeIn(tween(d2)) togetherWith fadeOut(tween(d3))
-      else -> (slideInHorizontally(tween(d, easing = e)) { it * dir / 2 } + fadeIn(tween(d2)) + scaleIn(tween(d, easing = e), .9f)) togetherWith
-        (slideOutHorizontally(tween(d2)) { -it * dir / 3 } + fadeOut(tween(d3)) + scaleOut(tween(d2), .94f))
+      1 -> (scaleIn(tween(d, easing = e), .92f) + fadeIn(tween(d, delayMillis = d3 / 2))) togetherWith fadeOut(tween(d3))
+      2 -> (scaleIn(tween(d, easing = e), 1.08f) + fadeIn(tween(d, delayMillis = d3 / 2))) togetherWith (scaleOut(tween(d2), .96f) + fadeOut(tween(d3)))
+      3 -> (slideInVertically(tween(d, easing = e)) { -it / 10 * dir } + fadeIn(tween(d, delayMillis = d3 / 2))) togetherWith (slideOutVertically(tween(d2)) { it / 12 * dir } + fadeOut(tween(d3)))
+      4 -> fadeIn(tween(d, delayMillis = d3 / 2)) togetherWith fadeOut(tween(d3))
+      else -> (slideInHorizontally(tween(d, easing = e)) { it * dir / 7 } + fadeIn(tween(d, delayMillis = d3 / 2))) togetherWith (slideOutHorizontally(tween(d2)) { -it * dir / 12 } + fadeOut(tween(d3)))
     }
   }
   fun tab(fx: Int, dir: Int): ContentTransform = pick("tr.tab", fx, dir)
   fun folder(fx: Int, dir: Int): ContentTransform = pick("tr.dir", fx, dir)
   private fun pick(k: String, fx: Int, dir: Int): ContentTransform =
     if (fx == 0) EnterTransition.None togetherWith ExitTransition.None
-    else if (fx == 1) fadeIn(tween(160)) togetherWith fadeOut(tween(100))
-    else make(Sk.f(k, 0f).toInt(), dir, Sk.f("tr.speed", 1f), Sk.f("tr.bounce", .5f))
+    else if (fx == 1) fadeIn(tween(140)) togetherWith fadeOut(tween(90))
+    else make(Sk.f(k, 0f).toInt(), dir, Sk.f("tr.speed", 1f), Sk.f("tr.bounce", .15f))
 }
 
 // ───────── procedural glyphs (nav, tiles, tools) ─────────
@@ -113,9 +185,10 @@ object Tr {
   val cf = LCfg.current; val ck = LClock.current
   val col = if (on) cf.ac else Th.fg; val soft = cf.ac2
   val seed = (n.hashCode() and 7).toFloat()
+  val slow = remember { derivedStateOf { (ck.value * 6f).toInt() / 6f } }
   Canvas(m.size(sz)) {
-    val u = size.width; val t = ck.value; val sw = u * .08f
-    val bob = if (cf.fx > 0) sin(t * 2f + seed) * u * .02f else 0f
+    val u = size.width; val t = if (on) ck.value else slow.value; val sw = u * .08f
+    val bob = if (cf.fx > 0 && on) sin(t * 2f + seed) * u * .02f else 0f
     drawCircle(cf.ac.copy(alpha = if (on) .22f else .10f), u * .48f, Offset(u / 2, u / 2))
     translate(0f, bob) {
       fun l(a: Float, b: Float, c: Float, d: Float) = drawLine(col, Offset(a * u, b * u), Offset(c * u, d * u), sw, StrokeCap.Round)
@@ -151,6 +224,25 @@ object Tr {
         "cmp" -> { pl(.22f, .38f, .76f, .38f, .64f, .28f); pl(.78f, .62f, .24f, .62f, .36f, .72f) }
         "edit" -> { l(.28f, .72f, .64f, .36f); l(.64f, .36f, .72f, .44f); l(.72f, .44f, .36f, .8f); l(.36f, .8f, .26f, .82f) }
         "squish" -> { l(.2f, .5f, .4f, .5f); pl(.32f, .42f, .4f, .5f, .32f, .58f); l(.8f, .5f, .6f, .5f); pl(.68f, .42f, .6f, .5f, .68f, .58f) }
+        "up" -> { l(.5f, .78f, .5f, .28f); pl(.3f, .46f, .5f, .26f, .7f, .46f) }
+        "folderplus" -> { rr(.18f, .34f, .64f, .46f, .1f); l(.5f, .46f, .5f, .68f); l(.39f, .57f, .61f, .57f) }
+        "fileplus" -> { rr(.28f, .2f, .44f, .6f, .06f); l(.5f, .4f, .5f, .62f); l(.39f, .51f, .61f, .51f) }
+        "paste" -> { rr(.26f, .26f, .48f, .54f, .06f); rr(.4f, .18f, .2f, .12f, .04f); l(.36f, .5f, .64f, .5f); l(.36f, .62f, .56f, .62f) }
+        "copy" -> { rr(.22f, .22f, .42f, .42f, .08f); rr(.36f, .36f, .42f, .42f, .08f) }
+        "cut" -> { l(.3f, .26f, .62f, .68f); l(.7f, .26f, .38f, .68f); o(.32f, .74f, .07f); o(.68f, .74f, .07f) }
+        "share" -> { dot(.3f, .5f, .07f, col); dot(.7f, .3f, .07f, col); dot(.7f, .7f, .07f, col); l(.3f, .5f, .7f, .3f); l(.3f, .5f, .7f, .7f) }
+        "info" -> { o(.5f, .5f, .27f); l(.5f, .46f, .5f, .64f); dot(.5f, .36f, .035f, col) }
+        "all" -> { rr(.24f, .24f, .52f, .52f, .08f); pl(.36f, .5f, .46f, .6f, .66f, .4f) }
+        "inv" -> { rr(.24f, .24f, .52f, .52f, .08f); l(.3f, .7f, .7f, .3f) }
+        "x" -> { l(.32f, .32f, .68f, .68f); l(.68f, .32f, .32f, .68f) }
+        "refresh" -> { drawArc(col, 40f, 270f, false, Offset(.28f * u, .28f * u), Size(.44f * u, .44f * u), style = Stroke(sw, cap = StrokeCap.Round)); pl(.64f, .22f, .72f, .34f, .58f, .38f) }
+        "grid" -> { rr(.24f, .24f, .2f, .2f, .04f); rr(.56f, .24f, .2f, .2f, .04f); rr(.24f, .56f, .2f, .2f, .04f); rr(.56f, .56f, .2f, .2f, .04f) }
+        "list" -> { l(.26f, .3f, .74f, .3f); l(.26f, .5f, .74f, .5f); l(.26f, .7f, .74f, .7f) }
+        "sort" -> { l(.3f, .72f, .3f, .3f); pl(.2f, .4f, .3f, .28f, .4f, .4f); l(.55f, .32f, .78f, .32f); l(.55f, .5f, .72f, .5f); l(.55f, .68f, .66f, .68f) }
+        "eye" -> { drawOval(col, Offset(.2f * u, .34f * u), Size(.6f * u, .32f * u), style = Stroke(sw)); dot(.5f, .5f, .07f, soft) }
+        "dual" -> { rr(.2f, .26f, .26f, .48f, .05f); rr(.54f, .26f, .26f, .48f, .05f) }
+        "more" -> { dot(.3f, .5f, .05f, col); dot(.5f, .5f, .05f, col); dot(.7f, .5f, .05f, col) }
+        "check" -> pl(.28f, .52f, .44f, .68f, .74f, .34f)
         else -> drawSpark(.5f * u, .5f * u, u * .28f, col)
       }
     }
@@ -159,10 +251,12 @@ object Tr {
 }
 
 fun mochiSubs(cf: Cfg): Subs = listOf(
-  "pat ♡" to { Hub.cheer(14) },
-  "edit mode ✎" to { Ed.on = true },
-  "next theme" to { cf.applyPreset((cf.preset + 1) % Th.pals.size) },
-  "cleaner" to { Hub.act("nav:clean") })
+  "star|pat ♡" to { Hub.cheer(14) },
+  "edit|edit mode" to { Ed.on = true },
+  "refresh|next theme" to { cf.applyPreset((cf.preset + 1) % Th.pals.size) },
+  "broom|cleaner" to { Hub.act("nav:clean") },
+  "chart|storage" to { Hub.act("nav:break") },
+  "trash|trash" to { Hub.act("nav:trash") })
 
 @Composable fun Decor() {
   val cf = LCfg.current; val ck = LClock.current

@@ -58,9 +58,9 @@ val SCHEMA: Map<String, List<Tok>> = linkedMapOf(
   "btn" to listOf(Tok("btn.round", "round", 0f, 30f, 16f), Tok("btn.padx", "pad x", 4f, 24f, 11f), Tok("btn.pady", "pad y", 2f, 14f, 6f),
     Tok("btn.border", "border", 0f, 4f, 1.5f), Tok("btn.fill", "fill", 0f, .4f, .08f), Tok("btn.squish", "squish", 0f, 1.5f, 1f), Tok("btn.text", "text x", .7f, 1.6f, 1f)),
   "nav" to listOf(Tok("nav.round", "round", 0f, 36f, 26f), Tok("nav.fill", "fill", 0f, .4f, .07f), Tok("nav.icon", "icon x", .6f, 1.6f, 1f),
-    Tok("nav.labels", "labels", 0f, 1f, 1f, 1), Tok("nav.top", "on top", 0f, 1f, 0f, 1)),
-  "row" to listOf(Tok("row.round", "round", 0f, 30f, 14f), Tok("row.pad", "pad +", -4f, 14f, 0f), Tok("row.icon", "icon px", 22f, 60f, 38f),
-    Tok("row.sel", "selected", 0f, .6f, .22f), Tok("row.sub", "subtitle", 0f, 1f, 1f, 1)),
+    Tok("nav.labels", "labels", 0f, 1f, 0f, 1), Tok("nav.top", "on top", 0f, 1f, 0f, 1)),
+  "row" to listOf(Tok("row.round", "round", 0f, 30f, 12f), Tok("row.pad", "pad +", -4f, 14f, 0f), Tok("row.icon", "icon px", 22f, 60f, 30f),
+    Tok("row.sel", "selected", 0f, .6f, .2f), Tok("row.sub", "subtitle", 0f, 1f, 1f, 1)),
   "pane" to listOf(Tok("pane.round", "round", 0f, 36f, 16f), Tok("pane.fill", "fill", 0f, .3f, .035f), Tok("pane.border", "border", 0f, 5f, 1.5f), Tok("crumb.show", "breadcrumb", 0f, 1f, 1f, 1)),
   "tile" to listOf(Tok("tile.round", "round", 0f, 36f, 20f), Tok("tile.tint", "tint", 0f, .8f, .4f), Tok("tile.icon", "icon px", 24f, 64f, 40f)),
   "icon" to listOf(Tok("icon.face", "faces", 0f, 1f, 1f, 1), Tok("icon.idle", "idle anim", 0f, 2f, 1f), Tok("icon.tone", "saturation", 0f, 1.8f, 1f)),
@@ -69,8 +69,8 @@ val SCHEMA: Map<String, List<Tok>> = linkedMapOf(
   "bg" to listOf(Tok("bg.grad", "gradient", 0f, 1f, 0f), Tok("bg.decor", "floaties", 0f, 1f, 0f, 1)),
   "dialog" to listOf(Tok("dlg.round", "round", 0f, 40f, 28f)),
   "motion" to listOf(Tok("tr.tab", "tab transition", 0f, 4f, 0f, 2, TRS), Tok("tr.dir", "folder transition", 0f, 4f, 0f, 2, TRS),
-    Tok("tr.speed", "speed", .4f, 2.5f, 1f), Tok("tr.bounce", "bounce", 0f, 1.6f, .5f), Tok("tr.wipe", "wipe", 0f, 3f, 0f, 2, listOf("BUBBLES", "HEARTS", "SPARKLES", "OFF"))),
-  "fx" to listOf(Tok("fx.spark", "tap sparkles", 0f, 8f, 3f), Tok("fx.jelly", "jelly scroll", 0f, 1f, 1f, 1))
+    Tok("tr.speed", "speed", .4f, 2.5f, 1f), Tok("tr.bounce", "bounce", 0f, 1.6f, .15f), Tok("tr.wipe", "wipe", 0f, 3f, 3f, 2, listOf("BUBBLES", "HEARTS", "SPARKLES", "OFF"))),
+  "fx" to listOf(Tok("fx.spark", "tap sparkles", 0f, 8f, 3f), Tok("fx.jelly", "jelly scroll", 0f, 1f, 0f, 1))
 )
 
 class Tpl(val name: String, val preset: Int, val font: Int, val m: Map<String, Float>)

@@ -20,6 +20,7 @@ import kotlin.math.min
   val n: String = f.name
   val sz = if (dir) 0L else f.length()
   val mt = f.lastModified()
+  val cnt = if (dir) (f.list()?.size ?: 0) else 0
   val ex = if (dir) "" else n.substringAfterLast('.', "").lowercase()
   val pm = (if (f.canRead()) "r" else "-") + (if (f.canWrite()) "w" else "-") + (if (f.canExecute()) "x" else "-")
 }

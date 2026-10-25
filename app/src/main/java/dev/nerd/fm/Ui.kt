@@ -113,7 +113,6 @@ fun DrawScope.drawSpark(cx: Float, cy: Float, s: Float, c: Color, a: Float = 1f)
     .combinedClickable(src, null, onClick = { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.TextHandleMove); f() }, onLongClick = lc)
     .padding(horizontal = Sk.f("btn.padx", 11f).dp, vertical = Sk.f("btn.pady", 6f).dp)) {
     T(s, if (on) ac else Th.fg, 12f * Sk.f("btn.text", 1f), FontWeight.Medium)
-    if (subs.isNotEmpty()) Box(Modifier.align(Alignment.TopEnd).size(4.dp).clip(CircleShape).background(cf.ac2))
     if (menu) SubMenu(subs) { menu = false }
   }
 }
@@ -138,19 +137,7 @@ fun DrawScope.drawSpark(cx: Float, cy: Float, s: Float, c: Color, a: Float = 1f)
   }
 }
 
-@Composable fun Wave(t: String, sz: Float = 20f) {
-  val cf = LCfg.current; val ck = LClock.current
-  Row {
-    t.forEachIndexed { i, ch ->
-      val col = Color.hsv((cf.hue + i * 9f) % 360f, if (Th.pal.light) .6f else cf.sat.coerceIn(0f, 1f), if (Th.pal.light) .85f else 1f)
-      T(ch.toString(), col, sz, FontWeight.Bold, Modifier.graphicsLayer {
-        val p = ck.value * 6.2832f / cf.spd
-        translationY = sin(p + i * .7f) * cf.amp * (if (cf.fx == 1) .5f else 1f)
-        alpha = .78f + .22f * cos(p + i * .7f)
-      })
-    }
-  }
-}
+@Composable fun Wave(t: String, sz: Float = 20f) { T(t, LCfg.current.ac, sz, FontWeight.Bold) }
 
 @Composable fun Scr(t: String, c: Color, sz: Float) {
   val an = LCfg.current.fx
@@ -184,7 +171,7 @@ fun DrawScope.drawSpark(cx: Float, cy: Float, s: Float, c: Color, a: Float = 1f)
 @Composable fun Pop(i: Int, m: Modifier = Modifier, c: @Composable BoxScope.() -> Unit) {
   val fx = LCfg.current.fx
   val s = remember { Animatable(if (fx == 0) 1f else 0f) }
-  LaunchedEffect(Unit) { if (fx > 0) { delay(i * 45L); s.animateTo(1f, spring(.45f, 260f)) } }
+  LaunchedEffect(Unit) { if (fx > 0) { delay(i * 28L); s.animateTo(1f, spring(.45f, 260f)) } }
   Box(m.graphicsLayer { scaleX = s.value; scaleY = s.value; alpha = s.value.coerceIn(0f, 1f) }, content = c)
 }
 
@@ -276,7 +263,8 @@ class Burst {
   val ck = LClock.current; val cf = LCfg.current; val ctx = LocalContext.current
   val kind = Fx.kind(e)
   val tone = Sk.f("icon.tone", 1f); val idle = Sk.f("icon.idle", 1f); val face = Sk.b("icon.face", true)
-  val hue = floatArrayOf(cf.hue, 330f, 265f, 195f, 40f, 125f, 215f, 20f, 0f)[kind]
+  val hue = (cf.hue + floatArrayOf(0f, 12f, -22f, 28f, -38f, 44f, -12f, 20f, 0f)[kind] + 360f) % 360f
+  val slow = remember { derivedStateOf { (ck.value * 6f).toInt() / 6f } }
   val lt = Th.pal.light
   val bs = if (kind == 8) .12f else (if (lt) .55f else .5f) * tone
   val col = Color.hsv(hue, bs.coerceIn(0f, 1f), if (lt) .92f else 1f)
@@ -285,7 +273,7 @@ class Burst {
   val wh = Color.White.copy(alpha = .9f)
   val open by animateFloatAsState(if (act || sel) 1f else 0f, spring(.45f, 380f), label = "ico")
   Canvas(m.size(sz).graphicsLayer { rotationZ = if (sel && cf.fx > 0) sin(ck.value * 9f) * 6f else 0f; val s = 1f + .12f * open; scaleX = s; scaleY = s }) {
-    val w = size.width; val h = size.height; val t = ck.value; val o = open
+    val w = size.width; val h = size.height; val o = open; val t = if (o > .02f) ck.value else slow.value
     if (th != null) {
       val s = min(th.width, th.height)
       drawRoundRect(col, Offset.Zero, size, CornerRadius(w * .24f))
@@ -293,8 +281,8 @@ class Burst {
       if (sel) drawHeart(w * .88f, h * .14f, w * .09f, Color(0xFFFF6B9A))
       return@Canvas
     }
-    val ph = t * idle
-    val bob = if (cf.fx > 0) sin(ph * 3f + kind) * h * .015f else 0f
+    val ph = if (o > .02f) t * idle else 0f
+    val bob = if (o > .02f && cf.fx > 0) sin(ph * 3f + kind) * h * .015f else 0f
     var fy = h * .64f
     if (kind == 0) {
       drawRoundRect(dk, Offset(w * .06f, h * .2f + bob), Size(w * .88f, h * .5f), CornerRadius(w * .14f))
@@ -331,36 +319,30 @@ class Burst {
 // ───────── rows, grid cells, pane ─────────
 @Composable fun Rw(e: E, i: Int, sel: Boolean, anySel: Boolean, jelly: () -> Float, tap: () -> Unit, lng: () -> Unit, quick: Subs) {
   val cf = LCfg.current; val ac = cf.ac; val fx = cf.fx
-  var on by remember { mutableStateOf(i >= 14 || fx == 0) }
-  if (!on) LaunchedEffect(Unit) { delay((i * cf.stag).toLong()); on = true }
-  val a by animateFloatAsState(if (on) 1f else 0f, spring(.6f, 300f), label = "a")
-  val sh = RoundedCornerShape(Sk.f("row.round", 14f).dp)
+  val sh = RoundedCornerShape(Sk.f("row.round", 12f).dp)
   val src = remember { MutableInteractionSource() }
   val pr by src.collectIsPressedAsState()
   var menu by remember { mutableStateOf(false) }
   val hp = LocalHapticFeedback.current
   val showSub = Sk.b("row.sub", true)
-  val sub = remember(e, cf.cSize, cf.cDate, cf.cPerm) { buildList { if (cf.cSize && !e.dir) add(Fx.sz(e.sz)); if (cf.cDate) add(Fx.dt(e.mt)); if (cf.cPerm) add(e.pm) }.joinToString(" · ") }
-  val pop by animateFloatAsState(if (sel) 1f else 0f, spring(.4f, 500f), label = "p")
-  val press by animateFloatAsState(if (pr && fx > 0) .965f else 1f, spring(.5f, 500f), label = "pr")
-  val jel = fx == 2 && Sk.b("fx.jelly", true)
+  val sub = remember(e, cf.cSize, cf.cDate, cf.cPerm) { buildList { if (e.dir) add(e.cnt.toString() + " items") else if (cf.cSize) add(Fx.sz(e.sz)); if (cf.cDate) add(Fx.dt(e.mt)); if (cf.cPerm) add(e.pm) }.joinToString(" · ") }
+  val pop by animateFloatAsState(if (sel) 1f else 0f, spring(.5f, 600f), label = "p")
+  val press by animateFloatAsState(if (pr && fx > 0) .97f else 1f, spring(.6f, 700f), label = "pr")
+  val jel = fx == 2 && Sk.b("fx.jelly", false)
   Box {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 1.5.dp)
-      .graphicsLayer {
-        val k = a.coerceIn(0f, 1f)
-        alpha = k; scaleX = (.9f + .1f * k) * press; scaleY = (.9f + .1f * k) * press
-        translationX = (1f - a) * 70f + (if (jel) jelly() * (if (i % 2 == 0) .35f else -.35f) else 0f)
-      }
-      .ed("row").clip(sh).background(if (sel) ac.copy(alpha = Sk.f("row.sel", .22f)) else Color.Transparent)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 1.dp)
+      .graphicsLayer { scaleX = press; scaleY = press; translationX = if (jel) jelly() * (if (i % 2 == 0) .35f else -.35f) else 0f }
+      .ed("row").clip(sh).background(if (sel) ac.copy(alpha = Sk.f("row.sel", .2f)) else Color.Transparent)
+      .then(if (sel) Modifier.border(1.dp, ac.copy(alpha = .55f), sh) else Modifier)
       .combinedClickable(src, LocalIndication.current, onClick = tap, onLongClick = { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.LongPress); lng(); if (!anySel && quick.isNotEmpty()) menu = true })
       .padding(horizontal = 6.dp, vertical = (cf.pad + Sk.f("row.pad", 0f)).coerceAtLeast(0f).dp),
       verticalAlignment = Alignment.CenterVertically) {
-      Ico(e, Sk.f("row.icon", 38f).dp, sel, pr)
-      Column(Modifier.weight(1f).padding(start = 10.dp)) {
+      Ico(e, Sk.f("row.icon", 30f).dp, sel, pr)
+      Column(Modifier.weight(1f).padding(start = 8.dp)) {
         T(e.n, if (e.dir) ac else Th.fg, 13f, FontWeight.Medium)
-        if (showSub && sub.isNotEmpty()) T(sub, Th.dim, 10f)
+        if (showSub && sub.isNotEmpty()) T(sub, Th.dim, 9f)
       }
-      if (pop > .01f) Canvas(Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }) { drawHeart(size.width / 2, size.height / 2, size.width * .3f, Color(0xFFFF6B9A)) }
+      if (pop > .01f) Canvas(Modifier.size(16.dp).graphicsLayer { scaleX = pop; scaleY = pop }) { drawHeart(size.width / 2, size.height / 2, size.width * .3f, Color(0xFFFF6B9A)) }
     }
     if (menu) SubMenu(quick) { menu = false }
   }
@@ -400,13 +382,11 @@ class Burst {
 
 @Composable fun PaneView(p: Pane, on: Boolean, m: Modifier, go: (File) -> Unit, tap: (E) -> Unit, lng: (E) -> Unit, crumb: (File) -> Subs, quick: (E) -> Subs) {
   val cf = LCfg.current; val ac = cf.ac; val fx = cf.fx
-  val sw = remember { Animatable(1f) }
-  LaunchedEffect(p.snap.dir) { if (fx == 2) { sw.snapTo(0f); sw.animateTo(1f, tween(480)) } }
   val jl = remember { Animatable(0f) }; val sc = rememberCoroutineScope()
   val conn = remember {
     object : NestedScrollConnection {
       override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-        if (consumed.y != 0f && cf.fx == 2) sc.launch { jl.snapTo((jl.value * .7f + consumed.y * .3f).coerceIn(-40f, 40f)); jl.animateTo(0f, spring(.45f, 120f)) }
+        if (consumed.y != 0f && cf.fx == 2 && Sk.b("fx.jelly", false)) sc.launch { jl.snapTo((jl.value * .7f + consumed.y * .3f).coerceIn(-40f, 40f)); jl.animateTo(0f, spring(.45f, 120f)) }
         return Offset.Zero
       }
     }
@@ -414,22 +394,29 @@ class Burst {
   val sh = RoundedCornerShape(Sk.f("pane.round", 16f).dp)
   val pb = Sk.f("pane.border", 1.5f)
   Column(m.fillMaxWidth().clip(sh).background(Th.fg.copy(alpha = Sk.f("pane.fill", .035f)))
-    .then(if (pb > .05f) Modifier.border(pb.dp, if (on) ac.copy(alpha = .65f) else Th.fg.copy(alpha = .08f), sh) else Modifier)) {
+    .then(if (pb > .05f) Modifier.border(pb.dp, if (on) ac.copy(alpha = .6f) else ac.copy(alpha = .22f), sh) else Modifier)) {
     if (Sk.b("crumb.show", true)) {
       val parts = remember(p.snap.dir) { val l = ArrayList<File>(); var f: File? = p.snap.dir; while (f != null) { l.add(0, f); f = f.parentFile }; l }
       val bs = rememberScrollState()
-      LaunchedEffect(parts) { delay(60); bs.animateScrollTo(bs.maxValue) }
-      Row(Modifier.fillMaxWidth().horizontalScroll(bs).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
-        parts.forEach { f -> Bt(f.name.ifEmpty { "/" }, f == p.snap.dir, subs = crumb(f)) { go(f) }; Spacer(Modifier.width(3.dp)) }
+      LaunchedEffect(parts) { bs.scrollTo(bs.maxValue) }
+      Row(Modifier.fillMaxWidth().horizontalScroll(bs).padding(horizontal = 6.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        parts.forEachIndexed { idx, f ->
+          if (idx > 0) T("›", Th.dim, 11f, null, Modifier.padding(horizontal = 2.dp))
+          val cur = f == p.snap.dir
+          Hold(crumb(f), Modifier.clip(RoundedCornerShape(8.dp)).background(if (cur) ac.copy(alpha = .18f) else Color.Transparent).padding(horizontal = 6.dp, vertical = 2.dp), { go(f) }) {
+            T(f.name.ifEmpty { "/" }, if (cur) ac else Th.dim, 11f, if (cur) FontWeight.Bold else null)
+          }
+        }
       }
+      Box(Modifier.fillMaxWidth().height(1.dp).background(ac.copy(alpha = .15f)))
     }
     Box(Modifier.weight(1f).fillMaxWidth()) {
       AnimatedContent(p.snap, transitionSpec = {
         if (initialState.dir == targetState.dir) EnterTransition.None togetherWith ExitTransition.None
         else Tr.folder(fx, if (targetState.dir.path.length < initialState.dir.path.length) -1 else 1)
       }, label = "nav", contentKey = { it.dir }) { s ->
-        if (s.items.isEmpty()) Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) { Mochi(90.dp, 1); T("nothing here~ zzz", Th.dim) }
-        else if (cf.grid) LazyVerticalGrid(GridCells.Adaptive(84.dp), Modifier.fillMaxSize().nestedScroll(conn)) {
+        if (s.items.isEmpty()) Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) { Mochi(80.dp, 1); T("nothing here~ zzz", Th.dim) }
+        else if (cf.grid) LazyVerticalGrid(GridCells.Adaptive(78.dp), Modifier.fillMaxSize().nestedScroll(conn)) {
           items(count = s.items.size, key = { s.items[it].f.path }) { i -> val e = s.items[i]; Gc(e, e.f.path in p.sel, { tap(e) }, { lng(e) }) }
         }
         else LazyColumn(Modifier.fillMaxSize().nestedScroll(conn)) {
@@ -439,20 +426,12 @@ class Burst {
           }
         }
       }
-      if (fx == 2) Canvas(Modifier.fillMaxSize()) {
-        val v = sw.value
-        if (v < 1f) {
-          val y = size.height * v
-          drawRect(Brush.verticalGradient(listOf(Color.Transparent, ac.copy(alpha = .4f * (1f - v)), Color.Transparent), startY = y - 36f, endY = y + 36f), Offset(0f, y - 36f), Size(size.width, 72f))
-          for (k in 0..4) drawSpark(size.width * (k + .5f) / 5f, y + sin(k * 2f + v * 9f) * 12f, 7f, cf.ac2, 1f - v)
-        }
-      }
     }
     val st = remember(p.snap) { p.snap.items.size.toString() + " items · " + Fx.sz(p.snap.items.sumOf { it.sz }) }
-    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-      Scr(st, ac.copy(alpha = .9f), 10f)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+      T(st, ac.copy(alpha = .8f), 9f)
       Spacer(Modifier.weight(1f))
-      if (p.sel.isNotEmpty()) T("♡ ${p.sel.size}", cf.ac2, 11f, FontWeight.Bold)
+      if (p.sel.isNotEmpty()) T("♡ ${p.sel.size}", cf.ac2, 10f, FontWeight.Bold)
     }
   }
 }
@@ -464,8 +443,8 @@ class Burst {
   LaunchedEffect(tab) { if (cf.fx > 0) idx.animateTo(tab.toFloat(), spring(.5f, 380f)) else idx.snapTo(tab.toFloat()) }
   val items = listOf("home" to "home", "folder" to "files", "search" to "find", "tools" to "tools", "paw" to "me")
   val r = Sk.f("nav.round", 26f); val sh = RoundedCornerShape(r.dp)
-  val labels = Sk.b("nav.labels", true); val isz = 24f * Sk.f("nav.icon", 1f)
-  Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).ed("nav").clip(sh).background(Th.fg.copy(alpha = Sk.f("nav.fill", .07f))).border(1.5.dp, Th.fg.copy(alpha = .1f), sh)
+  val labels = Sk.b("nav.labels", false); val isz = 22f * Sk.f("nav.icon", 1f)
+  Row(Modifier.fillMaxWidth().padding(vertical = 2.dp).ed("nav").clip(sh).background(Th.fg.copy(alpha = Sk.f("nav.fill", .07f))).border(1.5.dp, Th.fg.copy(alpha = .1f), sh)
     .drawBehind {
       val iw = size.width / 5f; val pd = 5.dp.toPx()
       drawRoundRect(ac.copy(alpha = .3f), Offset(idx.value * iw + pd, pd), Size(iw - pd * 2, size.height - pd * 2), CornerRadius(r.dp.toPx() * .85f))
@@ -473,7 +452,7 @@ class Burst {
     items.forEachIndexed { i, (g, lb) ->
       val s by animateFloatAsState(if (i == tab && cf.fx > 0) 1.28f else 1f, spring(.35f, 400f), label = "n")
       Hold(subs(i), Modifier.weight(1f), { go(i) }) {
-        Column(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
           Gly(g, isz.dp, i == tab, Modifier.graphicsLayer { scaleX = s; scaleY = s })
           if (labels) T(lb, if (i == tab) ac else Th.dim, 9f, if (i == tab) FontWeight.Bold else null)
         }
@@ -488,7 +467,7 @@ class Burst {
   var last by remember { mutableIntStateOf(tab) }
   var dir by remember { mutableIntStateOf(1) }
   val rnd = remember { List(16) { Triple(Random.nextFloat(), Random.nextFloat(), Random.nextFloat()) } }
-  val sty = Sk.f("tr.wipe", 0f).toInt()
+  val sty = Sk.f("tr.wipe", 3f).toInt()
   val sp = Sk.f("tr.speed", 1f)
   LaunchedEffect(tab) {
     if (tab != last && cf.fx == 2 && sty != 3) { dir = if (tab > last) 1 else -1; last = tab; pr.snapTo(0f); pr.animateTo(1f, tween((640 / sp).toInt().coerceAtLeast(120), easing = LinearEasing)) } else last = tab

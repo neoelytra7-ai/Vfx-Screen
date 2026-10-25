@@ -36,7 +36,7 @@ private val TILES = listOf(
   val src = remember { MutableInteractionSource() }
   val pr by src.collectIsPressedAsState()
   val sx by animateFloatAsState(if (pr) .88f else 1f, spring(.35f, 400f), label = "t")
-  val hue = (cf.hue + i * 31f) % 360f; val lt = Th.pal.light
+  val hue = (cf.hue + ((i % 3) - 1) * 14f + 360f) % 360f; val lt = Th.pal.light
   val sh = RoundedCornerShape(Sk.f("tile.round", 20f).dp)
   var menu by remember { mutableStateOf(false) }
   val tint = Sk.f("tile.tint", .4f)
@@ -78,7 +78,7 @@ private val TILES = listOf(
         Canvas(Modifier.fillMaxSize()) {
           val sw = 14.dp.toPx(); val sz = Size(size.width - sw, size.height - sw)
           drawArc(Th.fg.copy(alpha = .1f), -90f, 360f, false, Offset(sw / 2, sw / 2), sz, style = Stroke(sw, cap = StrokeCap.Round))
-          drawArc(Brush.sweepGradient(listOf(a2, ac, a2)), -90f, 360f * grow.value, false, Offset(sw / 2, sw / 2), sz, style = Stroke(sw, cap = StrokeCap.Round))
+          drawArc(SolidColor(ac), -90f, 360f * grow.value, false, Offset(sw / 2, sw / 2), sz, style = Stroke(sw, cap = StrokeCap.Round))
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) { T("${(used * 100).toInt()}%", ac, 20f, FontWeight.Bold); T("used", Th.dim, 10f) }
       }
@@ -90,7 +90,7 @@ private val TILES = listOf(
     }
     TILES.chunked(3).forEachIndexed { r, row ->
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        row.forEachIndexed { c, t -> Tile(t.first, t.second, r * 3 + c, Modifier.weight(1f), if (t.third.startsWith("q:")) listOf<Pair<String, () -> Unit>>("this folder only" to { act("q:~" + t.third.substring(2)) }) else emptyList()) { act(t.third) } }
+        row.forEachIndexed { c, t -> Tile(t.first, t.second, r * 3 + c, Modifier.weight(1f), if (t.third.startsWith("q:")) listOf<Pair<String, () -> Unit>>("folder|this folder only" to { act("q:~" + t.third.substring(2)) }) else emptyList()) { act(t.third) } }
         repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
       }
     }
@@ -126,7 +126,7 @@ private val TILES = listOf(
       Column(Modifier.padding(start = 12.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         T("Mochi · Lv $lv", ac, 15f, FontWeight.Bold)
         Box(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)).background(Th.fg.copy(alpha = .1f))) {
-          Box(Modifier.fillMaxWidth(fr.coerceAtLeast(.03f)).fillMaxHeight().background(Brush.horizontalGradient(listOf(cf.ac2, ac))))
+          Box(Modifier.fillMaxWidth(fr.coerceAtLeast(.03f)).fillMaxHeight().background(SolidColor(ac)))
         }
         T("${cf.xp} xp · next at $next", Th.dim, 10f)
         T("${cf.streak}-day streak · cleaned ${Fx.sz(cf.cleaned)}", Th.dim, 10f)
@@ -243,12 +243,12 @@ class Cat(val ic: String, val name: String, val files: List<File>, val bytes: Lo
       val tot = d.values.sum().coerceAtLeast(1L)
       Canvas(Modifier.fillMaxWidth().height(22.dp).clip(RoundedCornerShape(11.dp))) {
         var x = 0f
-        d.entries.forEachIndexed { i, e -> val w = size.width * (e.value.toFloat() / tot) * g.value; drawRect(Color.hsv((cf.hue + i * 45f) % 360f, .55f, 1f), Offset(x, 0f), Size(w, size.height)); x += w }
+        d.entries.forEachIndexed { i, e -> val w = size.width * (e.value.toFloat() / tot) * g.value; drawRect(Color.hsv((cf.hue + i * 22f) % 360f, .5f, 1f), Offset(x, 0f), Size(w, size.height)); x += w }
       }
       Column(Modifier.padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         d.entries.forEachIndexed { i, e ->
           Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(12.dp).clip(RoundedCornerShape(6.dp)).background(Color.hsv((cf.hue + i * 45f) % 360f, .55f, 1f)))
+            Box(Modifier.size(12.dp).clip(RoundedCornerShape(6.dp)).background(Color.hsv((cf.hue + i * 22f) % 360f, .5f, 1f)))
             T(e.key, Th.fg, 13f, null, Modifier.weight(1f).padding(start = 8.dp))
             T(Fx.sz(e.value) + "  " + (e.value * 100 / tot) + "%", Th.dim, 11f)
           }
