@@ -1,0 +1,1332 @@
+name: Build LiquidArt APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/build-liquidart.yml']
+concurrency:
+  group: liquidart
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" > /dev/null || true
+      - name: Write project
+        run: |
+          mkdir -p liquidart/app/src/main/java/art/liquid app/src/main/java/art/liquid && cd liquidart
+          cat > settings.gradle.kts <<'EOF_0'
+          pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}
+          dependencyResolutionManagement{repositories{google();mavenCentral()}}
+          rootProject.name="LiquidArt"
+          include(":app")
+          EOF_0
+          cat > build.gradle.kts <<'EOF_1'
+          plugins{
+          id("com.android.application") version "8.5.2" apply false
+          id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+          id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+          }
+          EOF_1
+          cat > gradle.properties <<'EOF_2'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
+          EOF_2
+          cat > app/build.gradle.kts <<'EOF_3'
+          plugins{id("com.android.application");id("org.jetbrains.kotlin.android");id("org.jetbrains.kotlin.plugin.compose")}
+          android{namespace="art.liquid";compileSdk=34
+          defaultConfig{applicationId="art.liquid";minSdk=29;targetSdk=34;versionCode=1;versionName="1.0"}
+          compileOptions{sourceCompatibility=JavaVersion.VERSION_17;targetCompatibility=JavaVersion.VERSION_17}
+          kotlinOptions{jvmTarget="17"}
+          buildFeatures{compose=true}}
+          dependencies{
+          implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+          implementation("androidx.compose.ui:ui");implementation("androidx.compose.foundation:foundation");implementation("androidx.compose.material3:material3")
+          implementation("androidx.activity:activity-compose:1.9.2")}
+          EOF_3
+          cat > app/src/main/AndroidManifest.xml <<'EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          <uses-feature android:glEsVersion="0x00030000" android:required="true"/>
+          <application android:label="LiquidArt" android:theme="@android:style/Theme.DeviceDefault.NoActionBar" android:hardwareAccelerated="true">
+          <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|density">
+          <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+          </activity>
+          </application>
+          </manifest>
+          EOF_4
+          cat > app/src/main/java/art/liquid/Engine.kt <<'EOF_5'
+          package art.liquid
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Rect
+          import android.content.ContentValues
+          import android.media.MediaCodec
+          import android.media.MediaCodecInfo
+          import android.media.MediaFormat
+          import android.media.MediaMuxer
+          import android.provider.MediaStore
+          import java.io.FileOutputStream
+          import android.opengl.GLES30 as G
+          import android.opengl.GLSurfaceView
+          import android.os.SystemClock
+          import android.view.MotionEvent
+          import androidx.compose.runtime.*
+          import java.io.ByteArrayOutputStream
+          import java.io.File
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.util.concurrent.ConcurrentHashMap
+          import java.util.concurrent.ConcurrentLinkedQueue
+          import java.util.zip.Deflater
+          import java.util.zip.Inflater
+          import javax.microedition.khronos.egl.EGLConfig
+          import javax.microedition.khronos.opengles.GL10
+          import kotlin.math.*
+          import kotlin.random.Random
+          val BLENDS = listOf(
+          "Normal" to "s","Dissolve" to "s","Darken" to "min(b,s)","Multiply" to "b*s",
+          "Color Burn" to "1.0-min(vec3(1.0),(1.0-b)/max(s,vec3(1e-4)))","Linear Burn" to "max(b+s-1.0,vec3(0.0))",
+          "Darker Color" to "mix(b,s,step(lum(s),lum(b)))","Lighten" to "max(b,s)","Screen" to "b+s-b*s",
+          "Color Dodge" to "min(vec3(1.0),b/max(1.0-s,vec3(1e-4)))","Linear Dodge (Add)" to "min(b+s,vec3(1.0))",
+          "Lighter Color" to "mix(b,s,step(lum(b),lum(s)))","Overlay" to "mix(2.0*b*s,1.0-2.0*(1.0-b)*(1.0-s),step(0.5,b))",
+          "Soft Light" to "mix(b-(1.0-2.0*s)*b*(1.0-b),b+(2.0*s-1.0)*(mix(sqrt(b),((16.0*b-12.0)*b+4.0)*b,step(b,vec3(0.25)))-b),step(0.5,s))",
+          "Hard Light" to "mix(2.0*b*s,1.0-2.0*(1.0-b)*(1.0-s),step(0.5,s))",
+          "Vivid Light" to "mix(1.0-(1.0-b)/max(2.0*s,vec3(1e-4)),b/max(2.0*(1.0-s),vec3(1e-4)),step(0.5,s))",
+          "Linear Light" to "b+2.0*s-1.0","Pin Light" to "mix(min(b,2.0*s),max(b,2.0*s-1.0),step(0.5,s))",
+          "Hard Mix" to "step(vec3(1.0),b+s)","Difference" to "abs(b-s)","Exclusion" to "b+s-2.0*b*s",
+          "Subtract" to "max(b-s,vec3(0.0))","Divide" to "b/max(s,vec3(1e-4))",
+          "Hue" to "setLum(setSat(s,sat(b)),lum(b))","Saturation" to "setLum(setSat(b,sat(s)),lum(b))",
+          "Color" to "setLum(s,lum(b))","Luminosity" to "setLum(b,lum(s))",
+          "Glow" to "min(vec3(1.0),s*s/max(1.0-b,vec3(1e-4)))","Reflect" to "min(vec3(1.0),b*b/max(1.0-s,vec3(1e-4)))",
+          "Heat" to "1.0-min(vec3(1.0),(1.0-s)*(1.0-s)/max(b,vec3(1e-4)))","Freeze" to "1.0-min(vec3(1.0),(1.0-b)*(1.0-b)/max(s,vec3(1e-4)))",
+          "Phoenix" to "min(b,s)-max(b,s)+1.0","Negation" to "1.0-abs(1.0-b-s)","Average" to "(b+s)*0.5",
+          "Grain Extract" to "b-s+0.5","Grain Merge" to "b+s-0.5","Pegtop Soft Light" to "(1.0-2.0*s)*b*b+2.0*s*b",
+          "Interpolation" to "0.5-0.25*cos(3.14159*s)-0.25*cos(3.14159*b)","Contrast Mask" to "(b-0.5)*(0.5+s*1.5)+0.5",
+          "Threshold" to "step(s,b)","Hard Reflect" to "mix(min(vec3(1.0),b*b/max(1.0-s,vec3(1e-4))),s,step(vec3(0.999),s))")
+          class PD(val k:String,val n:String,val g:String,val lo:Float,val hi:Float,val d:Float)
+          class SlCtx(val id:String,val n:String,val lo:Float,val hi:Float,val pw:Float,val def:Float?,val gv:()->Float,val f:(Float)->Unit)
+          val DEFS = listOf(
+          PD("size","Size","Shape",1f,400f,28f),PD("minSize","Min size","Shape",0f,1f,.15f),PD("hard","Hardness","Shape",0f,1f,.8f),
+          PD("round","Roundness","Shape",.05f,1f,1f),PD("angle","Angle","Shape",0f,360f,0f),PD("angJ","Angle jitter","Shape",0f,1f,0f),
+          PD("sizeJ","Size jitter","Shape",0f,1f,0f),PD("spacing","Spacing","Shape",.01f,1.5f,.08f),PD("scatter","Scatter","Shape",0f,4f,0f),
+          PD("count","Dabs/step","Shape",1f,6f,1f),
+          PD("opacity","Stroke opacity","Flow",0f,1f,1f),PD("flow","Flow","Flow",.02f,1f,.8f),PD("flowJ","Flow jitter","Flow",0f,1f,0f),
+          PD("pSize","Pressure>size","Dynamics",0f,1f,.7f),PD("pFlow","Pressure>flow","Dynamics",0f,1f,.3f),PD("pGamma","Pressure curve","Dynamics",.2f,3f,1f),
+          PD("vSize","Speed>size","Dynamics",-1f,1f,0f),PD("vFlow","Speed>flow","Dynamics",-1f,1f,0f),PD("tAng","Tilt>angle","Dynamics",0f,1f,0f),
+          PD("tRound","Tilt>squash","Dynamics",0f,1f,0f),PD("follow","Follow stroke","Dynamics",0f,1f,0f),
+          PD("stab","Stabilizer strength","Stroke",0f,1f,.35f),PD("stRope","Rope length px","Stroke",0f,300f,60f),PD("stPull","Rope pull","Stroke",.05f,1f,.7f),PD("stRT","Realtime correction","Stroke",0f,1f,.5f),PD("stSpd","Correction speed px","Stroke",4f,120f,24f),PD("stMode","Stab mode","Hid",0f,3f,0f),PD("stEnd","Catch up on lift","Hid",0f,1f,1f),PD("taper","Entry taper px","Stroke",0f,300f,0f),
+          PD("grain","Grain","Texture",0f,1f,0f),PD("gScale","Grain scale","Texture",.1f,8f,1f),PD("gMove","Grain moves","Texture",0f,1f,0f),
+          PD("gCon","Grain softness","Texture",.02f,.5f,.2f),PD("edge","Wet edge","Texture",0f,1f,0f),
+          PD("hueJ","Hue jitter","Color",0f,1f,0f),PD("satJ","Sat jitter","Color",0f,1f,0f),PD("valJ","Value jitter","Color",0f,1f,0f),
+          PD("lqR","Radius","Liquify",8f,600f,160f),PD("lqK","Strength","Liquify",.05f,1f,.5f),PD("lqH","Hardness","Liquify",0f,1f,.3f))
+          val THEME=listOf(PD("blur","Blur","Glass",0f,3f,1.5f),PD("ref","Refraction","Glass",0f,90f,46f),PD("disp","Dispersion","Glass",0f,.3f,.07f),
+          PD("tint","Tint amount","Glass",0f,.95f,.08f),PD("tintL","Tint brightness","Glass",0f,1f,1f),PD("rim","Edge highlight","Glass",0f,1.5f,1f),
+          PD("shadow","Shadow","Glass",0f,1f,.3f),PD("wob","Edge wobble","Glass",0f,6f,0f),PD("melt","Liquid merge","Glass",0f,60f,30f),
+          PD("rad","Corner radius","Glass",4f,60f,34f),PD("bounce","Spring bounce","Glass",0f,1f,.5f),PD("sat","Saturation","Glass",0f,2f,1.25f),
+          PD("bright","Brightness","Glass",.5f,1.5f,1f),PD("grain","Frost grain","Glass",0f,1f,.3f),PD("bevel","Bevel width","Glass",6f,60f,28f))
+          val PRESETS=linkedMapOf("Liquid" to listOf(1.5f,46f,.07f,.08f,1f,1f,.3f,0f,30f,34f,.5f,1.25f,1f,.3f,28f),"Frosted" to listOf(2.6f,6f,0f,.22f,.9f,.5f,.25f,0f,12f,28f,.2f,1.1f,1.02f,.5f,20f),
+          "Clear" to listOf(.5f,60f,.12f,.02f,1f,1.2f,.2f,0f,30f,40f,.6f,1.15f,1f,.2f,34f),"Smoke" to listOf(2.2f,14f,.02f,.55f,0f,.6f,.4f,0f,20f,30f,.3f,.9f,.9f,.4f,24f),
+          "Flat" to listOf(3f,0f,0f,.85f,.1f,0f,.15f,0f,0f,20f,0f,1f,1f,.3f,10f),"Jelly" to listOf(1.2f,52f,.08f,.1f,1f,1f,.3f,3f,45f,40f,1f,1.3f,1f,.3f,32f))
+          val FX=listOf(PD("bloom","Bloom","Filter",0f,2f,0f),PD("bThr","Bloom threshold","Filter",0f,1f,.6f),PD("bRad","Bloom radius","Filter",1f,60f,18f),PD("blur","Blur","Filter",0f,40f,0f),
+          PD("chroma","Chromatic aberration","Filter",0f,20f,0f),PD("lift","Shadows","Filter",-.5f,.5f,0f),PD("gamma","Midtones","Filter",.4f,2.5f,1f),PD("gain","Highlights","Filter",.5f,1.8f,1f),
+          PD("fsat","Saturation","Filter",0f,2.5f,1f),PD("hue","Hue shift","Filter",-180f,180f,0f),PD("vig","Vignette","Filter",0f,1f,0f),PD("fgrain","Film grain","Filter",0f,1f,0f),PD("sharp","Sharpen","Filter",0f,2f,0f))
+          val CVS=listOf(PD("pH","Paper hue","Canvas",0f,360f,0f),PD("pS","Paper saturation","Canvas",0f,1f,0f),PD("pV","Paper brightness","Canvas",0f,1f,1f),PD("chk","Transparency checker","Canvas",0f,1f,0f),
+          PD("grid","Grid opacity","Canvas",0f,1f,0f),PD("gsz","Grid size","Canvas",8f,256f,64f),PD("rnd","Corner radius","Canvas",0f,120f,0f),PD("shad","Canvas shadow","Canvas",0f,1f,.6f))
+          val INPD=listOf(PD("tapMs","Two-finger tap max time (ms)","Input",60f,600f,180f),PD("tapSlop","Tap movement tolerance (px)","Input",2f,40f,6f),PD("undoDelay","Undo delay (ms)","Input",0f,400f,90f))
+          val UID=listOf(PD("icoSc","Icon scale","Layout",.5f,2f,1f),PD("panSc","Panel scale","Layout",.6f,1.4f,1f),PD("gridN","Ruler grid divisions","Layout",4f,40f,20f),PD("hudW","HUD width","Layout",.4f,.96f,.66f),PD("hudY","HUD bottom margin","Layout",0f,.25f,.056f))
+          val MMD=listOf(PD("featS","Featured interval (s)","Menu",4f,30f,10f),PD("fZoom","Zoom amount","Menu",0f,.4f,.14f),PD("fPan","Pan amount","Menu",0f,1f,.55f),PD("fTilt","Tilt (deg)","Menu",0f,6f,1.6f),PD("fGrain","Film grain","Menu",0f,1f,.35f),PD("fVig","Vignette","Menu",0f,1f,.6f),PD("fSweep","Light sweep","Menu",0f,1f,.5f),PD("fBars","Letterbox","Menu",0f,1f,.4f),PD("blinkS","Blink every (s)","Menu",.8f,8f,2.4f),PD("eyeF","Eye follow","Menu",0f,1f,.8f),PD("chSpd","Character speed","Menu",.2f,2f,1f),PD("fact","Fun fact interval (s)","Menu",3f,30f,9f))
+          class Layer(n:String){
+          var name by mutableStateOf(n); var op by mutableFloatStateOf(1f); var mode by mutableIntStateOf(0)
+          var vis by mutableStateOf(true); var lock by mutableStateOf(false); var liq by mutableStateOf(false)
+          var white=false; var t=0; var f=0; var dt=0; var df=0; var has=false; var dbox=intArrayOf(Int.MAX_VALUE,Int.MAX_VALUE,0,0) }
+          class ProjInfo(val dir:File,val time:Long)
+          object Proj{fun root(c:Context):File=File(c.filesDir,"projects").apply{mkdirs()}
+          fun list(c:Context):List<File> =root(c).listFiles()?.filter{it.isDirectory}?.sortedByDescending{it.lastModified()}?:emptyList()
+          fun newDir(c:Context):File=File(root(c),"p"+System.currentTimeMillis()).apply{mkdirs()}}
+          fun saveMedia(ctx:Context,b:Bitmap,fmt:Int,q:Int):Boolean{
+          try{val cv=ContentValues().apply{put(MediaStore.MediaColumns.DISPLAY_NAME,"LiquidArt_"+System.currentTimeMillis()+(if(fmt==0)".png" else ".jpg"));put(MediaStore.MediaColumns.MIME_TYPE,if(fmt==0)"image/png" else "image/jpeg");put(MediaStore.MediaColumns.RELATIVE_PATH,"Pictures/LiquidArt");put(MediaStore.MediaColumns.IS_PENDING,1)}
+          val uri=ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,cv)?:return false
+          ctx.contentResolver.openOutputStream(uri)?.use{b.compress(if(fmt==0)Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG,q,it)}
+          cv.clear();cv.put(MediaStore.MediaColumns.IS_PENDING,0);ctx.contentResolver.update(uri,cv,null,null);return true}catch(e:Throwable){return false}}
+          object Speed{
+          fun export(ctx:Context,dir:File,fps:Int,sec:Int,prog:(Int,Int)->Unit):Boolean{
+          try{val fs=File(dir,"frames").listFiles()?.filter{it.name.endsWith(".jpg")}?.sortedBy{it.name}?:emptyList<File>();if(fs.size<2)return false
+          val cnt=min(fs.size,fps*sec);val S=512
+          val fmt=MediaFormat.createVideoFormat("video/avc",S,S);fmt.setInteger(MediaFormat.KEY_COLOR_FORMAT,MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);fmt.setInteger(MediaFormat.KEY_BIT_RATE,5000000);fmt.setInteger(MediaFormat.KEY_FRAME_RATE,fps);fmt.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL,1)
+          val codec=MediaCodec.createEncoderByType("video/avc");codec.configure(fmt,null,null,MediaCodec.CONFIGURE_FLAG_ENCODE);val surf=codec.createInputSurface();codec.start()
+          val out=File(ctx.cacheDir,"speedpaint.mp4");if(out.exists())out.delete();val mux=MediaMuxer(out.path,MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+          var track=-1;var started=false;val info=MediaCodec.BufferInfo()
+          fun drain(eos:Boolean){var spins=0
+          while(true){val i=codec.dequeueOutputBuffer(info,if(eos)10000L else 0L)
+          if(i==MediaCodec.INFO_TRY_AGAIN_LATER){if(!eos||++spins>400)return}
+          else if(i==MediaCodec.INFO_OUTPUT_FORMAT_CHANGED){track=mux.addTrack(codec.outputFormat);mux.start();started=true}
+          else if(i>=0){val b=codec.getOutputBuffer(i)!!;if(info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG!=0)info.size=0
+          if(info.size>0&&started){b.position(info.offset);b.limit(info.offset+info.size);mux.writeSampleData(track,b,info)}
+          codec.releaseOutputBuffer(i,false);if(info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM!=0)return}}}
+          val paint=Paint(Paint.FILTER_BITMAP_FLAG);val dst=Rect(0,0,S,S)
+          for(k in 0 until cnt){val idx=if(cnt==1)0 else k*(fs.size-1)/(cnt-1);val bm=BitmapFactory.decodeFile(fs[idx].path)?:continue
+          val c=surf.lockHardwareCanvas();c.drawBitmap(bm,null,dst,paint);surf.unlockCanvasAndPost(c);bm.recycle();drain(false);prog(k+1,cnt);Thread.sleep(1000L/fps)}
+          val lb=BitmapFactory.decodeFile(fs.last().path)
+          if(lb!=null){for(h in 0 until fps){val c=surf.lockHardwareCanvas();c.drawBitmap(lb,null,dst,paint);surf.unlockCanvasAndPost(c);drain(false);Thread.sleep(1000L/fps)}}
+          codec.signalEndOfInputStream();drain(true);codec.stop();codec.release();surf.release();if(started)mux.stop();mux.release()
+          val cv=ContentValues().apply{put(MediaStore.MediaColumns.DISPLAY_NAME,"LiquidArt_speedpaint_"+System.currentTimeMillis()+".mp4");put(MediaStore.MediaColumns.MIME_TYPE,"video/mp4");put(MediaStore.MediaColumns.RELATIVE_PATH,"Movies/LiquidArt");put(MediaStore.MediaColumns.IS_PENDING,1)}
+          val uri=ctx.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,cv)?:return false
+          ctx.contentResolver.openOutputStream(uri)?.use{o->out.inputStream().use{it.copyTo(o)}}
+          cv.clear();cv.put(MediaStore.MediaColumns.IS_PENDING,0);ctx.contentResolver.update(uri,cv,null,null);return true}catch(e:Throwable){return false}}}
+          object Glass{ val m=ConcurrentHashMap<Int,FloatArray>(); val light=mutableStateMapOf<Int,Boolean>() }
+          object Cur{
+          val layers=mutableStateListOf<Layer>(); var sel by mutableIntStateOf(1); var tool by mutableIntStateOf(0); var lq by mutableIntStateOf(0)
+          var ls by mutableIntStateOf(0); var lm by mutableIntStateOf(0); var le by mutableIntStateOf(0); var bk by mutableStateOf(true); var hu by mutableIntStateOf(0); var hr by mutableIntStateOf(0)
+          var n=2048; var sw=1; var sh=1; var dir:File?=null; var ph by mutableFloatStateOf(0f); var edit by mutableStateOf(false); var focus by mutableStateOf(false)
+          var pl by mutableStateOf(false); var pb by mutableStateOf(true); var pt by mutableStateOf(false); var pm by mutableStateOf(false); var cb by mutableStateOf(false); var cl by mutableStateOf(false); var ct by mutableStateOf(false)
+          val pos=mutableStateMapOf<String,Float>()
+          var er by mutableStateOf(false); var hs by mutableStateOf(false); var hud by mutableStateOf(true); var boot by mutableIntStateOf(0); var splash by mutableStateOf(true); var pf by mutableStateOf(false); var cf by mutableStateOf(false); var lumV by mutableIntStateOf(0); var lum:ByteArray?=null
+          val fx=mutableStateMapOf<String,Float>().apply{FX.forEach{put(it.k,it.d)};put("off",0f)}
+          val cv=mutableStateMapOf<String,Float>().apply{CVS.forEach{put(it.k,it.d)}}
+          val inp=mutableStateMapOf("tapUndo" to 1f,"redo3" to 1f,"fingerDraw" to 1f,"splash" to 2f,"editHold" to 3f).apply{INPD.forEach{put(it.k,it.d)}}
+          var app:Context?=null; var rec by mutableStateOf(true); var frames by mutableIntStateOf(0); var menu by mutableStateOf(false); var proj:File?=null; var msg by mutableStateOf(""); var busy by mutableStateOf(""); var exp by mutableStateOf(false); var pc by mutableStateOf(false)
+          val exo=mutableStateMapOf("fmt" to 0f,"bg" to 1f,"q" to 92f,"sec" to 20f)
+          val projs=mutableStateListOf<ProjInfo>()
+          val lay=mutableStateMapOf("ruler" to 1f,"snap" to 1f,"excl" to 1f,"outClose" to 1f,"docks" to 1f).apply{UID.forEach{put(it.k,it.d)}}
+          val sl=mutableStateMapOf("sens" to 1f,"fz" to 1f,"hSl" to 40f,"thumb" to 7f)
+          var es by mutableStateOf(""); var se by mutableStateOf<SlCtx?>(null)
+          val mm=mutableStateMapOf<String,Float>().apply{MMD.forEach{put(it.k,it.d)};put("mmTheme",0f);put("outl",1f);put("fRand",1f);put("chShow",1f);put("c24",0f);put("sec",0f);put("factOnly",0f);put("fCap",1f)}
+          var cfact by mutableStateOf("")
+          val recent=mutableStateListOf(0xFF2F6BFF.toInt(),0xFF111111.toInt(),0xFFFFFFFF.toInt(),0xFFE63946.toInt(),0xFFFFB703.toInt(),0xFF2A9D8F.toInt(),0xFF9B5DE5.toInt(),0xFFFF8FAB.toInt())
+          fun refreshProjs(){val c=app?:return;projs.clear();Proj.list(c).forEach{projs.add(ProjInfo(it,it.lastModified()))}}
+          fun pushRecent(){val c=col();recent.remove(c);recent.add(0,c);while(recent.size>10)recent.removeAt(recent.size-1)}
+          fun pickTool(t:Int){tool=t;when(t){0->er=false;1->er=true;3->le=if(er)1 else 0;4->if(lm!=0)lm=if(er)2 else 1}}
+          fun lumAt(x:Float,y:Float):Float{val l=lum?:return .3f;val ix=(x/sw*24f).toInt().coerceIn(0,23);val iy=((1f-y/sh)*54f).toInt().coerceIn(0,53);return (l[(iy*24+ix)*4].toInt() and 255)/255f}
+          val th=mutableStateMapOf<String,Float>().apply{THEME.forEach{put(it.k,it.d)}}
+          var hue by mutableFloatStateOf(220f); var sat by mutableFloatStateOf(.8f); var vl by mutableFloatStateOf(.9f)
+          val b=mutableStateMapOf<String,Float>().apply{DEFS.forEach{put(it.k,it.d)}}
+          @Volatile var px=0f; @Volatile var py=0f; @Volatile var sc=.4f; @Volatile var rot=0f; @Volatile var vd=true
+          @Volatile var lx=0f; @Volatile var ly=-1f
+          var r:Eng?=null; var view:CanvasView?=null
+          fun rq(){view?.requestRender()}
+          fun closeAll(){pl=false;pb=false;pf=false;pt=false;pc=false;pm=false;exp=false;rq()}
+          fun tab(k:String,fo:Boolean=false){val was=!fo&&when(k){"pl"->pl;"pb"->pb;"pf"->pf;"pt"->pt;"pc"->pc;"pm"->pm;else->exp}
+          if(!was){if(lay["excl"]==1f)closeAll() else if(k=="pf")pb=false else if(k=="pb")pf=false}
+          val v=!was
+          when(k){"pl"->pl=v;"pb"->pb=v;"pf"->pf=v;"pt"->pt=v;"pc"->pc=v;"pm"->pm=v;else->exp=v};rq()}
+          fun outside(x:Float,y:Float){if(lay["outClose"]!=1f||menu||splash||edit)return
+          fun hit(r:FloatArray)=abs(x-r[0])<=r[2]&&abs(y-r[1])<=r[3]
+          val ed=se
+          if(ed!=null){val r=Glass.m[14];if(r==null||!hit(r))se=null;rq();return}
+          val ops=hashMapOf(2 to pl,3 to pb,9 to pf,5 to pt,4 to pm,10 to pc,12 to exp)
+          for((id,r) in Glass.m){val keep=id>=20||id==6||id==7||id==8||id==13||ops[id]==true
+          if(keep&&hit(r))return}
+          if(ops.values.any{it})closeAll()}
+          fun q(a:()->Unit){view?.queueEvent{a()};view?.requestRender()}
+          fun col()=Color.HSVToColor(floatArrayOf(hue,sat,vl)) }
+          const val HDR="#version 300 es\nprecision highp float;precision highp int;precision highp sampler2D;\n"
+          const val FSV=HDR+"out vec2 uv;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);uv=p;gl_Position=vec4(p*2.-1.,0,1);}"
+          const val CR="""vec4 cr(sampler2D t,vec2 uv,vec2 sz){vec2 sp=uv*sz;vec2 tc=floor(sp-.5)+.5;vec2 f=sp-tc;vec2 f2=f*f,f3=f2*f;
+          vec2 w0=f2-.5*(f3+f);vec2 w1=1.5*f3-2.5*f2+1.;vec2 w3=.5*(f3-f2);vec2 w2=1.-w0-w1-w3;vec2 w12=w1+w2;
+          vec2 t0=(tc-1.)/sz,t3=(tc+2.)/sz,t12=(tc+w2/w12)/sz;
+          vec4 r=texture(t,vec2(t12.x,t0.y))*(w12.x*w0.y)+texture(t,vec2(t0.x,t12.y))*(w0.x*w12.y)+texture(t,t12)*(w12.x*w12.y)+texture(t,vec2(t3.x,t12.y))*(w3.x*w12.y)+texture(t,vec2(t12.x,t3.y))*(w12.x*w3.y);
+          r/=(w12.x*w0.y+w0.x*w12.y+w12.x*w12.y+w3.x*w12.y+w12.x*w3.y);r.a=clamp(r.a,0.,1.);r.rgb=clamp(r.rgb,0.,r.a);return r;}
+          """
+          val COMP=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uAcc,uLay,uDisp,uStroke,uSelM;uniform int uHas,uSM,uMode,uHS;uniform float uSO,uOp;uniform vec2 uSize;\n"+CR+"""
+          float lum(vec3 c){return dot(c,vec3(.3,.59,.11));}
+          vec3 clipC(vec3 c){float l=lum(c),n=min(min(c.r,c.g),c.b),x=max(max(c.r,c.g),c.b);if(n<0.)c=l+(c-l)*l/(l-n);if(x>1.)c=l+(c-l)*(1.-l)/(x-l);return c;}
+          vec3 setLum(vec3 c,float l){return clipC(c+(l-lum(c)));}
+          float sat(vec3 c){return max(max(c.r,c.g),c.b)-min(min(c.r,c.g),c.b);}
+          vec3 setSat(vec3 c,float s){float mx=max(max(c.r,c.g),c.b),mn=min(min(c.r,c.g),c.b);return mx>mn?(c-mn)*s/(mx-mn):vec3(0.);}
+          vec3 bf(int m,vec3 b,vec3 s){switch(m){"""+BLENDS.mapIndexed{i,p->"case $i:return ${p.second};"}.joinToString("")+"""default:return s;}}
+          void main(){vec2 u=uv;vec4 L;if(uHas>0){u+=texture(uDisp,uv).rg;L=cr(uLay,u,uSize);}else L=texture(uLay,uv);
+          if(uSM>0){vec4 S=texture(uStroke,uv)*uSO*(uHS>0?texture(uSelM,uv).r:1.);if(uSM==1)L=S+L*(1.-S.a);else if(uSM==2)L*=1.-S.a;else L=vec4(S.rgb*L.a+L.rgb*(1.-S.a),L.a);}
+          vec4 B=texture(uAcc,uv);float sa=L.a*uOp;
+          if(uMode==1)sa=step(fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453),sa);
+          vec3 s=L.a>0.?L.rgb/L.a:vec3(0.);vec3 b=B.a>0.?B.rgb/B.a:vec3(0.);vec3 m=clamp(bf(uMode,b,s),0.,1.);
+          o=vec4((1.-B.a)*sa*s+(1.-sa)*B.rgb+sa*B.a*m,sa+B.a*(1.-sa));}"""
+          val BAKE=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uLay,uDisp;uniform vec2 uSize;\n"+CR+"void main(){o=cr(uLay,uv+texture(uDisp,uv).rg,uSize);}"
+          val COMMIT=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uS,uSel;uniform float uSO;uniform int uHS;void main(){o=texture(uS,uv)*uSO*(uHS>0?texture(uSel,uv).r:1.);}"
+          val DABV=HDR+"layout(location=0)in vec2 aP;layout(location=1)in vec4 aA;layout(location=2)in vec3 aC;uniform vec2 uSize;flat out vec4 vA;flat out vec3 vC;flat out vec2 vP;out vec2 vQ;void main(){vec2 c=vec2(gl_VertexID&1,gl_VertexID>>1);vQ=c-.5;vec2 pp=aP+vQ*(aA.x+2.);gl_Position=vec4(pp/uSize*2.-1.,0,1);vA=aA;vC=aC;vP=aP;}"
+          val DABF=HDR+"""flat in vec4 vA;flat in vec3 vC;flat in vec2 vP;in vec2 vQ;out vec4 o;uniform float uHard,uEdge,uGrain,uGS,uGM,uGC;
+          float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+          float vn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h(i),h(i+vec2(1,0)),f.x),mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x),f.y);}
+          void main(){float ps=vA.x+2.;vec2 p=vQ*ps;float c=cos(vA.y),s=sin(vA.y);p=vec2(c*p.x+s*p.y,-s*p.x+c*p.y);p.y/=max(vA.w,.05);
+          float r=length(p)/(vA.x*.5);float a=1.-smoothstep(uHard*.98,1.,r);a*=1.+uEdge*smoothstep(.5,.95,r);
+          vec2 gp=(uGM>.5?p+vA.x:vP+p)*uGS*.5;float n=vn(gp)*.65+vn(gp*2.3)*.35;a*=mix(1.,smoothstep(.5-uGC,.5+uGC,n),uGrain);
+          a=clamp(a*vA.z,0.,1.);o=vec4(vC*a,a);}"""
+          val LQ=HDR+"""in vec2 uv;out vec4 o;uniform sampler2D uD,uSel;uniform vec2 uSize,uC,uDl;uniform float uR,uK,uH;uniform int uM,uHS;
+          vec2 D(vec2 q){return texture(uD,q/uSize).rg*uSize;}
+          void main(){vec2 p=uv*uSize;vec2 v=p-uC;float f=1.-smoothstep(uR*uH,uR,length(v));if(uHS>0)f*=texture(uSel,uv).r;vec2 q=p,r;
+          if(uM==0)q=p-uDl*f;
+          else if(uM==1||uM==2){float a=uK*f*(uM==1?1.:-1.);float c=cos(a),s=sin(a);q=uC+vec2(c*v.x-s*v.y,s*v.x+c*v.y);}
+          else if(uM==3)q=uC+v*(1.-uK*f);else if(uM==4)q=uC+v*(1.+uK*f);
+          if(uM==5)r=D(p)*(1.-uK*f);
+          else if(uM==6){float e=uR*.08;r=mix(D(p),(D(p+vec2(e,0))+D(p-vec2(e,0))+D(p+vec2(0,e))+D(p-vec2(0,e)))*.25,clamp(uK*f*8.,0.,1.));}
+          else r=D(q)+(q-p);
+          o=vec4(r/uSize,0,1);}"""
+          val VIEW=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uC;uniform vec2 uCS,uVS,uPan,uRot;uniform vec3 uPaper;uniform float uSc,uChk,uGrid,uGsz,uRnd,uShad;\n"+CR+"""
+          void main(){vec2 sp=vec2(gl_FragCoord.x,uVS.y-gl_FragCoord.y);vec2 v=(sp-uVS*.5-uPan)/uSc;v=vec2(uRot.x*v.x+uRot.y*v.y,-uRot.y*v.x+uRot.x*v.y);vec2 c=v+uCS*.5;
+          vec3 bg=mix(vec3(.05,.06,.09),vec3(.12,.1,.17),sp.y/uVS.y);
+          vec2 q=abs(c-uCS*.5)-uCS*.5+uRnd;float d=length(max(q,0.))+min(max(q.x,q.y),0.)-uRnd;
+          if(d>0.){o=vec4(bg*(1.-exp(-d*uSc/24.)*uShad*.55),1);return;}
+          vec4 t=uSc>1.?cr(uC,c/uCS,uCS):texture(uC,c/uCS);vec2 k=floor(c/40.);float ch=.86+.08*mod(k.x+k.y,2.);
+          vec3 col=t.rgb+(1.-t.a)*mix(uPaper,vec3(ch),uChk);
+          vec2 g=abs(fract(c/uGsz-.5)-.5)*uGsz*uSc;col=mix(col,vec3(.5),(1.-smoothstep(0.,1.4,min(g.x,g.y)))*uGrid);
+          o=vec4(col,1);}"""
+          val GLASS=HDR+"""in vec2 uv;out vec4 o;uniform sampler2D uV,uB1,uB2,uB3,uSel;uniform vec2 uVS,uL,uCS,uPan,uRot;
+          uniform float uSc,uT,uBlur,uRef,uDisp,uTint,uTintL,uRim,uShadow,uWob,uMelt,uSat,uBright,uGrain,uBevel,uMargin;uniform int uN,uAnt,uPrev;uniform vec4 uPC;uniform vec4 uB[24],uP[24];
+          float sd(vec2 p){float d=1e4;for(int i=0;i<24;i++){if(i>=uN)break;vec2 q=abs(p-uB[i].xy)-uB[i].zw+uP[i].x;float di=length(max(q,0.))+min(max(q.x,q.y),0.)-uP[i].x;float k=max(uMelt,.001);float h=clamp(.5+.5*(d-di)/k,0.,1.);d=mix(d,di,h)-k*h*(1.-h);}return d;}
+          vec3 tx(vec2 u,float l){vec3 a=texture(uV,u).rgb;if(l<=0.)return a;vec3 b1=texture(uB1,u).rgb;if(l<1.)return mix(a,b1,l);vec3 b2=texture(uB2,u).rgb;if(l<2.)return mix(b1,b2,l-1.);return mix(b2,texture(uB3,u).rgb,min(l-2.,1.));}
+          void main(){vec2 sp=vec2(gl_FragCoord.x,uVS.y-gl_FragCoord.y);vec3 base=texture(uV,uv).rgb;
+          if(uAnt>0){vec2 v=(sp-uVS*.5-uPan)/uSc;v=vec2(uRot.x*v.x+uRot.y*v.y,-uRot.y*v.x+uRot.x*v.y);vec2 u=(v+uCS*.5)/uCS;vec2 e=vec2(1./uSc)/uCS;float m0=texture(uSel,u).r;if(uPrev>0)base=mix(base,uPC.rgb,m0*uPC.a);
+          float d=max(max(abs(texture(uSel,u+vec2(e.x,0.)).r-m0),abs(texture(uSel,u-vec2(e.x,0.)).r-m0)),max(abs(texture(uSel,u+vec2(0.,e.y)).r-m0),abs(texture(uSel,u-vec2(0.,e.y)).r-m0)));
+          if(d>.4&&u.x>=0.&&u.x<=1.&&u.y>=0.&&u.y<=1.)base=vec3(step(.5,fract((sp.x+sp.y)/16.+uT*.7)));}
+          bool near=false;for(int i=0;i<24;i++){if(i>=uN)break;vec2 q=abs(sp-uB[i].xy)-uB[i].zw-uMargin;if(q.x<0.&&q.y<0.){near=true;break;}}
+          if(!near){o=vec4(base,1);return;}
+          vec2 w=sp+uWob*sin(vec2(uT*1.3+sp.y*.02,uT*1.1+sp.x*.02));float d=sd(w);
+          base*=1.-(1.-smoothstep(0.,40.,sd(w-vec2(0,12))))*uShadow;
+          if(d<1.5){vec2 e=vec2(1.5,0.);vec2 n=normalize(vec2(sd(w+e)-sd(w-e),sd(w+e.yx)-sd(w-e.yx))+1e-5);
+          float lens=pow(1.-clamp(-d/uBevel,0.,1.),2.2);vec2 off=vec2(n.x,-n.y)*lens*uRef/uVS;
+          vec3 c=vec3(tx(uv-off,uBlur).r,tx(uv-off*(1.+uDisp),uBlur).g,tx(uv-off*(1.+2.*uDisp),uBlur).b);
+          float lu=dot(c,vec3(.3,.59,.11));c=mix(vec3(lu),c,uSat)*uBright;c=mix(c,vec3(uTintL),uTint);
+          float rim=smoothstep(-6.,-.5,d);vec2 L=normalize(uL);
+          c+=uRim*(rim*(.18+.7*pow(max(dot(n,L),0.),3.))+rim*.12*pow(max(dot(n,-L),0.),3.));
+          c+=(fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453)-.5)*uGrain*.1;
+          base=mix(base,c,1.-smoothstep(-1.,1.5,d));}
+          o=vec4(base,1);}"""
+          val DOWN=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uS;uniform vec2 uH;void main(){vec4 s=texture(uS,uv)*4.;s+=texture(uS,uv+uH*vec2(-1,-1));s+=texture(uS,uv+uH*vec2(1,-1));s+=texture(uS,uv+uH*vec2(-1,1));s+=texture(uS,uv+uH*vec2(1,1));o=s/8.;}"
+          val UP=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uS;uniform vec2 uH;void main(){vec4 s=texture(uS,uv+vec2(-uH.x*2.,0.))+texture(uS,uv+vec2(uH.x*2.,0.))+texture(uS,uv+vec2(0.,-uH.y*2.))+texture(uS,uv+vec2(0.,uH.y*2.));s+=2.*(texture(uS,uv+vec2(-uH.x,uH.y))+texture(uS,uv+vec2(uH.x,uH.y))+texture(uS,uv+vec2(-uH.x,-uH.y))+texture(uS,uv+vec2(uH.x,-uH.y)));o=s/12.;}"
+          val PFX=HDR+"""in vec2 uv;out vec4 o;uniform sampler2D uS;uniform vec2 uSize;uniform float uK,uT,uBloom,uBThr,uBRad,uBlur,uChroma,uLift,uGamma,uGain,uFsat,uHue,uVig,uFgrain,uSharp;
+          float ign(){return fract(52.9829189*fract(dot(gl_FragCoord.xy,vec2(.06711056,.00583715))));}
+          vec3 disc(vec2 u,float r,float thr){vec3 s=vec3(0.);float j=ign()*6.2832;for(int i=0;i<16;i++){float a=float(i)*2.39996+j;float d=sqrt((float(i)+.5)/16.);vec3 t=texture(uS,u+vec2(cos(a),sin(a))*d*r/uSize).rgb;s+=thr>=0.?max(t-thr,0.):t;}return s/16.;}
+          vec3 hr(vec3 c,float a){float k=cos(a),s=sin(a);
+          return vec3(dot(vec3(.213+k*.787-s*.213,.715-k*.715-s*.715,.072-k*.072+s*.928),c),dot(vec3(.213-k*.213+s*.143,.715+k*.285+s*.140,.072-k*.072-s*.283),c),dot(vec3(.213-k*.213-s*.787,.715-k*.715+s*.715,.072+k*.928+s*.072),c));}
+          void main(){vec4 t=texture(uS,uv);vec3 c=t.rgb;
+          if(uChroma>0.){vec2 off=(uv-.5)*2.*uChroma*uK/uSize;c=vec3(texture(uS,uv+off).r,c.g,texture(uS,uv-off).b);}
+          if(uBlur>0.)c=disc(uv,uBlur*uK,-1.);
+          if(uSharp>0.)c+=(c-disc(uv,2.*uK,-1.))*uSharp*2.;
+          if(uBloom>0.)c+=disc(uv,uBRad*uK,uBThr)*uBloom*2.;
+          c=pow(clamp(c*uGain+uLift,0.,1.),vec3(1./uGamma));
+          float l=dot(c,vec3(.3,.59,.11));c=mix(vec3(l),c,uFsat);
+          if(uHue!=0.)c=clamp(hr(c,uHue*.017453),0.,1.);
+          c*=1.-uVig*smoothstep(.3,.95,length((uv-.5)*1.414));
+          c+=(ign()-.5)*uFgrain*.25;
+          o=vec4(clamp(min(c,vec3(t.a)),0.,1.),t.a);}"""
+          val PLUM=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uV;uniform float uTint,uTintL,uBright;void main(){vec3 c=texture(uV,uv).rgb;float l=dot(c,vec3(.3,.59,.11))*uBright;l=mix(l,uTintL,uTint);o=vec4(vec3(clamp(l,0.,1.)),1);}"
+          const val PGV=HDR+"layout(location=0)in vec2 aP;uniform vec2 uSize;uniform float uPt;void main(){gl_Position=vec4(aP/uSize*2.-1.,0,1);gl_PointSize=uPt;}"
+          val PEX=HDR+"""in vec2 uv;out vec4 o;uniform sampler2D uS;uniform vec3 uPaper;uniform vec2 uPx;uniform int uM;
+          vec4 s4(vec2 u){return (texture(uS,u+vec2(-uPx.x,-uPx.y))+texture(uS,u+vec2(uPx.x,-uPx.y))+texture(uS,u+vec2(-uPx.x,uPx.y))+texture(uS,u+vec2(uPx.x,uPx.y)))*.25;}
+          void main(){vec4 t=uM>=2?s4(uv):texture(uS,uv);if(uM==1){o=t;return;}o=vec4(t.rgb+(1.-t.a)*uPaper,1.);}"""
+          const val PGF=HDR+"out vec4 o;uniform float uV;void main(){o=vec4(uV);}"
+          val CMB=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uA,uB;uniform int uM;void main(){float a=texture(uA,uv).r,b=texture(uB,uv).r;float r=uM==0?b:(uM==1?max(a,b):(uM==2?a*(1.-b):1.-a));o=vec4(r);}"
+          val FILL=HDR+"in vec2 uv;out vec4 o;uniform sampler2D uSel;uniform int uHS;uniform vec3 uCol;uniform float uO;void main(){float m=uHS>0?texture(uSel,uv).r:1.;o=vec4(uCol*m,m)*uO;}"
+          val PROBE=FSV.let{HDR}+"in vec2 uv;out vec4 o;uniform sampler2D uV;uniform vec2 uVS;uniform vec4 uB[12];\nvoid main(){vec4 b=uB[int(gl_FragCoord.x)];vec3 s=vec3(0.);for(int k=0;k<5;k++){float kx=(k==1?1.:0.)-(k==2?1.:0.);float ky=(k==3?1.:0.)-(k==4?1.:0.);vec2 c=(b.xy+vec2(kx*b.z,ky*b.w)*.6)/uVS;s+=texture(uV,vec2(c.x,1.-c.y)).rgb;}o=vec4(s/5.,1);}"
+          fun prog(vs:String,fs:String):Int{
+          fun sh(t:Int,s:String):Int{val i=G.glCreateShader(t);G.glShaderSource(i,s);G.glCompileShader(i);val o=IntArray(1);G.glGetShaderiv(i,G.GL_COMPILE_STATUS,o,0)
+          if(o[0]==0)throw RuntimeException(G.glGetShaderInfoLog(i)+"\n"+s);return i}
+          val p=G.glCreateProgram();G.glAttachShader(p,sh(G.GL_VERTEX_SHADER,vs));G.glAttachShader(p,sh(G.GL_FRAGMENT_SHADER,fs));G.glLinkProgram(p);return p}
+          fun mk(w:Int,h:Int,fmt:Int,lv:Int=1):IntArray{
+          val t=IntArray(1);G.glGenTextures(1,t,0);G.glBindTexture(G.GL_TEXTURE_2D,t[0]);G.glTexStorage2D(G.GL_TEXTURE_2D,lv,fmt,w,h)
+          G.glTexParameteri(G.GL_TEXTURE_2D,G.GL_TEXTURE_MIN_FILTER,if(lv>1)G.GL_LINEAR_MIPMAP_LINEAR else G.GL_LINEAR);G.glTexParameteri(G.GL_TEXTURE_2D,G.GL_TEXTURE_MAG_FILTER,G.GL_LINEAR)
+          G.glTexParameteri(G.GL_TEXTURE_2D,G.GL_TEXTURE_WRAP_S,G.GL_CLAMP_TO_EDGE);G.glTexParameteri(G.GL_TEXTURE_2D,G.GL_TEXTURE_WRAP_T,G.GL_CLAMP_TO_EDGE)
+          val b=IntArray(1);G.glGenFramebuffers(1,b,0);G.glBindFramebuffer(G.GL_FRAMEBUFFER,b[0]);G.glFramebufferTexture2D(G.GL_FRAMEBUFFER,G.GL_COLOR_ATTACHMENT0,G.GL_TEXTURE_2D,t[0],0)
+          G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT);return intArrayOf(t[0],b[0])}
+          fun fb(f:Int,w:Int,h:Int){G.glBindFramebuffer(G.GL_FRAMEBUFFER,f);G.glViewport(0,0,w,h)}
+          fun uf(p:Int,n:String,vararg v:Float){val l=G.glGetUniformLocation(p,n);if(v.size==1)G.glUniform1f(l,v[0]) else G.glUniform2f(l,v[0],v[1])}
+          fun ui(p:Int,n:String,v:Int)=G.glUniform1i(G.glGetUniformLocation(p,n),v)
+          fun bt(u:Int,t:Int,p:Int,n:String){G.glActiveTexture(G.GL_TEXTURE0+u);G.glBindTexture(G.GL_TEXTURE_2D,t);ui(p,n,u)}
+          fun tri()=G.glDrawArrays(G.GL_TRIANGLES,0,3)
+          fun lp(a:Float,b:Float,t:Float)=a+(b-a)*t
+          fun rn()=Random.nextFloat()
+          class Hist(val L:Layer,val x:Int,val y:Int,val w:Int,val h:Int){var t=0;var f=0;@Volatile var file:File?=null;@Volatile var mem:ByteArray?=null}
+          class Eng:GLSurfaceView.Renderer{
+          var N=2048;var low=false;var FMT=G.GL_RGBA16F
+          var pc=0;var pd=0;var pq=0;var pb=0;var pl=0;var pv=0;var pg=0;var pp=0;var pgeo=0;var pcm=0;var pfl=0;var pdn=0;var pup=0;var ppx=0;var fxT=IntArray(2);var curSrc=0;var fxk=0;var ppe=0;var ex=IntArray(2);var gf=IntArray(2);var grabReq=false;var lastGrab=0L;var saveDue=false;var lastEdit=0L
+          var a=arrayOf(IntArray(2),IntArray(2));var stk=IntArray(2);var sd=IntArray(2);var vt=IntArray(2);var pf=IntArray(2)
+          var bx=Array(9){IntArray(2)};val bs=IntArray(8)
+          var vbo=0;var vw=1;var vh=1;var fin=0;var key=0;var dirty=true;var viewAll=true;var blurDirty=true;var fr=0;var lastProbe=-99;var lastN=0
+          var dr=emp();var sb=emp();var psb=emp()
+          val trash=ConcurrentLinkedQueue<Layer>()
+          val rb=ByteBuffer.allocateDirect(6000).order(ByteOrder.nativeOrder())
+          val buf=ByteBuffer.allocateDirect(9*4*4096).order(ByteOrder.nativeOrder()).asFloatBuffer();var dn=0
+          var st=false;var sx=0f;var sy=0f;var ropeX=0f;var ropeY=0f;val winX=ArrayList<Float>();val winY=ArrayList<Float>();var lx=0f;var ly=0f;var carry=0f;var path=0f;var vel=0f;var dir=0f;var hsv=FloatArray(3)
+          var lqd=false;var lqx=0f;var lqy=0f;var qx=0f;var qy=0f;var mx0=0f;var my0=0f
+          var hasSel=false;var si=0;var sel=arrayOf(IntArray(2),IntArray(2));var prv=IntArray(2);val lpts=ArrayList<Float>();var lx0=0f;var ly0=0f
+          val hist=ArrayList<Hist>();var hi=0;var gpuBytes=0L
+          fun g(k:String)=Cur.b[k]!!
+          fun th(k:String)=Cur.th[k]!!
+          fun cur()=Cur.layers.getOrNull(Cur.sel)
+          fun emp()=intArrayOf(Int.MAX_VALUE,Int.MAX_VALUE,0,0)
+          fun isE(r:IntArray)=r[2]<=r[0]||r[3]<=r[1]
+          fun grow(r:IntArray,x0:Int,y0:Int,x1:Int,y1:Int){r[0]=min(r[0],max(0,x0));r[1]=min(r[1],max(0,y0));r[2]=max(r[2],min(N,x1));r[3]=max(r[3],min(N,y1))}
+          fun scis(r:IntArray){G.glEnable(G.GL_SCISSOR_TEST);G.glScissor(r[0],r[1],r[2]-r[0],r[3]-r[1])}
+          fun noScis()=G.glDisable(G.GL_SCISSOR_TEST)
+          override fun onSurfaceCreated(x:GL10?,c:EGLConfig?){
+          Cur.r=this
+          val rn=G.glGetString(G.GL_RENDERER)?:"";val am=Regex("Adreno.*?(\\d{3})").find(rn)?.groupValues?.get(1)?.toIntOrNull()
+          low=(am!=null&&am<=620)||rn.contains("Mali-T")||rn.contains("Mali-G3")||rn.contains("Mali-G5")||rn.contains("PowerVR")
+          N=if(low)1024 else 2048;Cur.n=N;FMT=if(low)G.GL_RGBA8 else G.GL_RGBA16F
+          pc=prog(FSV,COMP);pb=prog(FSV,BAKE);pq=prog(FSV,COMMIT);pd=prog(DABV,DABF);pl=prog(FSV,LQ);pv=prog(FSV,VIEW);pg=prog(FSV,GLASS);pp=prog(FSV,PLUM)
+          pgeo=prog(PGV,PGF);pcm=prog(FSV,CMB);pfl=prog(FSV,FILL);pdn=prog(FSV,DOWN);pup=prog(FSV,UP);ppx=prog(FSV,PFX)
+          a=arrayOf(mk(N,N,FMT),mk(N,N,FMT));stk=mk(N,N,FMT);sd=mk(N,N,G.GL_RG16F);pf=mk(24,54,G.GL_RGBA8);ppe=prog(FSV,PEX);ex=mk(N,N,G.GL_RGBA8);gf=mk(512,512,G.GL_RGBA8)
+          sel=arrayOf(mk(N,N,G.GL_R8),mk(N,N,G.GL_R8));prv=mk(N,N,G.GL_R8);si=0;hasSel=false;Cur.hs=false;lpts.clear()
+          val rbo=IntArray(1);G.glGenRenderbuffers(1,rbo,0);G.glBindRenderbuffer(G.GL_RENDERBUFFER,rbo[0]);G.glRenderbufferStorage(G.GL_RENDERBUFFER,G.GL_DEPTH24_STENCIL8,N,N)
+          G.glBindFramebuffer(G.GL_FRAMEBUFFER,prv[1]);G.glFramebufferRenderbuffer(G.GL_FRAMEBUFFER,G.GL_DEPTH_STENCIL_ATTACHMENT,G.GL_RENDERBUFFER,rbo[0])
+          val v=IntArray(1);G.glGenBuffers(1,v,0);vbo=v[0]
+          Cur.layers.forEach{it.t=0;it.dt=0;it.has=false}
+          hist.clear();hi=0;gpuBytes=0L;Cur.hu=0;Cur.hr=0;dr=emp();sb=emp();psb=emp()
+          if(Cur.layers.isEmpty()){Cur.layers.add(Layer("Background"));Cur.layers.add(Layer("Sketch"))}
+          vt=IntArray(2);dirty=true;viewAll=true}
+          override fun onSurfaceChanged(x:GL10?,w:Int,h:Int){
+          vw=w;vh=h;if(vt[0]!=0){G.glDeleteTextures(1,intArrayOf(vt[0]),0);G.glDeleteTextures(1,intArrayOf(fxT[0]),0);bx.forEach{G.glDeleteTextures(1,intArrayOf(it[0]),0)}}
+          vt=mk(w,h,G.GL_RGBA8);fxT=mk(w,h,G.GL_RGBA8);curSrc=vt[0]
+          for(i in 0..3){bs[i*2]=max(1,w shr (i+1));bs[i*2+1]=max(1,h shr (i+1))}
+          val ix=intArrayOf(0,1,2,3,0,0,0,1,2);bx=Array(9){mk(bs[ix[it]*2],bs[ix[it]*2+1],G.GL_RGBA8)}
+          Cur.sc=min(w,h)*.9f/N;viewAll=true;blurDirty=true;Cur.vd=true;Cur.rq()}
+          fun ensure(L:Layer){if(L.t!=0)return;val m=mk(N,N,FMT);L.t=m[0];L.f=m[1];val w=if(L.white)1f else 0f;G.glClearColor(w,w,w,w);G.glClear(G.GL_COLOR_BUFFER_BIT)}
+          fun ensureD(L:Layer){if(L.dt!=0)return;val m=mk(N,N,G.GL_RG16F);L.dt=m[0];L.df=m[1]}
+          fun blitR(sf:Int,sx:Int,sy:Int,w:Int,h:Int,df:Int,dx:Int,dy:Int){G.glBindFramebuffer(G.GL_READ_FRAMEBUFFER,sf);G.glBindFramebuffer(G.GL_DRAW_FRAMEBUFFER,df);G.glBlitFramebuffer(sx,sy,sx+w,sy+h,dx,dy,dx+w,dy+h,G.GL_COLOR_BUFFER_BIT,G.GL_NEAREST)}
+          fun bpp()=if(low)4 else 8
+          fun snap(L:Layer,r:IntArray):Hist?{val x0=max(0,r[0]);val y0=max(0,r[1]);val w=min(N,r[2])-x0;val h=min(N,r[3])-y0;if(w<=0||h<=0)return null
+          ensure(L);val H=Hist(L,x0,y0,w,h);val m=mk(w,h,FMT);H.t=m[0];H.f=m[1];blitR(L.f,x0,y0,w,h,H.f,0,0);gpuBytes+=w.toLong()*h*bpp();return H}
+          fun push(H:Hist?){if(H==null)return;while(hist.size>hi)drop(hist.removeAt(hist.size-1));hist.add(H);hi=hist.size;Cur.hu=hi;Cur.hr=0;spill();grabReq=true;saveDue=true;lastEdit=SystemClock.uptimeMillis();Cur.view?.postDelayed(Runnable{Cur.rq()},4500)}
+          fun evict(H:Hist){if(H.t!=0){G.glDeleteTextures(1,intArrayOf(H.t),0);G.glDeleteFramebuffers(1,intArrayOf(H.f),0);gpuBytes-=H.w.toLong()*H.h*bpp();H.t=0;H.f=0}}
+          fun drop(H:Hist){evict(H);H.file?.delete();H.mem=null}
+          fun spill(){val d=Cur.dir?:return;val lim=if(low)96L shl 20 else 192L shl 20;var i=0
+          while(gpuBytes>lim&&i<hist.size-6){val H=hist[i++];if(H.t==0)continue
+          fb(H.f,H.w,H.h);val cnt=H.w*H.h*4;val bb=ByteBuffer.allocateDirect(if(low)cnt else cnt*4).order(ByteOrder.nativeOrder())
+          G.glReadPixels(0,0,H.w,H.h,G.GL_RGBA,if(low)G.GL_UNSIGNED_BYTE else G.GL_FLOAT,bb)
+          val arr=ByteArray(bb.capacity());bb.position(0);bb.get(arr);H.mem=arr;evict(H)
+          Thread{try{val df=Deflater(1);df.setInput(arr);df.finish();val o=ByteArrayOutputStream(arr.size/3+64);val tmp=ByteArray(65536)
+          while(!df.finished()){o.write(tmp,0,df.deflate(tmp))};df.end();val f=File(d,"h"+System.nanoTime()+".z");f.writeBytes(o.toByteArray());H.file=f;H.mem=null}catch(e:Throwable){}}.start()}}
+          fun load(H:Hist){if(H.t!=0)return
+          val raw=H.mem?:H.file?.let{f->val inf=Inflater();inf.setInput(f.readBytes());val o=ByteArrayOutputStream();val tmp=ByteArray(65536)
+          while(!inf.finished()){val k=inf.inflate(tmp);if(k==0&&inf.needsInput())break;o.write(tmp,0,k)};inf.end();o.toByteArray()}
+          val m=mk(H.w,H.h,FMT);H.t=m[0];H.f=m[1];gpuBytes+=H.w.toLong()*H.h*bpp()
+          if(raw!=null){val bb=ByteBuffer.allocateDirect(raw.size).order(ByteOrder.nativeOrder());bb.put(raw);bb.position(0)
+          G.glBindTexture(G.GL_TEXTURE_2D,H.t);G.glPixelStorei(G.GL_UNPACK_ALIGNMENT,1);G.glTexSubImage2D(G.GL_TEXTURE_2D,0,0,0,H.w,H.h,G.GL_RGBA,if(low)G.GL_UNSIGNED_BYTE else G.GL_FLOAT,bb)}}
+          fun swap(H:Hist){load(H);ensure(H.L);val m=mk(H.w,H.h,FMT);blitR(H.L.f,H.x,H.y,H.w,H.h,m[1],0,0);blitR(H.f,0,0,H.w,H.h,H.L.f,H.x,H.y)
+          G.glDeleteTextures(1,intArrayOf(H.t),0);G.glDeleteFramebuffers(1,intArrayOf(H.f),0);H.t=m[0];H.f=m[1];grow(dr,H.x,H.y,H.x+H.w,H.y+H.h)}
+          fun undo(){if(hi==0||st||lpts.isNotEmpty())return;swap(hist[hi-1]);hi--;Cur.hu=hi;Cur.hr=hist.size-hi;Cur.rq()}
+          fun redo(){if(hi>=hist.size||st||lpts.isNotEmpty())return;swap(hist[hi]);hi++;Cur.hu=hi;Cur.hr=hist.size-hi;Cur.rq()}
+          fun forget(L:Layer){var i=0;while(i<hist.size){if(hist[i].L===L){drop(hist[i]);hist.removeAt(i);if(i<hi)hi--}else i++};Cur.hu=hi;Cur.hr=hist.size-hi}
+          fun bake(L:Layer){if(!L.has)return;val r=if(isE(L.dbox))intArrayOf(0,0,N,N) else intArrayOf(max(0,L.dbox[0]),max(0,L.dbox[1]),min(N,L.dbox[2]),min(N,L.dbox[3]))
+          push(snap(L,r));G.glDisable(G.GL_BLEND);fb(stk[1],N,N);scis(r);G.glUseProgram(pb);bt(0,L.t,pb,"uLay");bt(1,L.dt,pb,"uDisp");uf(pb,"uSize",N.toFloat(),N.toFloat());tri();noScis()
+          blitR(stk[1],r[0],r[1],r[2]-r[0],r[3]-r[1],L.f,r[0],r[1]);fb(L.df,N,N);scis(r);G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT);noScis()
+          psb=intArrayOf(0,0,N,N);L.has=false;L.dbox=emp();grow(dr,r[0],r[1],r[2],r[3])}
+          fun pexPass(dst:IntArray,w:Int,h:Int,mode:Int,src:Int){noScis();G.glDisable(G.GL_BLEND);fb(dst[1],w,h);G.glUseProgram(ppe);bt(0,src,ppe,"uS")
+          val c=Color.HSVToColor(floatArrayOf(Cur.cv["pH"]!!,Cur.cv["pS"]!!,Cur.cv["pV"]!!));G.glUniform3f(G.glGetUniformLocation(ppe,"uPaper"),Color.red(c)/255f,Color.green(c)/255f,Color.blue(c)/255f)
+          uf(ppe,"uPx",1f/N,1f/N);ui(ppe,"uM",mode);tri()}
+          fun rd(w:Int,h:Int):Bitmap{val bb=ByteBuffer.allocateDirect(w*h*4).order(ByteOrder.nativeOrder());G.glReadPixels(0,0,w,h,G.GL_RGBA,G.GL_UNSIGNED_BYTE,bb);bb.position(0)
+          val b=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);b.copyPixelsFromBuffer(bb);return b}
+          fun exportImage(fmt:Int,bg:Boolean,q:Int){val ctx=Cur.app?:return;Cur.busy="Saving image...";comp(true);dr=emp();viewAll=true
+          pexPass(ex,N,N,if(fmt==0&&!bg)1 else 0,a[fin][0]);val bmp=rd(N,N)
+          Thread{val ok=saveMedia(ctx,bmp,fmt,q);Cur.busy="";Cur.msg=if(ok)"Saved to Pictures/LiquidArt" else "Export failed"}.start()}
+          fun grabFrame(){val ctx=Cur.app?:return;val d=Cur.proj?:Proj.newDir(ctx).also{Cur.proj=it};pexPass(gf,512,512,2,a[fin][0]);val bmp=rd(512,512);val n=Cur.frames;Cur.frames=n+1
+          val fd=File(d,"frames").apply{mkdirs()};Thread{try{FileOutputStream(File(fd,"%05d.jpg".format(n))).use{bmp.compress(Bitmap.CompressFormat.JPEG,80,it)}}catch(e:Throwable){}}.start()}
+          fun saveProject(){val ctx=Cur.app?:return;if(Cur.layers.isEmpty())return;val d=Cur.proj?:Proj.newDir(ctx).also{Cur.proj=it}
+          val ls=Cur.layers.toList();ls.forEach{if(it.has)bake(it)};comp(true);dr=emp();viewAll=true
+          val sbd=StringBuilder("N="+N+"\n")
+          ls.forEachIndexed{i,L->ensure(L);pexPass(ex,N,N,1,L.t);val bmp=rd(N,N);val f=File(d,"l"+i+".png")
+          Thread{try{FileOutputStream(f).use{bmp.compress(Bitmap.CompressFormat.PNG,100,it)}}catch(e:Throwable){}}.start()
+          sbd.append(L.name.replace('|','/')+"|"+L.op+"|"+L.mode+"|"+(if(L.vis)1 else 0)+"|"+(if(L.lock)1 else 0)+"|"+(if(L.liq)1 else 0)+"\n")}
+          File(d,"meta.txt").writeText(sbd.toString())
+          pexPass(gf,512,512,2,a[fin][0]);val tb=rd(512,512);Thread{try{FileOutputStream(File(d,"thumb.jpg")).use{tb.compress(Bitmap.CompressFormat.JPEG,85,it)}}catch(e:Throwable){}}.start()
+          d.setLastModified(System.currentTimeMillis());saveDue=false;grabReq=false;Cur.refreshProjs()}
+          fun saveIfDue(){if(saveDue)saveProject()}
+          fun clearDoc(){Cur.layers.toList().forEach{trash.add(it)};Cur.layers.clear();hist.toList().forEach{drop(it)};hist.clear();hi=0;Cur.hu=0;Cur.hr=0;hasSel=false;Cur.hs=false;lpts.clear();dr=emp();dirty=true;viewAll=true;key=0;saveDue=false;grabReq=false;psb=intArrayOf(0,0,N,N)}
+          fun newProject(){val ctx=Cur.app?:return;saveIfDue();clearDoc();Cur.layers.add(Layer("Background"));Cur.layers.add(Layer("Sketch"));Cur.sel=1;Cur.proj=Proj.newDir(ctx);Cur.frames=0;Cur.refreshProjs()}
+          fun loadProject(d:File){saveIfDue();val mf=File(d,"meta.txt");if(!mf.exists()){newProject();return}
+          clearDoc();val lines=mf.readLines()
+          for(i in 1 until lines.size){val p=lines[i].split("|");if(p.size<6)continue;val L=Layer(p[0]);L.op=p[1].toFloatOrNull()?:1f;L.mode=p[2].toIntOrNull()?:0;L.vis=p[3]=="1";L.lock=p[4]=="1";L.liq=p[5]=="1";Cur.layers.add(L);ensure(L)
+          val f=File(d,"l"+(i-1)+".png");if(f.exists()){var bm=BitmapFactory.decodeFile(f.path);if(bm!=null){if(bm.width!=N)bm=Bitmap.createScaledBitmap(bm,N,N,true)
+          val bb=ByteBuffer.allocateDirect(N*N*4).order(ByteOrder.nativeOrder());bm.copyPixelsToBuffer(bb);bb.position(0)
+          G.glBindTexture(G.GL_TEXTURE_2D,L.t);G.glPixelStorei(G.GL_UNPACK_ALIGNMENT,1);G.glTexSubImage2D(G.GL_TEXTURE_2D,0,0,0,N,N,G.GL_RGBA,G.GL_UNSIGNED_BYTE,bb)}}}
+          if(Cur.layers.isEmpty()){Cur.layers.add(Layer("Background"));Cur.layers.add(Layer("Sketch"))}
+          Cur.sel=min(1,Cur.layers.size-1);Cur.proj=d;Cur.frames=File(d,"frames").list()?.size?:0;Cur.refreshProjs()}
+          fun comp(full:Boolean){
+          val r=if(full)intArrayOf(0,0,N,N) else dr;if(isE(r))return
+          val ls=Cur.layers.toList();ls.forEach{if(it.vis)ensure(it)}
+          scis(r);var s=0;fb(a[0][1],N,N);G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT);G.glDisable(G.GL_BLEND);G.glUseProgram(pc)
+          for((i,L) in ls.withIndex()){if(!L.vis)continue;val d=1-s;fb(a[d][1],N,N)
+          bt(0,a[s][0],pc,"uAcc");bt(1,L.t,pc,"uLay");bt(2,if(L.has)L.dt else L.t,pc,"uDisp");bt(3,stk[0],pc,"uStroke");bt(4,sel[si][0],pc,"uSelM");ui(pc,"uHS",if(hasSel)1 else 0)
+          ui(pc,"uHas",if(L.has)1 else 0);ui(pc,"uSM",if(st&&i==Cur.sel)(when{Cur.tool==0->if(L.lock)3 else 1;Cur.tool==1->2;else->0})else 0)
+          uf(pc,"uSO",g("opacity"));uf(pc,"uOp",L.op);ui(pc,"uMode",L.mode);uf(pc,"uSize",N.toFloat(),N.toFloat());tri();s=d}
+          fin=s;noScis()}
+          fun screenRect(r:IntArray):IntArray{val c=cos(Cur.rot);val s=sin(Cur.rot);var x0=1e9f;var y0=1e9f;var x1=-1e9f;var y1=-1e9f
+          for(i in 0..3){val cx=(if(i%2==0)r[0] else r[2])-N/2f;val cy=(if(i<2)r[1] else r[3])-N/2f
+          val px=Cur.sc*(c*cx-s*cy)+vw/2f+Cur.px;val py=Cur.sc*(s*cx+c*cy)+vh/2f+Cur.py
+          x0=min(x0,px);x1=max(x1,px);y0=min(y0,py);y1=max(y1,py)}
+          val gx0=max(0,floor(x0-3f).toInt());val gx1=min(vw,ceil(x1+3f).toInt());val gy0=max(0,floor(vh-y1-3f).toInt());val gy1=min(vh,ceil(vh-y0+3f).toInt())
+          return intArrayOf(gx0,gy0,max(gx1,gx0),max(gy1,gy0))}
+          fun viewPass(part:IntArray?){G.glDisable(G.GL_BLEND);fb(vt[1],vw,vh)
+          if(part!=null){val s=screenRect(part);if(s[2]<=s[0]||s[3]<=s[1])return;scis(s)}
+          G.glUseProgram(pv);bt(0,a[fin][0],pv,"uC");uf(pv,"uCS",N.toFloat(),N.toFloat());uf(pv,"uVS",vw.toFloat(),vh.toFloat());uf(pv,"uPan",Cur.px,Cur.py);uf(pv,"uSc",Cur.sc);uf(pv,"uRot",cos(Cur.rot),sin(Cur.rot))
+          val pc3=Color.HSVToColor(floatArrayOf(Cur.cv["pH"]!!,Cur.cv["pS"]!!,Cur.cv["pV"]!!));G.glUniform3f(G.glGetUniformLocation(pv,"uPaper"),Color.red(pc3)/255f,Color.green(pc3)/255f,Color.blue(pc3)/255f)
+          for(k in listOf("chk","grid","gsz","rnd","shad"))uf(pv,"u"+k.replaceFirstChar{it.uppercase()},Cur.cv[k]!!)
+          tri();noScis()}
+          fun fxOn():Boolean{val f=Cur.fx;return f["off"]!=1f&&(f["bloom"]!!>0f||f["blur"]!!>0f||f["chroma"]!!>0f||f["lift"]!=0f||f["gamma"]!=1f||f["gain"]!=1f||f["fsat"]!=1f||f["hue"]!=0f||f["vig"]!!>0f||f["fgrain"]!!>0f||f["sharp"]!!>0f)}
+          fun fxU(k:Float,w:Float,h:Float){uf(ppx,"uSize",w,h);uf(ppx,"uK",k);for(n in listOf("bloom","bThr","bRad","blur","chroma","lift","gamma","gain","fsat","hue","vig","fgrain","sharp"))uf(ppx,"u"+n.replaceFirstChar{it.uppercase()},Cur.fx[n]!!)}
+          fun fxPass(){G.glDisable(G.GL_BLEND);noScis();fb(fxT[1],vw,vh);G.glUseProgram(ppx);bt(0,vt[0],ppx,"uS");fxU(Cur.sc.coerceAtLeast(.05f),vw.toFloat(),vh.toFloat());tri()}
+          fun fxApply(){val L=cur()?:return;if(!fxOn())return;if(L.has)bake(L);ensure(L);push(snap(L,intArrayOf(0,0,N,N)));noScis();G.glDisable(G.GL_BLEND);fb(stk[1],N,N);G.glUseProgram(ppx);bt(0,L.t,ppx,"uS");fxU(1f,N.toFloat(),N.toFloat());tri()
+          blitR(stk[1],0,0,N,N,L.f,0,0);psb=intArrayOf(0,0,N,N);grow(dr,0,0,N,N);FX.forEach{Cur.fx[it.k]=it.d}}
+          fun bpass(p:Int,src:Int,dst:IntArray,sw:Int,sh:Int,dw:Int,dh:Int,hx:Float){fb(dst[1],dw,dh);G.glUseProgram(p);bt(0,src,p,"uS");uf(p,"uH",hx/sw,hx/sh);tri()}
+          fun blurChain(){val w1=bs[0];val h1=bs[1];val w2=bs[2];val h2=bs[3];val w3=bs[4];val h3=bs[5];val w4=bs[6];val h4=bs[7]
+          bpass(pdn,curSrc,bx[0],vw,vh,w1,h1,1f);bpass(pdn,bx[0][0],bx[1],w1,h1,w2,h2,1f);bpass(pdn,bx[1][0],bx[2],w2,h2,w3,h3,1f);bpass(pdn,bx[2][0],bx[3],w3,h3,w4,h4,1f)
+          bpass(pup,bx[1][0],bx[4],w2,h2,w1,h1,.5f)
+          bpass(pup,bx[2][0],bx[7],w3,h3,w2,h2,.5f);bpass(pup,bx[7][0],bx[5],w2,h2,w1,h1,.5f)
+          bpass(pup,bx[3][0],bx[8],w4,h4,w3,h3,.5f);bpass(pup,bx[8][0],bx[7],w3,h3,w2,h2,.5f);bpass(pup,bx[7][0],bx[6],w2,h2,w1,h1,.5f)}
+          fun glass(){
+          val es=Glass.m.entries.take(24);val bl=es.map{it.value};G.glDisable(G.GL_BLEND);noScis()
+          var chain=false;if(es.isNotEmpty()&&blurDirty){blurChain();blurDirty=false;chain=true}
+          fb(0,vw,vh);G.glUseProgram(pg);bt(0,curSrc,pg,"uV");bt(1,bx[4][0],pg,"uB1");bt(2,bx[5][0],pg,"uB2");bt(3,bx[6][0],pg,"uB3");bt(4,if(lpts.isNotEmpty())prv[0] else sel[si][0],pg,"uSel")
+          val b=FloatArray(96);val q=FloatArray(96)
+          bl.forEachIndexed{i,v->b[i*4]=v[0];b[i*4+1]=v[1];b[i*4+2]=v[2];b[i*4+3]=v[3];q[i*4]=min(v[4]*th("rad")/34f,min(v[2],v[3]))}
+          ui(pg,"uN",bl.size);G.glUniform4fv(G.glGetUniformLocation(pg,"uB[0]"),24,b,0);G.glUniform4fv(G.glGetUniformLocation(pg,"uP[0]"),24,q,0)
+          for(k in listOf("blur","ref","disp","tint","tintL","rim","shadow","wob","melt","sat","bright","grain","bevel"))uf(pg,"u"+k.replaceFirstChar{it.uppercase()},th(k))
+          uf(pg,"uMargin",th("melt")+64f+th("wob")*2f);uf(pg,"uVS",vw.toFloat(),vh.toFloat());uf(pg,"uL",Cur.lx,Cur.ly-.001f);uf(pg,"uT",(SystemClock.uptimeMillis()%1000000)/1000f)
+          ui(pg,"uAnt",if(hasSel||lpts.isNotEmpty())1 else 0);ui(pg,"uPrev",0)
+          val c3=Cur.col();G.glUniform4f(G.glGetUniformLocation(pg,"uPC"),if(Cur.le==1).55f else Color.red(c3)/255f,if(Cur.le==1).55f else Color.green(c3)/255f,if(Cur.le==1).6f else Color.blue(c3)/255f,if(Cur.le==1).5f else g("opacity")*.75f);uf(pg,"uCS",N.toFloat(),N.toFloat());uf(pg,"uPan",Cur.px,Cur.py);uf(pg,"uRot",cos(Cur.rot),sin(Cur.rot));uf(pg,"uSc",Cur.sc);tri()
+          if(es.isNotEmpty()&&(chain||fr%8==0)){fb(pf[1],24,54);G.glUseProgram(pp);bt(0,bx[5][0],pp,"uV");uf(pp,"uTint",th("tint"));uf(pp,"uTintL",th("tintL"));uf(pp,"uBright",th("bright"));tri()
+          rb.clear();G.glReadPixels(0,0,24,54,G.GL_RGBA,G.GL_UNSIGNED_BYTE,rb);val n2=24*54*4;val arr=ByteArray(n2);rb.position(0);rb.get(arr)
+          val old=Cur.lum;var chg=old==null;if(old!=null){var i=0;while(i<n2){if(abs((arr[i].toInt() and 255)-(old[i].toInt() and 255))>10){chg=true;break};i+=4}}
+          if(chg){Cur.lum=arr;Cur.lumV=Cur.lumV+1}}
+          lastN=es.size}
+          override fun onDrawFrame(x:GL10?){
+          fr++
+          if(fr<45){Cur.rq();if(fr==12||fr==30){dirty=true;viewAll=true;blurDirty=true}}
+          while(true){val l=trash.poll()?:break;if(l.t!=0)G.glDeleteTextures(1,intArrayOf(l.t),0);if(l.dt!=0)G.glDeleteTextures(1,intArrayOf(l.dt),0)}
+          if(lqd&&Cur.tool==2&&Cur.lq>0){lqApply(lqx,lqy,0f,0f);Cur.rq()}
+          val ls=Cur.layers.toList();var k=ls.size;ls.forEach{k=k*31+it.op.hashCode()*7+it.mode*3+(if(it.vis)1 else 0)+it.t+(if(it.has)5 else 0)}
+          if(k!=key){key=k;dirty=true}
+          var part:IntArray?=null
+          if(dirty){comp(true);dirty=false;dr=emp();viewAll=true}else if(!isE(dr)){part=dr.copyOf();comp(false);dr=emp()}
+          val nk=Cur.fx.entries.fold(0){a,en->a*31+en.value.hashCode()}*17+Cur.cv.entries.fold(0){a,en->a*31+en.value.hashCode()};if(nk!=fxk){fxk=nk;viewAll=true}
+          if(Cur.vd){Cur.vd=false;viewAll=true}
+          val fo=fxOn();if(fo&&part!=null)viewAll=true
+          if(viewAll||part!=null){viewPass(if(viewAll)null else part);if(fo)fxPass();blurDirty=true;viewAll=false}
+          curSrc=if(fo)fxT[0] else vt[0]
+          glass()
+          val nowT=SystemClock.uptimeMillis()
+          if(grabReq){grabReq=false;if(Cur.rec&&Cur.frames<4000&&nowT-lastGrab>300){lastGrab=nowT;grabFrame()}}
+          if(saveDue&&nowT-lastEdit>4000)saveProject()
+          if(hasSel||lpts.isNotEmpty())Cur.rq()}
+          fun ptr(k:Int,x:Float,y:Float,p:Float,t:Float){
+          if(k==3){if(st){grow(dr,sb[0],sb[1],sb[2],sb[3]);psb=sb.copyOf()};st=false;lqd=false;dn=0;buf.clear();if((Cur.tool==3||Cur.tool==4)&&Cur.ls==0)lpts.clear();return}
+          if(Cur.tool==3||Cur.tool==4){lasso(k,x,y);return}
+          if(Cur.tool==2){liq(k,x,y);return}
+          when(k){
+          0->{val L=cur()?:return;if(L.has)bake(L);ensure(L);fb(stk[1],N,N)
+          if(!isE(psb)){scis(psb);G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT);noScis()}
+          sb=emp();sx=x;sy=y;ropeX=x;ropeY=y;winX.clear();winY.clear();lx=x;ly=y;qx=x;qy=y;mx0=x;my0=y;carry=0f;path=0f;vel=0f;dir=0f;st=true;hsv=floatArrayOf(Cur.hue,Cur.sat,Cur.vl);dab(x,y,p,t);flush()}
+          1->{if(!st)return;vel=vel*.7f+.3f*hypot(x-sx,y-sy);stb(x,y);val nx=sx;val ny=sy
+          walk(nx,ny,p,t);sx=nx;sy=ny;flush()}
+          2->{if(!st)return;if(g("stEnd")>.5f)walk(x,y,p,t);walkLine(qx,qy,p,t);flush();cur()?.let{commit(it)};psb=sb.copyOf();st=false}}}
+          fun stb(x:Float,y:Float){val m=g("stMode").toInt();val z=Cur.sc.coerceAtLeast(.05f)
+          val v=min(1f,vel*z/max(1f,g("stSpd")));val k=(g("stab")*(1f-g("stRT")*v)).coerceIn(0f,1f)
+          if(k<.001f){sx=x;sy=y;ropeX=x;ropeY=y;return}
+          if(m==2){winX.add(x);winY.add(y);val w=1+(k*20f).roundToInt();while(winX.size>w){winX.removeAt(0);winY.removeAt(0)};sx=winX.average().toFloat();sy=winY.average().toFloat();return}
+          if(m==1||m==3){val rl=g("stRope")*k/z;val dx=x-ropeX;val dy=y-ropeY;val d=hypot(dx,dy)
+          if(d>rl&&d>1e-3f){val mv=(d-rl)*g("stPull");ropeX+=dx/d*mv;ropeY+=dy/d*mv}
+          if(m==1){sx=ropeX;sy=ropeY;return}
+          val al=1f-.97f*k;sx+=(ropeX-sx)*al;sy+=(ropeY-sy)*al;return}
+          val al=1f-.97f*k;sx+=(x-sx)*al;sy+=(y-sy)*al}
+          fun walk(nx:Float,ny:Float,p:Float,t:Float){
+          val mx=(qx+nx)/2f;val my=(qy+ny)/2f;val dd=hypot(mx-mx0,my-my0)+hypot(qx-mx0,qy-my0)*.5f;val kk=max(1,ceil(dd/3f).toInt())
+          for(i in 1..kk){val u=i/kk.toFloat();val a=(1f-u)*(1f-u);val b=2f*(1f-u)*u;val c=u*u;walkLine(a*mx0+b*qx+c*mx,a*my0+b*qy+c*my,p,t)}
+          mx0=mx;my0=my;qx=nx;qy=ny}
+          fun walkLine(nx:Float,ny:Float,p:Float,t:Float){
+          val dx=nx-lx;val dy=ny-ly;val d=hypot(dx,dy);if(d<1e-3f)return;dir=Math.toDegrees(atan2(dy,dx).toDouble()).toFloat()
+          val sp=max(.5f,g("spacing")*g("size"));var s=sp-carry
+          while(s<=d){dab(lx+dx/d*s,ly+dy/d*s,p,t);s+=sp}
+          carry=d-(s-sp);path+=d;lx=nx;ly=ny}
+          fun dab(x:Float,y:Float,p:Float,t:Float){
+          val pr=p.coerceIn(0f,1f).pow(g("pGamma"));val v=min(vel/(8f+g("size")*.3f),1f)-.5f
+          var sz=g("size")*(1f+g("pSize")*(lp(g("minSize"),1f,pr)-1f))*(1f+g("vSize")*v)*(1f-g("sizeJ")*rn())
+          if(g("taper")>0f)sz*=min(1f,.2f+.8f*path/g("taper"))
+          sz=max(sz,1f)
+          val fl=(g("flow")*lp(1f,pr,g("pFlow"))*(1f+g("vFlow")*v)*(1f-g("flowJ")*rn())).coerceIn(0f,1f)
+          val deg=g("angle")+g("follow")*dir+g("tAng")*t*180f+g("angJ")*(rn()-.5f)*360f
+          val rot=Math.toRadians(deg.toDouble()).toFloat();val rd=g("round")*(1f-g("tRound")*t*.8f)
+          val c=if(Cur.tool==1)0 else Color.HSVToColor(floatArrayOf((hsv[0]+g("hueJ")*(rn()-.5f)*180f+360f)%360f,(hsv[1]+g("satJ")*(rn()-.5f)).coerceIn(0f,1f),(hsv[2]+g("valJ")*(rn()-.5f)).coerceIn(0f,1f)))
+          repeat(g("count").roundToInt()){val an=rn()*6.2832f;val rr=g("scatter")*sz*.5f*sqrt(rn());val ex=x+cos(an)*rr;val ey=y+sin(an)*rr
+          if(dn==4096)flush()
+          val h=sz*.5f+3f;val x0=floor(ex-h).toInt();val y0=floor(ey-h).toInt();val x1=ceil(ex+h).toInt();val y1=ceil(ey+h).toInt();grow(dr,x0,y0,x1,y1);grow(sb,x0,y0,x1,y1)
+          buf.put(ex);buf.put(ey);buf.put(sz);buf.put(rot);buf.put(fl);buf.put(rd)
+          buf.put(Color.red(c)/255f);buf.put(Color.green(c)/255f);buf.put(Color.blue(c)/255f);dn++}}
+          fun flush(){if(dn==0)return
+          fb(stk[1],N,N);G.glEnable(G.GL_BLEND);G.glBlendFunc(G.GL_ONE,G.GL_ONE_MINUS_SRC_ALPHA);G.glUseProgram(pd)
+          uf(pd,"uSize",N.toFloat(),N.toFloat());uf(pd,"uHard",g("hard"));uf(pd,"uEdge",g("edge"));uf(pd,"uGrain",g("grain"))
+          uf(pd,"uGS",g("gScale"));uf(pd,"uGM",g("gMove"));uf(pd,"uGC",g("gCon"))
+          G.glBindBuffer(G.GL_ARRAY_BUFFER,vbo);buf.limit(dn*9);buf.position(0);G.glBufferData(G.GL_ARRAY_BUFFER,dn*36,buf,G.GL_STREAM_DRAW)
+          for(i in 0..2)G.glEnableVertexAttribArray(i)
+          G.glVertexAttribPointer(0,2,G.GL_FLOAT,false,36,0);G.glVertexAttribPointer(1,4,G.GL_FLOAT,false,36,8);G.glVertexAttribPointer(2,3,G.GL_FLOAT,false,36,24)
+          for(i in 0..2)G.glVertexAttribDivisor(i,1)
+          G.glDrawArraysInstanced(G.GL_TRIANGLE_STRIP,0,4,dn)
+          for(i in 0..2){G.glVertexAttribDivisor(i,0);G.glDisableVertexAttribArray(i)}
+          G.glBindBuffer(G.GL_ARRAY_BUFFER,0);G.glDisable(G.GL_BLEND);dn=0;buf.clear()}
+          fun commit(L:Layer){if(isE(sb))return;val r=intArrayOf(max(0,sb[0]),max(0,sb[1]),min(N,sb[2]),min(N,sb[3]));if(r[2]<=r[0]||r[3]<=r[1])return
+          push(snap(L,r));fb(L.f,N,N);scis(r);G.glEnable(G.GL_BLEND)
+          when{Cur.tool==1->G.glBlendFunc(G.GL_ZERO,G.GL_ONE_MINUS_SRC_ALPHA);L.lock->G.glBlendFuncSeparate(G.GL_DST_ALPHA,G.GL_ONE_MINUS_SRC_ALPHA,G.GL_ZERO,G.GL_ONE);else->G.glBlendFunc(G.GL_ONE,G.GL_ONE_MINUS_SRC_ALPHA)}
+          G.glUseProgram(pq);bt(0,stk[0],pq,"uS");bt(1,sel[si][0],pq,"uSel");ui(pq,"uHS",if(hasSel)1 else 0);uf(pq,"uSO",g("opacity"));tri();G.glDisable(G.GL_BLEND);noScis();grow(dr,r[0],r[1],r[2],r[3])}
+          fun up(f:FloatArray){val fbuf=ByteBuffer.allocateDirect(f.size*4).order(ByteOrder.nativeOrder()).asFloatBuffer();fbuf.put(f);fbuf.position(0)
+          G.glBindBuffer(G.GL_ARRAY_BUFFER,vbo);G.glBufferData(G.GL_ARRAY_BUFFER,f.size*4,fbuf,G.GL_STREAM_DRAW);G.glEnableVertexAttribArray(0);G.glVertexAttribDivisor(0,0);G.glVertexAttribPointer(0,2,G.GL_FLOAT,false,0,0)}
+          fun rasterLasso(final:Boolean){val f=lpts.toFloatArray();val n=f.size/2;if(n<1)return
+          noScis();fb(prv[1],N,N);G.glDisable(G.GL_BLEND);G.glClearColor(0f,0f,0f,0f);G.glClearStencil(0);G.glClear(G.GL_COLOR_BUFFER_BIT or G.GL_STENCIL_BUFFER_BIT)
+          G.glUseProgram(pgeo);uf(pgeo,"uSize",N.toFloat(),N.toFloat());uf(pgeo,"uPt",1f);up(f)
+          if(final&&n>=3){G.glEnable(G.GL_STENCIL_TEST);G.glStencilFunc(G.GL_ALWAYS,0,0xFF);G.glStencilOp(G.GL_KEEP,G.GL_KEEP,G.GL_INVERT);G.glColorMask(false,false,false,false)
+          uf(pgeo,"uV",1f);G.glDrawArrays(G.GL_TRIANGLE_FAN,0,n);G.glColorMask(true,true,true,true)
+          G.glStencilFunc(G.GL_EQUAL,1,1);G.glStencilOp(G.GL_KEEP,G.GL_KEEP,G.GL_KEEP);up(floatArrayOf(0f,0f,N.toFloat(),0f,0f,N.toFloat(),N.toFloat(),N.toFloat()));G.glDrawArrays(G.GL_TRIANGLE_STRIP,0,4)
+          G.glDisable(G.GL_STENCIL_TEST)}
+          if(!final){uf(pgeo,"uV",1f);uf(pgeo,"uPt",max(3f,4f/Cur.sc));G.glDrawArrays(G.GL_LINE_STRIP,0,n);G.glDrawArrays(G.GL_POINTS,0,n)}
+          G.glDisableVertexAttribArray(0);G.glBindBuffer(G.GL_ARRAY_BUFFER,0)}
+          fun combine(m:Int){G.glDisable(G.GL_BLEND);noScis();val o=1-si;fb(sel[o][1],N,N);G.glUseProgram(pcm);bt(0,sel[si][0],pcm,"uA");bt(1,prv[0],pcm,"uB");ui(pcm,"uM",m);tri();si=o}
+          fun fillColor(){val c=Cur.col();G.glUniform3f(G.glGetUniformLocation(pfl,"uCol"),Color.red(c)/255f,Color.green(c)/255f,Color.blue(c)/255f)}
+          fun lassoFill(erase:Boolean){val L=cur()?:return;if(lpts.size<6)return;if(L.has)bake(L);ensure(L)
+          var x0=1e9f;var y0=1e9f;var x1=-1e9f;var y1=-1e9f;var i=0
+          while(i<lpts.size){x0=min(x0,lpts[i]);x1=max(x1,lpts[i]);y0=min(y0,lpts[i+1]);y1=max(y1,lpts[i+1]);i+=2}
+          val r=intArrayOf(max(0,floor(x0).toInt()-2),max(0,floor(y0).toInt()-2),min(N,ceil(x1).toInt()+3),min(N,ceil(y1).toInt()+3));if(r[2]<=r[0]||r[3]<=r[1])return
+          push(snap(L,r));fb(L.f,N,N);scis(r);G.glEnable(G.GL_BLEND);G.glBlendFunc(if(erase)G.GL_ZERO else G.GL_ONE,G.GL_ONE_MINUS_SRC_ALPHA)
+          G.glUseProgram(pfl);bt(0,prv[0],pfl,"uSel");ui(pfl,"uHS",1);fillColor();uf(pfl,"uO",g("opacity"));tri();G.glDisable(G.GL_BLEND);noScis();grow(dr,r[0],r[1],r[2],r[3])}
+          fun commitLasso(){rasterLasso(true);if(Cur.tool==3)lassoFill(Cur.le==1) else{combine(Cur.lm);hasSel=true;Cur.hs=true};lpts.clear()}
+          fun closePoly(){if(lpts.size>=6)commitLasso()}
+          fun selInvert(){combine(3);hasSel=true;Cur.hs=true}
+          fun deselect(){hasSel=false;Cur.hs=false;lpts.clear();noScis();for(s in sel){fb(s[1],N,N);G.glClearColor(0f,0f,0f,0f);G.glClear(G.GL_COLOR_BUFFER_BIT)}}
+          fun fillSel(del:Boolean){val L=cur()?:return;if(L.has)bake(L);ensure(L);push(snap(L,intArrayOf(0,0,N,N)));fb(L.f,N,N);G.glEnable(G.GL_BLEND);G.glBlendFunc(if(del)G.GL_ZERO else G.GL_ONE,G.GL_ONE_MINUS_SRC_ALPHA)
+          G.glUseProgram(pfl);bt(0,sel[si][0],pfl,"uSel");ui(pfl,"uHS",if(hasSel)1 else 0);fillColor();uf(pfl,"uO",1f);tri();G.glDisable(G.GL_BLEND);grow(dr,0,0,N,N)}
+          fun lasso(k:Int,px:Float,py:Float){val x=px.coerceIn(0f,N.toFloat());val y=py.coerceIn(0f,N.toFloat())
+          if(Cur.ls==0){when(k){
+          0->{lpts.clear();lpts.add(x);lpts.add(y);rasterLasso(false)}
+          1->{val n=lpts.size;if(n>=2&&n<8000&&hypot(x-lpts[n-2],y-lpts[n-1])>3f){lpts.add(x);lpts.add(y);rasterLasso(false)}}
+          else->{if(lpts.size>=6)commitLasso() else lpts.clear()}}}
+          else{when(k){
+          0->{lx0=x;ly0=y}
+          2->{if(hypot(x-lx0,y-ly0)<24f/Cur.sc){if(lpts.size>=6&&hypot(x-lpts[0],y-lpts[1])<30f/Cur.sc)commitLasso() else{lpts.add(x);lpts.add(y);rasterLasso(false)}}}}}}
+          fun targets()=Cur.layers.filter{it.liq}.ifEmpty{listOfNotNull(cur())}
+          fun liq(k:Int,x:Float,y:Float){when(k){
+          0->{lqx=x;lqy=y;lqd=true;targets().forEach{if(!it.has)it.dbox=emp()}}
+          1->{if(!lqd)return;if(Cur.lq==0){val dx=x-lqx;val dy=y-lqy;val m=max(1,ceil(hypot(dx,dy)/(g("lqR")*.2f)).toInt())
+          for(i in 1..m)lqApply(lqx+dx*i/m,lqy+dy*i/m,dx/m,dy/m)};lqx=x;lqy=y}
+          else->{lqd=false;if(Cur.bk)targets().forEach{bake(it)}}}}
+          fun lqApply(x:Float,y:Float,dx:Float,dy:Float){
+          val R=g("lqR");val r=intArrayOf(max(0,(x-R-3f).toInt()),max(0,(y-R-3f).toInt()),min(N,(x+R+4f).toInt()),min(N,(y+R+4f).toInt()));if(r[2]<=r[0]||r[3]<=r[1])return
+          val ts=targets();ts.forEach{ensure(it);ensureD(it)}
+          for(L in ts){G.glDisable(G.GL_BLEND);fb(sd[1],N,N);scis(r);G.glUseProgram(pl);bt(0,L.dt,pl,"uD");bt(1,sel[si][0],pl,"uSel");ui(pl,"uHS",if(hasSel)1 else 0)
+          uf(pl,"uSize",N.toFloat(),N.toFloat());uf(pl,"uC",x,y);uf(pl,"uDl",dx,dy);uf(pl,"uR",R);uf(pl,"uK",g("lqK")*(if(Cur.lq==0)1f else .05f));uf(pl,"uH",g("lqH"));ui(pl,"uM",Cur.lq)
+          tri();noScis();blitR(sd[1],r[0],r[1],r[2]-r[0],r[3]-r[1],L.df,r[0],r[1]);L.has=true;grow(L.dbox,r[0],r[1],r[2],r[3]);grow(dr,r[0],r[1],r[2],r[3])}}
+          }
+          class CanvasView(c:Context):GLSurfaceView(c){
+          val r=Eng();var g=false;var ig=false;var pcx=0f;var pcy=0f;var pdist=1f;var pa=0f;var sty=false
+          var tapT=0L;var tapMoved=false;var maxP=0;var an0=0f;var pend=Runnable{};var sx0=0f;var sy0=0f;var sd0=1f
+          init{setEGLContextClientVersion(3);setEGLConfigChooser(8,8,8,8,0,0);setRenderer(r);renderMode=RENDERMODE_WHEN_DIRTY;Cur.view=this}
+          fun cv(x:Float,y:Float):FloatArray{val vx=(x-width/2f-Cur.px)/Cur.sc;val vy=(y-height/2f-Cur.py)/Cur.sc;val c=cos(Cur.rot);val s=sin(Cur.rot);val h=Cur.n/2f
+          return floatArrayOf(c*vx+s*vy+h,-s*vx+c*vy+h)}
+          fun pt(k:Int,e:MotionEvent,h:Int){
+          val x=if(h<0)e.x else e.getHistoricalX(h);val y=if(h<0)e.y else e.getHistoricalY(h)
+          val st=e.getToolType(0)==MotionEvent.TOOL_TYPE_STYLUS
+          val p=if(st)(if(h<0)e.pressure else e.getHistoricalPressure(h)) else 1f
+          val t=if(st)(if(h<0)e.getAxisValue(MotionEvent.AXIS_TILT) else e.getHistoricalAxisValue(MotionEvent.AXIS_TILT,h))/1.5708f else 0f
+          val c=cv(x,y);queueEvent{r.ptr(k,c[0],c[1],p,t)}}
+          override fun onTouchEvent(e:MotionEvent):Boolean{val res=touch(e);requestRender();return res}
+          fun touch(e:MotionEvent):Boolean{
+          requestUnbufferedDispatch(e);val a=e.actionMasked
+          if(e.getToolType(0)==MotionEvent.TOOL_TYPE_STYLUS)sty=true
+          if(e.pointerCount>=2){
+          maxP=max(maxP,e.pointerCount)
+          if(!ig){ig=true;queueEvent{r.ptr(3,0f,0f,0f,0f)}}
+          val x0=e.getX(0);val y0=e.getY(0);val x1=e.getX(1);val y1=e.getY(1)
+          val cx=(x0+x1)/2;val cy=(y0+y1)/2;val d=max(1f,hypot(x1-x0,y1-y0));val an=atan2(y1-y0,x1-x0)
+          if(a==MotionEvent.ACTION_POINTER_DOWN&&e.pointerCount==2){tapT=e.eventTime;tapMoved=false;sx0=cx;sy0=cy;sd0=d;an0=an}
+          val sl=Cur.inp["tapSlop"]!!;if(hypot(cx-sx0,cy-sy0)>sl||abs(d-sd0)>sl||abs(an-an0)>.06f)tapMoved=true
+          if(a==MotionEvent.ACTION_POINTER_UP){if(Cur.inp["tapUndo"]==1f&&!tapMoved&&e.eventTime-tapT<Cur.inp["tapMs"]!!){val redo=maxP>=3&&Cur.inp["redo3"]==1f
+          if(maxP<3||redo){removeCallbacks(pend);pend=Runnable{if(redo)Cur.q{Cur.r?.redo()} else Cur.q{Cur.r?.undo()}};postDelayed(pend,Cur.inp["undoDelay"]!!.toLong())}};g=false;return true}
+          if(g&&a!=MotionEvent.ACTION_POINTER_DOWN){
+          val p=cv(pcx,pcy);Cur.sc=(Cur.sc*d/pdist).coerceIn(.05f,40f);Cur.rot+=an-pa
+          val vx=p[0]-Cur.n/2f;val vy=p[1]-Cur.n/2f;val c=cos(Cur.rot);val s=sin(Cur.rot)
+          Cur.px=cx-width/2f-Cur.sc*(c*vx-s*vy);Cur.py=cy-height/2f-Cur.sc*(s*vx+c*vy);Cur.vd=true}
+          g=true;pcx=cx;pcy=cy;pdist=d;pa=an;return true}
+          if(ig){if(a==MotionEvent.ACTION_UP||a==MotionEvent.ACTION_CANCEL){ig=false;g=false;maxP=0};return true}
+          if((sty||Cur.inp["fingerDraw"]==0f)&&e.getToolType(0)!=MotionEvent.TOOL_TYPE_STYLUS)return true
+          when(a){
+          MotionEvent.ACTION_DOWN->{removeCallbacks(pend);pt(0,e,-1)}
+          MotionEvent.ACTION_MOVE->{for(h in 0 until e.historySize)pt(1,e,h);pt(1,e,-1)}
+          MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL->pt(2,e,-1)}
+          return true}
+          }
+          EOF_5
+          cat > app/src/main/java/art/liquid/UI.kt <<'EOF_6'
+          package art.liquid
+          import android.graphics.BitmapFactory
+          import android.hardware.*
+          import android.os.Bundle
+          import android.view.WindowManager
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.animation.animateColorAsState
+          import androidx.compose.animation.animateContentSize
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.gestures.detectDragGestures
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.CornerRadius
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Rect
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.BlendMode
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.CompositingStrategy
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.PathEffect
+          import androidx.compose.ui.graphics.Shadow
+          import androidx.compose.ui.graphics.asImageBitmap
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.StrokeJoin
+          import androidx.compose.ui.graphics.drawscope.Fill
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.drawscope.rotate
+          import androidx.compose.ui.graphics.drawscope.scale
+          import androidx.compose.ui.graphics.graphicsLayer
+          import androidx.compose.ui.graphics.lerp
+          import androidx.compose.ui.graphics.luminance
+          import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+          import androidx.compose.ui.input.pointer.PointerEventPass
+          import androidx.compose.animation.AnimatedVisibility
+          import androidx.compose.animation.Crossfade
+          import androidx.compose.animation.fadeIn
+          import androidx.compose.animation.fadeOut
+          import androidx.compose.foundation.text.BasicTextField
+          import androidx.compose.ui.draw.drawBehind
+          import androidx.compose.ui.graphics.ImageBitmap
+          import androidx.compose.ui.graphics.SolidColor
+          import androidx.compose.ui.graphics.drawscope.DrawScope
+          import androidx.compose.ui.graphics.drawscope.clipRect
+          import androidx.compose.ui.layout.positionInRoot
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.style.TextOverflow
+          import kotlin.random.Random
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.layout.boundsInWindow
+          import androidx.compose.ui.layout.onGloballyPositioned
+          import androidx.compose.ui.layout.onSizeChanged
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalDensity
+          import androidx.compose.ui.platform.LocalHapticFeedback
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.IntOffset
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.core.view.WindowInsetsControllerCompat
+          import kotlinx.coroutines.coroutineScope
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlin.math.*
+          class MainActivity:ComponentActivity(),SensorEventListener{
+          override fun onCreate(s:Bundle?){super.onCreate(s);Cur.app=applicationContext;ld("th",Cur.th);ld("br",Cur.b);ld("pos",Cur.pos,true);if(Cur.pos["lv"]!=2f){Cur.pos.clear();Cur.pos["lv"]=2f};ld("cv",Cur.cv);ld("inp",Cur.inp);ld("lay",Cur.lay,true);ld("mm",Cur.mm,true);Cur.cfact=getSharedPreferences("liquid",0).getString("cfact","")?:"";ld("sl",Cur.sl,true)
+          Cur.dir=java.io.File(cacheDir,"hist").apply{deleteRecursively();mkdirs()}
+          WindowCompat.setDecorFitsSystemWindows(window,false)
+          WindowInsetsControllerCompat(window,window.decorView).apply{hide(WindowInsetsCompat.Type.systemBars());systemBarsBehavior=WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE}
+          window.attributes=window.attributes.apply{layoutInDisplayCutoutMode=WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;preferredRefreshRate=120f}
+          val cf=java.io.File(filesDir,"crash.txt")
+          Thread.setDefaultUncaughtExceptionHandler{_,e->try{cf.writeText(e.stackTraceToString().take(6000))}catch(_:Throwable){};android.os.Process.killProcess(android.os.Process.myPid())}
+          setContent{var err by remember{mutableStateOf<String?>(if(cf.exists())cf.readText() else null)}
+          val m=err
+          if(m!=null)Column(Modifier.fillMaxSize().background(Color.Black).padding(16.dp).verticalScroll(rememberScrollState())){
+          Text("Crash report - screenshot this:",color=Color.White,fontSize=16.sp);Text(m,color=Color.White,fontSize=10.sp);Text("[ tap here to continue ]",color=Color.White,fontSize=16.sp,modifier=Modifier.clickable{cf.delete();err=null}.padding(20.dp))}
+          else App()}}
+          fun ld(n:String,m:MutableMap<String,Float>,all:Boolean=false){getSharedPreferences("liquid",0).getString(n,"")?.split(";")?.forEach{val p=it.split("=");val v=if(p.size==2)p[1].toFloatOrNull() else null;if(v!=null&&(all||m.containsKey(p[0]))){m[p[0]]=v}}}
+          fun sv(n:String,m:Map<String,Float>){getSharedPreferences("liquid",0).edit().putString(n,m.entries.joinToString(";"){"${it.key}=${it.value}"}).apply()}
+          override fun onResume(){super.onResume();(getSystemService(SENSOR_SERVICE) as SensorManager).let{it.registerListener(this,it.getDefaultSensor(Sensor.TYPE_ACCELEROMETER),SensorManager.SENSOR_DELAY_GAME)}}
+          override fun onPause(){super.onPause();Cur.q{Cur.r?.saveIfDue()};sv("th",Cur.th);sv("br",Cur.b);sv("pos",Cur.pos);sv("cv",Cur.cv);sv("inp",Cur.inp);sv("lay",Cur.lay);sv("mm",Cur.mm);sv("sl",Cur.sl);(getSystemService(SENSOR_SERVICE) as SensorManager).unregisterListener(this)}
+          override fun onSensorChanged(e:SensorEvent){val nx=Cur.lx+(-e.values[0]/9.8f-Cur.lx)*.1f;val ny=Cur.ly+(-e.values[1]/9.8f-Cur.ly)*.1f;val ch=abs(nx-Cur.lx)+abs(ny-Cur.ly);Cur.lx=nx;Cur.ly=ny;if(ch>.004f&&Glass.m.isNotEmpty())Cur.rq()}
+          override fun onAccuracyChanged(s:Sensor?,a:Int){}}
+          val DARK=Color(0xFF10131A)
+          class InkH(val c:Color,val m:Modifier)
+          @Composable fun inkAt(p:Offset):Color{val v=Cur.lumV;if(v<0)return Color.White;val t=((Cur.lumAt(p.x,p.y)-.42f)/.26f).coerceIn(0f,1f);return animateColorAsState(lerp(Color.White,DARK,t),tween(160),label="ink").value}
+          @Composable fun inkHost():InkH{var p by remember{mutableStateOf(Offset.Zero)};val c=inkAt(p);return InkH(c,Modifier.onGloballyPositioned{p=it.boundsInWindow().center})}
+          @Composable fun T(s:String,sz:Int=13,m:Modifier=Modifier){var p by remember{mutableStateOf(Offset.Zero)};val c=inkAt(p);val lt=((Cur.lumAt(p.x,p.y)-.42f)/.26f).coerceIn(0f,1f);val mid=1f-abs(2f*lt-1f)
+          Text(s,m.onGloballyPositioned{p=it.boundsInWindow().center},color=c,fontSize=sz.sp,style=TextStyle(shadow=Shadow(if(c.luminance()>.5f)Color.Black.copy(.4f*mid) else Color.White.copy(.4f*mid),Offset(0f,1.5f),3f)))}
+          @Composable fun Ico(k:String,on:Float,ink:Color,sz:Dp=24.dp){
+          Canvas(Modifier.size(sz)){
+          val u=size.width/24f;val ph=Cur.ph;val st=Stroke(2f*u,cap=StrokeCap.Round,join=StrokeJoin.Round)
+          fun P(x:Float,y:Float)=Offset(x*u,y*u)
+          fun ln(a:Float,b:Float,c:Float,d:Float,w:Float=2f)=drawLine(ink,P(a,b),P(c,d),w*u,StrokeCap.Round)
+          fun pth(f:Path.()->Unit)=drawPath(Path().apply(f),ink,style=st)
+          fun dash(a:Float)=Stroke(2f*u,cap=StrokeCap.Round,pathEffect=PathEffect.dashPathEffect(floatArrayOf(3.2f*u,2.6f*u),ph*u*12f*a))
+          when(k){
+          "brush"->rotate(-16f*on,P(12f,12f)){ln(7f,17f,17f,7f,3.4f);drawCircle(ink,(1.8f+1.2f*on)*u,P(6f,18f));if(on>.3f)ln(18.5f,4f,20.5f,2f,1.4f)}
+          "eraser"->rotate(-30f+18f*on,P(12f,12f)){drawRoundRect(ink,P(5f,8.5f),Size(14f*u,7f*u),CornerRadius(2f*u),style=st);ln(11f,8.5f,11f,15.5f,1.6f)}
+          "liquify"->for(row in 0..1){val pa=Path();for(i in 0..24){val x=3f+i*.75f;val y=9f+row*6f+2.4f*sin(i*.45f+ph*6.28f*on+row);if(i==0)pa.moveTo(x*u,y*u) else pa.lineTo(x*u,y*u)};drawPath(pa,ink,style=st)}
+          "lasso"->{drawOval(ink,P(4f,6f),Size(16f*u,11f*u),style=dash(on));ln(8f,16f,7f,20.5f,1.8f);drawCircle(ink,1.3f*u,P(7f,20.5f))}
+          "select"->{drawRect(ink,P(4f,5f),Size(16f*u,14f*u),style=dash(on));drawCircle(ink,1.4f*u,P(12f,12f))}
+          "layers"->for(i in 0..2){val dy=(i-1)*(3.2f+on*2.2f);pth{moveTo(12f*u,(9f+dy)*u);lineTo(20f*u,(12.5f+dy)*u);lineTo(12f*u,(16f+dy)*u);lineTo(4f*u,(12.5f+dy)*u);close()}}
+          "sliders"->for(i in 0..2){val y=7f+i*5f;ln(4f,y,20f,y,1.6f);val kx=6f+((i*7+3)%10)+on*(if(i%2==0)6f else -4f);drawCircle(ink,2.2f*u,P(kx.coerceIn(5f,19f),y))}
+          "drop"->{pth{moveTo(12f*u,3.5f*u);cubicTo(12f*u,3.5f*u,5.5f*u,11f*u,5.5f*u,15f*u);cubicTo(5.5f*u,18.6f*u,8.4f*u,21f*u,12f*u,21f*u);cubicTo(15.6f*u,21f*u,18.5f*u,18.6f*u,18.5f*u,15f*u);cubicTo(18.5f*u,11f*u,12f*u,3.5f*u,12f*u,3.5f*u);close()};ln(9.5f,14.5f,9.5f,16.5f+on*2f,1.6f)}
+          "fx"->rotate(45f*on,P(12f,12f)){pth{moveTo(12f*u,3f*u);lineTo(14f*u,10f*u);lineTo(21f*u,12f*u);lineTo(14f*u,14f*u);lineTo(12f*u,21f*u);lineTo(10f*u,14f*u);lineTo(3f*u,12f*u);lineTo(10f*u,10f*u);close()}}
+          "undo","redo"->scale(if(k=="redo")-1f else 1f,1f,P(12f,12f)){pth{moveTo(9f*u,7f*u);lineTo(4f*u,12f*u);lineTo(9f*u,17f*u)};pth{moveTo(4f*u,12f*u);lineTo(14f*u,12f*u);cubicTo(19f*u,12f*u,19f*u,19f*u,13f*u,19f*u)}}
+          "reset"->{drawCircle(ink,6f*u,P(12f,12f),style=st);drawCircle(ink,1.6f*u,P(12f,12f));ln(12f,2.5f,12f,5.5f);ln(12f,18.5f,12f,21.5f);ln(2.5f,12f,5.5f,12f);ln(18.5f,12f,21.5f,12f)}
+          "orb"->{drawCircle(ink,(8f-3f*on)*u,P(12f,12f),style=st);drawCircle(ink,(2.2f+1.6f*on)*u,P(12f,12f))}
+          "check"->pth{moveTo(5f*u,12.5f*u);lineTo(10f*u,17.5f*u);lineTo(19f*u,7f*u)}
+          "plus"->{ln(12f,5f,12f,19f);ln(5f,12f,19f,12f)}
+          "minus"->ln(5f,12f,19f,12f)
+          "x"->{ln(6f,6f,18f,18f);ln(18f,6f,6f,18f)}
+          "chev"->rotate(180f*on,P(12f,12f)){pth{moveTo(6f*u,9f*u);lineTo(12f*u,15f*u);lineTo(18f*u,9f*u)}}
+          "up"->pth{moveTo(6f*u,15f*u);lineTo(12f*u,9f*u);lineTo(18f*u,15f*u)}
+          "down"->pth{moveTo(6f*u,9f*u);lineTo(12f*u,15f*u);lineTo(18f*u,9f*u)}
+          "eye"->{drawOval(ink,P(3f,7.5f),Size(18f*u,9f*u),style=st);drawCircle(ink,2.4f*u,P(12f,12f));if(on>.5f)ln(3f,20f,21f,4f)}
+          "lock"->{drawRoundRect(ink,P(5.5f,11f),Size(13f*u,9f*u),CornerRadius(2f*u),style=if(on>.5f)Fill else st);drawArc(ink,180f,180f,false,P(8f,5.5f),Size(8f*u,9f*u),style=st)}
+          "menu"->for(i in 0..2){val y=7f+i*5f;ln(4f,y,20f-(if(i==1)5f else 0f)*on,y,2f)}
+          "export"->{pth{moveTo(5f*u,14f*u);lineTo(5f*u,19f*u);lineTo(19f*u,19f*u);lineTo(19f*u,14f*u)};ln(12f,15f,12f,4f+on*2f);pth{moveTo(8f*u,8f*u);lineTo(12f*u,4f*u);lineTo(16f*u,8f*u)}}
+          else->{}
+          }}}
+          @Composable fun Glass(id:Int,open:Boolean,mod:Modifier,rad:Float=34f,sq:Float=1f,reg:Boolean=true,content:@Composable BoxScope.()->Unit){
+          val pz=sq*(if(id<100)(Cur.lay["panSc"]?:1f) else 1f)
+          val sc by animateFloatAsState(if(open)1f else 0f,spring(1f-.65f*(Cur.th["bounce"]?:.5f),230f),label="g")
+          var r by remember{mutableStateOf(Rect.Zero)}
+          DisposableEffect(id){onDispose{Glass.m.remove(id)}}
+          if(sc>.02f){
+          SideEffect{if(!reg)Glass.m.remove(id) else if(r.width>0f)Glass.m[id]=floatArrayOf(r.center.x,r.center.y,r.width/2*sc*pz,r.height/2*sc*pz,min(rad*sc,min(r.width,r.height)/2*sc));Cur.rq()}
+          Box(mod.onGloballyPositioned{r=it.boundsInWindow()}.graphicsLayer{scaleX=sc*pz;scaleY=sc*pz;alpha=min(1f,sc*1.4f)},content=content)
+          }else SideEffect{Glass.m.remove(id);Cur.rq()}}
+          val IDS=listOf("brush","eraser","liquify","lasso","select","undo","redo","fx","layers","brushp","theme","reset","orb","menu","export","color","erase")
+          val DEFP=mapOf("brush" to (.945f to .2875f),"eraser" to (.945f to .331f),"liquify" to (.945f to .375f),"lasso" to (.945f to .419f),"select" to (.945f to .4625f),
+          "undo" to (.955f to .885f),"redo" to (.955f to .929f),"fx" to (.045f to .2875f),"theme" to (.045f to .331f),"reset" to (.045f to .375f),"layers" to (.65f to .972f),"brushp" to (.35f to .972f),
+          "orb" to (.5f to .046f),"menu" to (.196f to .046f),"export" to (.8f to .046f),"color" to (.045f to .885f),"erase" to (.045f to .929f))
+          val DSC=mapOf("menu" to 1.5f)
+          val DK=listOf(floatArrayOf(0f,1f,0f,.09f),floatArrayOf(0f,.1f,.14f,.84f),floatArrayOf(.9f,1f,.14f,.84f),floatArrayOf(0f,.1f,.84f,.95f),floatArrayOf(.9f,1f,.84f,.95f),floatArrayOf(.1f,.9f,.95f,1f))
+          fun dockOf(x:Float,y:Float):Int{if(Cur.lay["docks"]!=1f)return -1
+          DK.forEachIndexed{i,r->if(x>=r[0]&&x<=r[1]&&y>=r[2]&&y<=r[3])return i}
+          return -1}
+          @Composable fun Mascot(sz:Dp,c:Color){val er=Cur.er
+          Canvas(Modifier.size(sz)){val w=size.width;val cx=w/2;val cy=size.height/2
+          drawCircle(c.copy(.18f),w*.46f,Offset(cx,cy));drawCircle(c,w*.46f,Offset(cx,cy),style=Stroke(w*.05f))
+          drawCircle(c,w*.055f,Offset(cx-w*.17f,cy-w*.08f));drawCircle(c,w*.055f,Offset(cx+w*.17f,cy-w*.08f))
+          if(er)drawCircle(c,w*.07f,Offset(cx,cy+w*.17f),style=Stroke(w*.045f)) else drawArc(color=c,startAngle=20f,sweepAngle=140f,useCenter=false,topLeft=Offset(cx-w*.17f,cy+w*.02f),size=Size(w*.34f,w*.24f),style=Stroke(w*.045f,cap=StrokeCap.Round))
+          drawCircle(c,w*.05f,Offset(cx+w*.2f,cy-w*.4f))}}
+          @Composable fun Docks(vis:Boolean){
+          val dn=LocalDensity.current;val w=Cur.sw.toFloat();val h=Cur.sh.toFloat()
+          for(i in DK.indices){
+          var x0=1e9f;var y0=1e9f;var x1=-1e9f;var y1=-1e9f
+          IDS.forEach{id->val x=Cur.pos[id+".x"]?:DEFP[id]!!.first;val y=Cur.pos[id+".y"]?:DEFP[id]!!.second
+          if(dockOf(x,y)==i){val hs=with(dn){(20f*(Cur.lay["icoSc"]?:1f)*(Cur.pos[id+".s"]?:DSC[id]?:1f)+8f).dp.toPx()}
+          x0=min(x0,x*w-hs);y0=min(y0,y*h-hs);x1=max(x1,x*w+hs);y1=max(y1,y*h+hs)}}
+          val ok=x1>x0;val l=x0;val t=y0;val dw=max(1f,x1-x0);val dh=max(1f,y1-y0)
+          Glass(20+i,vis&&ok,Modifier.offset{IntOffset(l.roundToInt(),t.roundToInt())}.size(with(dn){dw.toDp()},with(dn){dh.toDp()}),rad=22f){}}}
+          class Pal(val bg:Color,val ink:Color,val mid:Color)
+          class FSlide(val dir:java.io.File,val bmp:ImageBitmap,val dx:Float,val dy:Float,val rot:Float,val zin:Boolean,val t0:Float,val lbl:String)
+          val FACTS=listOf("Ultramarine was once pricier than gold: it was ground from lapis lazuli.","Cave paintings in Sulawesi are over 45,000 years old, among the oldest figurative art known.","Van Gogh painted roughly 2,100 artworks in about ten years.","The word pixel is short for picture element.","Vermilion red was made from cinnabar, a toxic mercury ore.","Squint at your canvas: it hides detail so you can judge light and shadow.","Newton arranged colors in a circle in his 1704 book Opticks.","A pentimento is an earlier layer of paint that shows through over time.","Batik from Indonesia was recognized by UNESCO in 2009.","Ukiyo-e printmakers carved a separate wood block for every color.","Egyptians invented the first synthetic pigment, Egyptian blue.","Warm colors tend to advance while cool colors tend to recede.","Short daily sketches tend to build skill faster than rare marathon sessions.","Picasso is said to have made around 50,000 artworks.")
+          val TIPS=listOf("Tip: hold the mascot on the canvas to customize the layout.","Tip: tap a slider number to type an exact value.","Tip: Rope stabilizer gives clean lineart at slow speed.","Tip: tap outside a tab to close it.","Tip: Settings > Menu changes this screen.")
+          fun ago(ms:Long):String{val m=(System.currentTimeMillis()-ms)/60000L;return if(m<1L)"just now" else if(m<60L)m.toString()+" min ago" else if(m<1440L)(m/60L).toString()+" h ago" else (m/1440L).toString()+" d ago"}
+          fun promptOf(n:Int):String{val r=Random((System.currentTimeMillis()/86400000L).toInt()*31+n)
+          val a=listOf("sleepy","glowing","tiny","ancient","melting","floating","neon","forgotten","clockwork","windblown");val b=listOf("lighthouse","fox","teapot","robot","koi fish","night market","dragonfly","cactus","violin","mountain village");val c=listOf("in the rain","at sunrise","underwater","on the moon","inside a jar","in a thunderstorm","above the clouds","in a quiet forest")
+          return "A "+a[r.nextInt(a.size)]+" "+b[r.nextInt(b.size)]+" "+c[r.nextInt(c.size)]}
+          fun menuStart(){if(Cur.proj==null&&Cur.projs.isNotEmpty()){val d=Cur.projs[0].dir;Cur.q{Cur.r?.loadProject(d)}};Cur.menu=false;Cur.rq()}
+          fun Modifier.dbl(c:Color,r:Dp,sty:Int,gap:Dp=5.dp):Modifier=this.drawBehind{
+          val sw=2.dp.toPx();val g=gap.toPx();val rr=r.toPx()
+          val pe:PathEffect?=when(sty){1->PathEffect.dashPathEffect(floatArrayOf(.1f,sw*2.3f));2->PathEffect.dashPathEffect(floatArrayOf(sw*4f,sw*2.5f));else->null}
+          val cp=if(sty==1)StrokeCap.Round else StrokeCap.Butt
+          drawRoundRect(c,Offset(sw/2,sw/2),Size(size.width-sw,size.height-sw),CornerRadius(rr),style=Stroke(sw,cap=cp,pathEffect=pe))
+          val i=sw/2+g
+          if(size.width>2*i+4f&&size.height>2*i+4f)drawRoundRect(c,Offset(i,i),Size(size.width-2*i,size.height-2*i),CornerRadius(max(2f,rr-g)),style=Stroke(sw*.8f,cap=cp,pathEffect=pe))}
+          class CharSt{
+          var t=0f;var rt=0f;var blink=0f;var nextB=1.4f;var bPh=-1f;var dbl=false
+          var gx=0f;var gy=0f;var tgx=0f;var tgy=0f;var sacc=1f
+          var px=-1f;var py=-1f;var bx=0f;var by=0f;var bw=1f;var bh=1f
+          var last=-99f;var idle=0f;var mood=0;var moodT=0f;var drum=0f;var nextDrum=3f;var wave=0f
+          fun touch(){last=t;idle=0f}
+          fun poke(){mood=1;moodT=.6f;wave=1.4f;touch();blink=0f;bPh=-1f;nextB=1.2f}
+          fun step(dt:Float){val d=dt*(Cur.mm["chSpd"]?:1f);t+=d;rt+=dt;idle+=dt
+          val every=Cur.mm["blinkS"]?:2.4f
+          if(bPh<0f){nextB-=d;if(nextB<=0f)bPh=0f}
+          else{bPh+=d/(if(bPh<1f).085f else .15f);if(bPh>=2f){bPh=-1f;blink=0f;nextB=if(dbl){dbl=false;.1f}else{dbl=Random.nextFloat()<.2f;every*(.5f+Random.nextFloat())}}else{blink=if(bPh<1f)bPh else 2f-bPh}}
+          if(mood==1||mood==2){moodT-=dt;if(moodT<=0f){if(mood==1){mood=2;moodT=2.4f}else mood=0}}
+          if(mood==0&&idle>25f)mood=3
+          if(mood==3&&idle<25f)mood=0
+          val fol=Cur.mm["eyeF"]?:.8f;val ex=bx+bw*.5f;val ey=by+bh*.6f
+          if(px>=0f&&t-last<4f&&fol>0f){tgx=((px-ex)/(bw*.5f)).coerceIn(-1f,1f)*fol;tgy=((py-ey)/(bh*.8f)).coerceIn(-1f,1f)*fol}
+          else{sacc-=d;if(sacc<=0f){sacc=.6f+Random.nextFloat()*2.4f;tgx=(Random.nextFloat()*2f-1f)*.8f;tgy=(Random.nextFloat()*2f-1f)*.5f;if(Random.nextFloat()<.4f){tgx*=.3f;tgy*=.3f}}}
+          val k=min(1f,dt*(if(mood==3)5f else 16f));gx+=(tgx-gx)*k;gy+=(tgy-gy)*k
+          nextDrum-=d;if(nextDrum<=0f){drum=2.2f;nextDrum=6f+Random.nextFloat()*7f};if(drum>0f)drum-=d;if(wave>0f)wave-=d}}
+          fun DrawScope.charFace(s:CharSt,ink:Color,bg:Color){
+          val W=size.width;val H=size.height;val m=s.mood;val mid=lerp(bg,ink,.35f)
+          val happy=if(m==2)1f else 0f;val sur=if(m==1)1f else 0f
+          val sleepy=if(m==3).42f+.06f*sin(s.t*1.1f) else 0f
+          val bl=s.blink*s.blink*(3f-2f*s.blink);val lid=max(bl,sleepy)
+          val sway=sin(s.t*1.3f)*H*.006f
+          val rx=W*.066f*(1f+.1f*sur);val ry=W*.078f*(1f+.12f*sur);val cy=H*.6f+sway
+          val hp=Path();hp.moveTo(W*.395f,H*.46f);hp.lineTo(W*.605f,H*.46f)
+          for(i in 0..6){val x=W*(.605f-.035f*i);val y=H*(if(i%2==0).515f else .565f)+sin(s.t*2.2f+i)*H*.005f;hp.lineTo(x,y)}
+          hp.close();drawPath(hp,ink)
+          fun eye(cx:Float,sg:Float){
+          val y0=cy-ry+lid*2f*ry*.97f
+          val endY=y0+ry*(.4f-.52f*lid);val ctrlY=y0+ry*(-.65f+.93f*lid)
+          if(happy>0f){val p=Path();p.moveTo(cx-rx*1.1f,cy+ry*.25f);p.quadraticBezierTo(cx,cy-ry*1.15f,cx+rx*1.1f,cy+ry*.25f);drawPath(p,ink,style=Stroke(W*.016f,cap=StrokeCap.Round))}
+          else{
+          val ix=cx+s.gx*rx*.38f;val iy=cy+s.gy*ry*.26f;val irx=rx*(1f-.12f*sur);val iry=ry*(1f-.1f*sur)
+          if(lid<.96f)clipRect(cx-rx*1.5f,y0,cx+rx*1.5f,cy+ry*1.15f){
+          drawOval(ink,Offset(ix-irx,iy-iry),Size(irx*2f,iry*2f))
+          drawCircle(bg,rx*.19f,Offset(ix-rx*.04f,iy+iry*.12f));drawCircle(bg,rx*.075f,Offset(ix+rx*.4f,iy-iry*.42f))}
+          val lp=Path();lp.moveTo(cx-rx*1.3f,endY);lp.quadraticBezierTo(cx,ctrlY,cx+rx*1.3f,endY);drawPath(lp,ink,style=Stroke(W*.013f,cap=StrokeCap.Round))
+          val cp=Path();cp.moveTo(cx-rx*1.2f,endY-ry*.4f);cp.quadraticBezierTo(cx,ctrlY-ry*.5f,cx+rx*1.2f,endY-ry*.4f);drawPath(cp,mid,alpha=(1f-lid)*.8f,style=Stroke(W*.005f,cap=StrokeCap.Round))}
+          val ey=if(happy>0f)cy-ry*.35f else y0+ry*.5f
+          for(j in 0..4){val ang=PI.toFloat()+.1f+j*.21f;val ca=cos(ang);val sa=sin(ang);val len=rx*(.8f-.09f*j)
+          val bx=cx+sg*ca*rx*1.3f;val by=ey+sa*ry*.8f;val a1=ang-.07f;val a2=ang+.07f
+          val p=Path();p.moveTo(cx+sg*cos(a1)*rx*1.3f,ey+sin(a1)*ry*.8f)
+          p.quadraticBezierTo(bx+sg*ca*len*.5f,by+sa*len*.9f,bx+sg*ca*len*1.1f-sg*len*.1f,by+sa*len*1.1f-len*.15f)
+          p.lineTo(cx+sg*cos(a2)*rx*1.3f,ey+sin(a2)*ry*.8f);p.close();drawPath(p,ink)}
+          if(happy>0f)for(k in 0..2){val bx=cx+(k-1)*rx*.7f;drawLine(ink.copy(.55f),Offset(bx,cy+ry*1.5f),Offset(bx+rx*.22f,cy+ry*1.2f),W*.004f,StrokeCap.Round)}}
+          val nw=W*.044f*(1f+.12f*happy*sin(s.t*28f));drawOval(mid,Offset(W*.5f-nw/2,H*.745f+sway*.5f),Size(nw,W*.02f))
+          eye(W*.335f,1f);eye(W*.665f,-1f)}
+          fun DrawScope.charHands(s:CharSt,ink:Color,bg:Color){
+          val W=size.width;val H=size.height;val glove=lerp(bg,ink,.18f);val ow=W*.007f
+          val env=if(s.drum>0f)min(1f,s.drum) else 0f;val wv=if(s.wave>0f)min(1f,s.wave) else 0f
+          for(side in 0..1){val m=if(side==0)1f else -1f
+          val bob=sin(s.t*1.7f+side*1.3f)*H*.006f-wv*abs(sin(s.t*13f+side))*H*.05f
+          val pcx=if(m>0)W*.3f else W*.7f;val pcy=H*.775f+bob;val pw=W*.15f;val ph=W*.105f
+          drawLine(ink,Offset(if(m>0)-W*.05f else W*1.05f,H*.58f+bob),Offset(pcx,pcy),W*.07f,StrokeCap.Round)
+          fun cap(bxx:Float,byy:Float,txx:Float,tyy:Float){val fw=W*.034f
+          drawLine(ink,Offset(bxx,byy),Offset(txx,tyy),fw+2*ow,StrokeCap.Round);drawLine(glove,Offset(bxx,byy),Offset(txx,tyy),fw,StrokeCap.Round)
+          val jx=bxx+(txx-bxx)*.55f;val jy=byy+(tyy-byy)*.55f;drawLine(ink,Offset(jx-fw*.3f,jy-fw*.3f),Offset(jx+fw*.3f,jy+fw*.3f),W*.0035f,StrokeCap.Round)}
+          for(i in 0..3){val a=.3f+i*.27f;val lf=W*(.078f-.007f*abs(i-1.5f));val lift=H*.035f*max(0f,sin(s.t*10f-i*1.1f)).pow(2)*env
+          val bx=pcx+m*cos(a)*pw*.4f;val by=pcy+sin(a)*ph*.4f
+          cap(bx,by,bx+m*cos(a)*lf,by+sin(a)*lf-lift)}
+          val ta=-.6f;val tbx=pcx+m*cos(ta)*pw*.35f;val tby=pcy+sin(ta)*ph*.35f;cap(tbx,tby,tbx+m*cos(ta)*W*.06f,tby+sin(ta)*W*.06f)
+          drawOval(ink,Offset(pcx-pw/2-ow,pcy-ph/2-ow),Size(pw+2*ow,ph+2*ow));drawOval(glove,Offset(pcx-pw/2,pcy-ph/2),Size(pw,ph))
+          val tx=if(m>0)W*.25f else W*.75f;val ty=H*.94f
+          val tp=Path();tp.moveTo(tx-m*W*.07f,ty);tp.quadraticBezierTo(tx,ty-H*.05f,tx+m*W*.07f,ty-H*.012f);tp.quadraticBezierTo(tx+m*W*.02f,ty+H*.06f,tx-m*W*.07f,ty);tp.close();drawPath(tp,ink)}}
+          @Composable fun MT(s:String,c:Color,sz:Int=13,w:FontWeight=FontWeight.Medium,m:Modifier=Modifier,ser:Boolean=false,ls:Float=0f){
+          Text(s,m,color=c,fontSize=sz.sp,fontWeight=w,fontFamily=if(ser)FontFamily.Serif else FontFamily.Default,letterSpacing=ls.sp,textAlign=TextAlign.Center,maxLines=2,overflow=TextOverflow.Ellipsis)}
+          @Composable fun MenuBtn(s:String,pal:Pal,sty:Int,m:Modifier,sz:Int=24,f:()->Unit){
+          var pr by remember{mutableStateOf(false)};val fu by rememberUpdatedState(f)
+          val sc by animateFloatAsState(if(pr).94f else 1f,spring(.45f,520f),label="mb")
+          Box(m.graphicsLayer{scaleX=sc;scaleY=sc}.clip(RoundedCornerShape(18.dp)).background(if(pr)pal.ink.copy(.12f) else Color.Transparent).dbl(pal.ink,18.dp,sty,4.dp).pointerInput(Unit){detectTapGestures(onPress={pr=true;tryAwaitRelease();pr=false},onTap={fu();Cur.rq()})},Alignment.Center){MT(s,pal.ink,sz,FontWeight.Black,ser=true,ls=4f)}}
+          @Composable fun MenuSlot(k:String,pal:Pal,dim:Boolean,hint:String,onHint:(String)->Unit,m:Modifier,f:()->Unit){
+          var pr by remember{mutableStateOf(false)};val fu by rememberUpdatedState(f);val oh by rememberUpdatedState(onHint)
+          val sc by animateFloatAsState(if(pr).9f else 1f,spring(.45f,520f),label="ms")
+          Box(m.graphicsLayer{scaleX=sc;scaleY=sc}.clip(RoundedCornerShape(14.dp)).background(if(pr)pal.ink.copy(.12f) else Color.Transparent).drawBehind{val b=1.5.dp.toPx();drawRoundRect(pal.ink,Offset(b,b),Size(size.width-2*b,size.height-2*b),CornerRadius(14.dp.toPx()),style=Stroke(2.dp.toPx()))}.pointerInput(dim){detectTapGestures(onPress={pr=true;tryAwaitRelease();pr=false},onTap={oh(hint);if(!dim)fu();Cur.rq()})},Alignment.Center){Ico(k,0f,pal.ink.copy(alpha=if(dim).35f else 1f),24.dp)}}
+          @Composable fun ProjTile(p:ProjInfo,pal:Pal,m:Modifier){
+          val bmp=remember(p.time){BitmapFactory.decodeFile(java.io.File(p.dir,"thumb.jpg").path)?.asImageBitmap()}
+          var arm by remember(p.dir){mutableStateOf(false)}
+          LaunchedEffect(arm){if(arm){delay(2500);arm=false}}
+          Box(m.clip(RoundedCornerShape(14.dp)).background(pal.mid).clickable{Cur.q{Cur.r?.loadProject(p.dir)};Cur.menu=false;Cur.rq()}){
+          if(bmp!=null)Image(bmp,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)
+          Box(Modifier.align(Alignment.TopEnd).padding(3.dp).size(26.dp).clip(CircleShape).background(if(arm)Color(0xFFE5484D) else Color.Black.copy(.4f)).clickable{if(arm){if(Cur.proj==p.dir)Cur.proj=null;p.dir.deleteRecursively();Cur.refreshProjs()}else arm=true;Cur.rq()},Alignment.Center){Ico(if(arm)"check" else "x",0f,Color.White,14.dp)}}}
+          @Composable fun EmptyTile(pal:Pal,m:Modifier){Box(m.clip(RoundedCornerShape(14.dp)).drawBehind{val b=1.5.dp.toPx();drawRoundRect(pal.ink.copy(.5f),Offset(b,b),Size(size.width-2*b,size.height-2*b),CornerRadius(14.dp.toPx()),style=Stroke(1.5.dp.toPx(),pathEffect=PathEffect.dashPathEffect(floatArrayOf(10f,10f))))}.clickable{Cur.q{Cur.r?.newProject()};Cur.menu=false;Cur.rq()},Alignment.Center){Ico("plus",0f,pal.ink.copy(.5f),22.dp)}}
+          @Composable fun SlideImg(s:FSlide,clk:MutableFloatState,top:Boolean){
+          Image(s.bmp,null,Modifier.fillMaxSize().graphicsLayer{
+          val el=clk.floatValue-s.t0;val ev=Cur.mm["featS"]?:10f;val p=(el/(ev+1.2f)).coerceIn(0f,1f);val pe=p*p*(3f-2f*p)
+          val zm=Cur.mm["fZoom"]?:.14f;val pan=Cur.mm["fPan"]?:.55f;val tl=Cur.mm["fTilt"]?:1.6f
+          val sc=1.04f+zm*(if(s.zin).5f+.5f*pe else 1f-.5f*pe);scaleX=sc;scaleY=sc
+          val u=(pe-.5f)*2f
+          translationX=u*s.dx*pan*size.width*.05f;translationY=u*s.dy*pan*size.height*.05f
+          rotationZ=u*s.rot*tl*.5f;rotationY=u*s.dx*tl*1.4f;rotationX=-u*s.dy*tl;cameraDistance=14f*density
+          alpha=if(top)(el/1.2f).coerceIn(0f,1f) else 1f},contentScale=ContentScale.Crop)}
+          @Composable fun FeatFx(clk:MutableFloatState){
+          Canvas(Modifier.fillMaxSize()){val tk=clk.floatValue;val W=size.width;val H=size.height
+          val vg=Cur.mm["fVig"]?:.6f
+          drawRect(Brush.radialGradient(listOf(Color.Transparent,Color.Black.copy(.65f*vg)),center=center,radius=max(W,H)*.75f))
+          val sw=Cur.mm["fSweep"]?:.5f
+          if(sw>0f){val ph=(tk%8f)/8f;val x=(ph*1.7f-.35f)*W;drawRect(Brush.linearGradient(listOf(Color.Transparent,Color.White.copy(.13f*sw),Color.Transparent),Offset(x-W*.12f,0f),Offset(x+W*.12f,H*.45f)))}
+          val g=Cur.mm["fGrain"]?:.35f;val r=Random((tk*20f).toInt())
+          repeat((160*g).toInt()){drawCircle(if(it%2==0)Color.White.copy(.12f) else Color.Black.copy(.12f),1.3f,Offset(r.nextFloat()*W,r.nextFloat()*H))}
+          val bb=H*.075f*(Cur.mm["fBars"]?:.4f);drawRect(Color.Black,Offset.Zero,Size(W,bb));drawRect(Color.Black,Offset(0f,H-bb),Size(W,bb))}}
+          @Composable fun EmptyArt(clk:MutableFloatState,pal:Pal){
+          val hs=listOf(Color(0xFFFF6B9A),Color(0xFF6BC6FF),Color(0xFFFFD36B),Color(0xFFA78BFA))
+          Box(Modifier.fillMaxSize(),Alignment.Center){
+          Canvas(Modifier.fillMaxSize()){val tk=clk.floatValue;drawRect(pal.mid)
+          for(i in 0..3){val cx=size.width*(.5f+.35f*sin(tk*.3f+i*1.7f));val cy=size.height*(.5f+.3f*cos(tk*.23f+i*2.1f));val rd=size.width*.45f
+          drawCircle(Brush.radialGradient(listOf(hs[i].copy(.6f),Color.Transparent),center=Offset(cx,cy),radius=rd),rd,Offset(cx,cy))}}
+          MT("Your saved art will be featured here",pal.ink,15,FontWeight.SemiBold,Modifier.padding(30.dp))}}
+          @Composable fun Featured(clk:MutableFloatState,pal:Pal,onPick:(java.io.File?)->Unit,onOpen:(java.io.File)->Unit){
+          var a by remember{mutableStateOf<FSlide?>(null)};var b by remember{mutableStateOf<FSlide?>(null)}
+          val every=Cur.mm["featS"]?:10f;val rnd=Cur.mm["fRand"]==1f;val n=Cur.projs.size
+          LaunchedEffect(n,every,rnd){while(true){
+          val ps=Cur.projs.toList().filter{java.io.File(it.dir,"thumb.jpg").exists()}
+          if(ps.isNotEmpty()){val cur=a?.dir;val pool=ps.filter{it.dir!=cur};val src=if(pool.isEmpty())ps else pool;val pk=if(rnd)src.random() else ps.first()
+          val bm=BitmapFactory.decodeFile(java.io.File(pk.dir,"thumb.jpg").path)?.asImageBitmap()
+          if(bm!=null){b=a;a=FSlide(pk.dir,bm,Random.nextFloat()*2f-1f,Random.nextFloat()*2f-1f,if(Random.nextBoolean())1f else -1f,Random.nextBoolean(),clk.floatValue,ago(pk.time));onPick(pk.dir)}}
+          else{a=null;b=null;onPick(null)}
+          delay((every*1000f).toLong())}}
+          val sa=a;val sb=b
+          Box(Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(pal.mid).pointerInput(sa?.dir){detectTapGestures{sa?.let{onOpen(it.dir)}}}){
+          if(sa==null)EmptyArt(clk,pal) else{if(sb!=null)SlideImg(sb,clk,false);SlideImg(sa,clk,true)}
+          FeatFx(clk)
+          if(sa!=null&&Cur.mm["fCap"]==1f)Box(Modifier.align(Alignment.BottomStart).padding(14.dp).clip(RoundedCornerShape(50)).background(Color.Black.copy(.4f)).padding(horizontal=12.dp,vertical=5.dp)){MT("FEATURED  ·  "+sa.lbl+"  ·  tap to open",Color.White,11)}}}
+          @Composable fun MainMenu(){
+          val dn=LocalDensity.current;val st=remember{CharSt()};val clk=remember{mutableFloatStateOf(0f)}
+          val night=(Cur.mm["mmTheme"]?:0f)>.5f
+          val bg=if(night)Color(0xFF111118) else Color(0xFFF2EEE4);val ink=if(night)Color(0xFFECE9F3) else Color(0xFF1D1D22)
+          val pal=Pal(bg,ink,lerp(bg,ink,.2f));val sty=(Cur.mm["outl"]?:1f).toInt()
+          var feat by remember{mutableStateOf<java.io.File?>(null)};var hint by remember{mutableStateOf("")}
+          var tip by remember{mutableIntStateOf(0)};var fact by remember{mutableIntStateOf(0)};var roll by remember{mutableIntStateOf(0)};var clock by remember{mutableStateOf("")}
+          val c24=Cur.mm["c24"]==1f;val sec=Cur.mm["sec"]==1f;val every=Cur.mm["fact"]?:9f
+          LaunchedEffect(Unit){Cur.refreshProjs()}
+          LaunchedEffect(Unit){var last=0L;while(true){withFrameNanos{nn->val dt=if(last==0L)0f else ((nn-last)/1e9f).coerceIn(0f,.05f);last=nn;st.step(dt);clk.floatValue=st.rt}}}
+          LaunchedEffect(c24,sec){while(true){val pt=(if(c24)"HH:mm" else "hh:mm")+(if(sec)":ss" else "")+(if(c24)"" else " a");clock=java.text.SimpleDateFormat("dd MMM yyyy  "+pt,java.util.Locale.getDefault()).format(java.util.Date());delay(1000)}}
+          LaunchedEffect(hint){if(hint.isNotEmpty()){delay(2600);hint=""}}
+          LaunchedEffect(Unit){while(true){delay(6000);tip++}}
+          LaunchedEffect(every){while(true){delay((every*1000f).toLong());fact++}}
+          val cf=Cur.cfact.trim();val facts=if(cf.isNotEmpty()&&Cur.mm["factOnly"]==1f)listOf(cf) else if(cf.isNotEmpty())listOf(cf)+FACTS else FACTS
+          val fx=facts[fact%facts.size];val prompt=promptOf(roll);val ps=Cur.projs
+          Box(Modifier.fillMaxSize().background(bg).pointerInput(Unit){awaitPointerEventScope{while(true){val e=awaitPointerEvent(PointerEventPass.Initial);val c=e.changes.firstOrNull();if(c!=null){st.px=c.position.x;st.py=c.position.y;st.touch()}}}}.pointerInput(Unit){detectTapGestures{}}){
+          Column(Modifier.fillMaxSize().padding(start=12.dp,end=12.dp,top=26.dp,bottom=16.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
+          Box(Modifier.weight(.40f).fillMaxWidth().dbl(ink,30.dp,sty).padding(11.dp)){Featured(clk,pal,{feat=it},{d->Cur.q{Cur.r?.loadProject(d)};Cur.menu=false;Cur.rq()})}
+          Box(Modifier.weight(.032f).fillMaxWidth(.9f).align(Alignment.CenterHorizontally).dbl(ink,10.dp,sty,3.dp),Alignment.Center){MT(clock,ink,13,FontWeight.Normal,ser=true,ls=1f)}
+          BoxWithConstraints(Modifier.weight(.31f).fillMaxWidth().onGloballyPositioned{val p=it.positionInRoot();st.bx=p.x;st.by=p.y;st.bw=it.size.width.toFloat();st.bh=it.size.height.toFloat()}){
+          val hb=constraints.maxHeight;val show=Cur.mm["chShow"]==1f
+          if(show)Canvas(Modifier.fillMaxSize()){val tk=clk.floatValue;charFace(st,ink,bg)}
+          Box(Modifier.align(Alignment.TopStart).fillMaxWidth(.185f).fillMaxHeight(.64f).background(bg,RoundedCornerShape(22.dp)).dbl(ink,22.dp,sty,4.dp)){
+          Column(Modifier.fillMaxSize().padding(vertical=10.dp),Arrangement.SpaceEvenly,Alignment.CenterHorizontally){
+          val sm=Modifier.fillMaxWidth(.6f).aspectRatio(1f)
+          MenuSlot("eye",pal,false,"Open featured art",{hint=it},sm){feat?.let{d->Cur.q{Cur.r?.loadProject(d)};Cur.menu=false}}
+          MenuSlot("plus",pal,false,"New canvas",{hint=it},sm){Cur.q{Cur.r?.newProject()};Cur.menu=false}
+          MenuSlot("lock",pal,true,"All projects: coming soon",{hint=it},sm){}}}
+          Box(Modifier.align(Alignment.TopEnd).fillMaxWidth(.185f).fillMaxHeight(.64f).background(bg,RoundedCornerShape(22.dp)).dbl(ink,22.dp,sty,4.dp)){
+          Column(Modifier.fillMaxSize().padding(vertical=10.dp),Arrangement.SpaceEvenly,Alignment.CenterHorizontally){
+          val sm=Modifier.fillMaxWidth(.6f).aspectRatio(1f)
+          MenuSlot("export",pal,false,"Export and speedpaint",{hint=it},sm){Cur.menu=false;Cur.tab("exp",true)}
+          MenuSlot("sliders",pal,false,"Customize UI",{hint=it},sm){Cur.menu=false;Cur.edit=true}
+          MenuSlot("drop",pal,false,"Paper / Night theme",{hint=it},sm){Cur.mm["mmTheme"]=if(night)0f else 1f}}}
+          Box(Modifier.align(Alignment.TopCenter).fillMaxWidth(.56f).fillMaxHeight(.5f).background(bg,RoundedCornerShape(26.dp)).dbl(ink,26.dp,sty,5.dp).padding(14.dp)){
+          Column(Modifier.fillMaxSize(),Arrangement.spacedBy(12.dp)){
+          MenuBtn("START",pal,sty,Modifier.weight(1f).fillMaxWidth()){menuStart()}
+          MenuBtn("SETTING",pal,sty,Modifier.weight(1f).fillMaxWidth()){Cur.menu=false;Cur.tab("pt",true)}}}
+          Box(Modifier.align(Alignment.TopCenter).offset{IntOffset(0,(hb*.78f).roundToInt())}.fillMaxWidth(.84f).height(with(dn){(hb*.15f).toDp()}).background(bg,RoundedCornerShape(16.dp)).dbl(ink,16.dp,sty,4.dp).pointerInput(Unit){detectTapGestures{fact++}},Alignment.Center){
+          Crossfade(fx,animationSpec=tween(500),label="f"){t->MT(t,ink,12,FontWeight.Normal,Modifier.padding(horizontal=14.dp))}}
+          if(show)Canvas(Modifier.fillMaxSize()){val tk=clk.floatValue;charHands(st,ink,bg)}
+          Box(Modifier.align(Alignment.TopCenter).offset{IntOffset(0,(hb*.46f).roundToInt())}.fillMaxWidth(.62f).height(with(dn){(hb*.3f).toDp()}).pointerInput(Unit){detectTapGestures{st.poke()}})}
+          Box(Modifier.weight(.034f).fillMaxWidth(.94f).align(Alignment.CenterHorizontally).dbl(ink,10.dp,sty,3.dp),Alignment.Center){
+          MT(if(ps.isEmpty())"No saved art yet  ·  press START to begin" else ps.size.toString()+" saved  ·  last edit "+ago(ps[0].time),ink,12,FontWeight.Normal)}
+          Row(Modifier.weight(.20f).fillMaxWidth(),Arrangement.spacedBy(8.dp)){
+          Box(Modifier.weight(1f).fillMaxHeight().dbl(ink,24.dp,sty,4.dp).padding(10.dp)){
+          Column(Modifier.fillMaxSize()){
+          MT("RECENT",ink,12,FontWeight.Bold,ser=true,ls=3f)
+          Spacer(Modifier.height(4.dp))
+          for(r in 0..1)Row(Modifier.fillMaxWidth().weight(1f).padding(top=if(r==1)6.dp else 0.dp),Arrangement.spacedBy(6.dp)){for(c in 0..1){val i=r*2+c;val tm=Modifier.weight(1f).fillMaxHeight();if(i<ps.size)ProjTile(ps[i],pal,tm) else EmptyTile(pal,tm)}}}}
+          Box(Modifier.weight(1f).fillMaxHeight().dbl(ink,24.dp,sty,4.dp).padding(10.dp)){
+          Column(Modifier.fillMaxSize(),Arrangement.SpaceBetween,Alignment.CenterHorizontally){
+          MT("TODAY'S PROMPT",ink,12,FontWeight.Bold,ser=true,ls=3f)
+          MT(prompt,ink,17,FontWeight.SemiBold,Modifier.padding(horizontal=4.dp))
+          Row(Modifier.fillMaxWidth().height(46.dp),Arrangement.spacedBy(8.dp)){
+          MenuSlot("reset",pal,false,"New prompt",{hint=it},Modifier.fillMaxHeight().aspectRatio(1f)){roll++}
+          MenuBtn("DRAW",pal,sty,Modifier.weight(1f).fillMaxHeight(),sz=17){Cur.q{Cur.r?.newProject()};Cur.menu=false;Cur.msg="Prompt: "+prompt}}}}}
+          Box(Modifier.weight(.026f).fillMaxWidth(),Alignment.Center){MT(if(hint.isNotEmpty())hint else TIPS[tip%TIPS.size],ink.copy(.6f),11,FontWeight.Normal)}}}}
+          @Composable fun MenuSet(){val ih=inkHost()
+          Column(Modifier.heightIn(max=300.dp).verticalScroll(rememberScrollState())){
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Paper",(Cur.mm["mmTheme"]?:0f)<.5f){Cur.mm["mmTheme"]=0f};Chip("Night",(Cur.mm["mmTheme"]?:0f)>.5f){Cur.mm["mmTheme"]=1f}
+          Chip("Solid",Cur.mm["outl"]==0f){Cur.mm["outl"]=0f};Chip("Dotted",Cur.mm["outl"]==1f){Cur.mm["outl"]=1f};Chip("Dashed",Cur.mm["outl"]==2f){Cur.mm["outl"]=2f}}
+          Row(Modifier.horizontalScroll(rememberScrollState())){listOf("fRand" to "Random pick","chShow" to "Character","fCap" to "Caption","c24" to "24h clock","sec" to "Seconds","factOnly" to "Only my fact").forEach{(k,n)->Chip(n,Cur.mm[k]==1f){Cur.mm[k]=if(Cur.mm[k]==1f)0f else 1f}}
+          Chip("Open menu",false){Cur.pt=false;Cur.menu=true}}
+          MMD.forEach{d->SL(d.n,Cur.mm[d.k]!!,d.lo..d.hi,d.d,null,"m."+d.k){Cur.mm[d.k]=it}}
+          T("Custom fun fact",12,Modifier.padding(6.dp))
+          BasicTextField(Cur.cfact,{Cur.cfact=it;Cur.app?.getSharedPreferences("liquid",0)?.edit()?.putString("cfact",it)?.apply();Cur.rq()},textStyle=TextStyle(color=ih.c,fontSize=14.sp),cursorBrush=SolidColor(ih.c),modifier=Modifier.fillMaxWidth().padding(6.dp).clip(RoundedCornerShape(12.dp)).background(ih.c.copy(.1f)).padding(10.dp))}}
+          val STK=listOf("stab","stRope","stPull","stRT","stSpd","taper")
+          fun layT(k:String){Cur.lay[k]=if(Cur.lay[k]==1f)0f else 1f;Cur.rq()}
+          fun holdB(b:Int)=((Cur.inp["editHold"]?:3f).toInt() and b)!=0
+          fun holdT(b:Int){Cur.inp["editHold"]=((Cur.inp["editHold"]?:3f).toInt() xor b).toFloat();Cur.rq()}
+          fun holdOk(id:String)=(id=="menu"&&holdB(1))||(id=="orb"&&holdB(2))
+          fun snapP(id:String){if(Cur.lay["snap"]!=1f)return;val n=Cur.lay["gridN"]!!.roundToInt().coerceAtLeast(2);val w=max(1,Cur.sw).toFloat();val h=max(1,Cur.sh).toFloat();val g=w/n
+          val x=Cur.pos[id+".x"]?:DEFP[id]!!.first;val y=Cur.pos[id+".y"]?:DEFP[id]!!.second
+          Cur.pos[id+".x"]=(((x*w/g).roundToInt()*g)/w).coerceIn(.03f,.97f);Cur.pos[id+".y"]=(((y*h/g).roundToInt()*g)/h).coerceIn(.02f,.97f);Cur.rq()}
+          @Composable fun StabModes(){val m=(Cur.b["stMode"]?:0f).toInt()
+          Row(Modifier.horizontalScroll(rememberScrollState())){listOf("Smooth","Rope","Average","Rope+Smooth").forEachIndexed{i,n->Chip(n,m==i){Cur.b["stMode"]=i.toFloat()}}
+          Chip("Catch up on lift",Cur.b["stEnd"]==1f){Cur.b["stEnd"]=if(Cur.b["stEnd"]==1f)0f else 1f}}}
+          @Composable fun Ruler(){val s=Cur.es
+          Canvas(Modifier.fillMaxSize()){val n=Cur.lay["gridN"]!!.roundToInt().coerceAtLeast(2);val g=size.width/n;val w=size.width;val h=size.height
+          var i=0;while(i<=n){val x=i*g;drawLine(Color.White.copy(if(i%5==0).4f else .16f),Offset(x,0f),Offset(x,h),1f);drawLine(Color.White.copy(.85f),Offset(x,0f),Offset(x,if(i%5==0)30f else 14f),2f);i++}
+          var j=0;while(j*g<=h){val y=j*g;drawLine(Color.White.copy(if(j%5==0).4f else .16f),Offset(0f,y),Offset(w,y),1f);drawLine(Color.White.copy(.85f),Offset(0f,y),Offset(if(j%5==0)30f else 14f,y),2f);j++}
+          drawLine(Color.Cyan.copy(.55f),Offset(w/2,0f),Offset(w/2,h),2f);drawLine(Color.Cyan.copy(.55f),Offset(0f,h/2),Offset(w,h/2),2f)
+          if(s.isNotEmpty()&&DEFP.containsKey(s)){val px=(Cur.pos[s+".x"]?:DEFP[s]!!.first)*w;val py=(Cur.pos[s+".y"]?:DEFP[s]!!.second)*h
+          drawLine(Color.Yellow.copy(.8f),Offset(px,0f),Offset(px,h),2f);drawLine(Color.Yellow.copy(.8f),Offset(0f,py),Offset(w,py),2f)}}}
+          @Composable fun EditBar(){val s=Cur.es
+          Column(Modifier.padding(12.dp).width(300.dp),horizontalAlignment=Alignment.CenterHorizontally){
+          T(if(s.isEmpty())"Tap an icon to select it, drag to move" else "Selected: "+s,13)
+          SL("All icons",Cur.lay["icoSc"]!!,0.5f..2f,1f,1f,"l.icoSc",false){Cur.lay["icoSc"]=it}
+          if(s.isNotEmpty())SL("This icon",Cur.pos[s+".s"]?:(DSC[s]?:1f),0.5f..2.5f,1f,1f,"l.one",false){Cur.pos[s+".s"]=it}
+          SL("Panels",Cur.lay["panSc"]!!,0.6f..1.4f,1f,1f,"l.panSc",false){Cur.lay["panSc"]=it}
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Ruler",Cur.lay["ruler"]==1f){layT("ruler")};Chip("Snap",Cur.lay["snap"]==1f){layT("snap")}
+          Chip("Reset icon",false){if(s.isNotEmpty()){Cur.pos.remove(s+".x");Cur.pos.remove(s+".y");Cur.pos.remove(s+".s")}};Chip("Reset all",false){Cur.pos.clear();Cur.lay["icoSc"]=1f;Cur.lay["panSc"]=1f}
+          Chip("Done",false){Cur.edit=false}}}}
+          @Composable fun SliderEd(){
+          val c=Cur.se?:return
+          var tg by remember(c){mutableIntStateOf(0)};var buf by remember(c){mutableStateOf("")}
+          val lo=Cur.sl[c.id+".mn"]?:c.lo;val hi=Cur.sl[c.id+".mx"]?:c.hi
+          fun put(){val x=buf.toFloatOrNull()?:return
+          if(tg==0){if(x>hi)Cur.sl[c.id+".mx"]=x;if(x<lo)Cur.sl[c.id+".mn"]=x;c.f(x)}
+          else if(tg==1)Cur.sl[c.id+".mn"]=min(x,hi-.01f)
+          else Cur.sl[c.id+".mx"]=max(x,lo+.01f)
+          buf="";Cur.rq()}
+          Column(Modifier.padding(14.dp).width(270.dp)){
+          Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){T(c.n,15,Modifier.weight(1f));MiniB("x",0f){Cur.se=null}}
+          T("Value %.3f   range %.2f .. %.2f".format(c.gv(),lo,hi),12)
+          Row(Modifier.horizontalScroll(rememberScrollState())){listOf("Value","Min","Max").forEachIndexed{i,n->Chip(n,tg==i){tg=i}}}
+          T(if(buf.isEmpty())"type a number" else buf,18,Modifier.padding(6.dp))
+          listOf("123","456","789",".0-").forEach{row->Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceEvenly){row.forEach{ch->Chip(ch.toString(),false){if(ch=='-'){buf=if(buf.startsWith("-"))buf.drop(1) else "-"+buf}else{buf=buf+ch}}}}}
+          Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceEvenly){Chip("Del",false){buf=buf.dropLast(1)};Chip("Set",false){put()};Chip("Default",false){c.def?.let{c.f(it)}}}
+          SL("Sensitivity",Cur.sl[c.id+".se"]?:1f,0.1f..4f,1f,1f,"e.se",false){Cur.sl[c.id+".se"]=it}
+          SL("Curve",Cur.sl[c.id+".pw"]?:c.pw,0.3f..4f,c.pw,1f,"e.pw",false){Cur.sl[c.id+".pw"]=it}
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Max x2",false){Cur.sl[c.id+".mx"]=hi*2f};Chip("Max /2",false){Cur.sl[c.id+".mx"]=max(hi/2f,lo+.01f)}
+          Chip("Reset scale",false){listOf(".mn",".mx",".pw",".se").forEach{Cur.sl.remove(c.id+it)}}}}}
+          @Composable fun IB(id:String,k:String,on:Boolean=false,en:Boolean=true,ct:Color?=null,f:()->Unit){
+          val i=IDS.indexOf(id);val dn=LocalDensity.current;val isc=(Cur.lay["icoSc"]?:1f)*(Cur.pos[id+".s"]?:DSC[id]?:1f);val px=with(dn){(40f*isc).dp.toPx()};val h=LocalHapticFeedback.current;val ih=inkHost()
+          val fx=Cur.pos[id+".x"]?:DEFP[id]!!.first;val fy=Cur.pos[id+".y"]?:DEFP[id]!!.second;val docked=dockOf(fx,fy)>=0&&!Cur.focus
+          val oa by animateFloatAsState(if(on)1f else 0f,spring(.55f,260f),label="o")
+          var pr by remember{mutableStateOf(false)}
+          val sq by animateFloatAsState(if(pr).82f else 1f,spring(.3f,420f),label="p")
+          Glass(100+i,(!Cur.focus||id=="orb")&&Cur.boot>i&&!Cur.menu,Modifier.offset{IntOffset((fx*Cur.sw-px/2).roundToInt(),(fy*Cur.sh-px/2).roundToInt())}.size((40f*isc).dp)
+          .graphicsLayer{rotationZ=if(Cur.edit)sin(Cur.ph*18f+i)*3f else 0f}
+          .pointerInput(Cur.edit){if(Cur.edit)detectDragGestures(onDragStart={Cur.es=id;Cur.rq()},onDragEnd={snapP(id)},onDrag={c,d->c.consume();val sw=max(1,Cur.sw).toFloat();val sh=max(1,Cur.sh).toFloat()
+          Cur.pos[id+".x"]=(((Cur.pos[id+".x"]?:DEFP[id]!!.first)*sw+d.x)/sw).coerceIn(.03f,.97f);Cur.pos[id+".y"]=(((Cur.pos[id+".y"]?:DEFP[id]!!.second)*sh+d.y)/sh).coerceIn(.02f,.97f);Cur.rq()})
+          else detectTapGestures(onPress={pr=true;h.performHapticFeedback(HapticFeedbackType.TextHandleMove);tryAwaitRelease();pr=false},onTap={f();Cur.rq()},onLongPress={if(holdOk(id)){Cur.edit=true;Cur.rq();h.performHapticFeedback(HapticFeedbackType.LongPress)}})}
+          .pointerInput(Cur.edit){if(Cur.edit)detectTapGestures(onTap={Cur.es=id;Cur.rq()})},
+          rad=20f,sq=sq,reg=!docked){Box(Modifier.fillMaxSize().then(ih.m),Alignment.Center){if(id=="menu")Mascot((32f*isc).dp,ih.c) else if(ct!=null)Box(Modifier.size((22f*isc).dp).clip(CircleShape).background(ct).border(2.dp,ih.c.copy(.75f),CircleShape)) else Ico(k,oa,ih.c.copy(alpha=if(en)1f else .35f),(24f*isc).dp)}}}
+          @Composable fun GS(n:String,v:Float,lo0:Float,hi0:Float,def:Float?,pw0:Float,lw:Dp=92.dp,id:String=n,ed:Boolean=true,f:(Float)->Unit){
+          val lo=Cur.sl[id+".mn"]?:lo0;val hi=max(Cur.sl[id+".mx"]?:hi0,lo+1e-3f);val pw=Cur.sl[id+".pw"]?:pw0;val sn=(Cur.sl["sens"]?:1f)*(Cur.sl[id+".se"]?:1f);val fz=Cur.sl["fz"]?:1f
+          val los by rememberUpdatedState(lo);val his by rememberUpdatedState(hi);val pws by rememberUpdatedState(pw);val sns by rememberUpdatedState(sn);val fzs by rememberUpdatedState(fz)
+          val ih=inkHost();val h=LocalHapticFeedback.current;val dn=LocalDensity.current
+          var drag by remember{mutableStateOf(false)};var sens by remember{mutableFloatStateOf(1f)};var tt by remember{mutableFloatStateOf(0f)}
+          val vs by rememberUpdatedState(v);val fs by rememberUpdatedState(f)
+          val cur=((v-lo)/(hi-lo)).coerceIn(0f,1f).pow(1f/pw);val t=if(drag)tt else cur
+          val grow by animateFloatAsState(if(drag)1f else 0f,spring(.5f,500f),label="g")
+          Row(Modifier.fillMaxWidth().height((Cur.sl["hSl"]?:40f).dp),verticalAlignment=Alignment.CenterVertically){
+          T(if(drag&&sens<1f)"fine x"+"%.2f".format(sens) else n,12,Modifier.width(lw))
+          Box(Modifier.weight(1f).fillMaxHeight().then(ih.m)
+          .pointerInput(Unit){detectTapGestures(onDoubleTap={def?.let{fs(it)}})}
+          .pointerInput(Unit){var yo=0f
+          detectDragGestures(onDragStart={yo=0f;tt=((vs-los)/(his-los)).coerceIn(0f,1f).pow(1f/pws);sens=1f;drag=true},onDragEnd={drag=false},onDragCancel={drag=false},
+          onDrag={c,d->c.consume();yo+=d.y;val a=abs(yo)/dn.density/fzs;sens=if(a<28f)1f else if(a<80f).5f else if(a<150f).2f else .07f
+          val nt=(tt+d.x*sens*sns/max(1,size.width)).coerceIn(0f,1f);if((nt*24f).toInt()!=(tt*24f).toInt())h.performHapticFeedback(HapticFeedbackType.TextHandleMove);tt=nt;fs(los+(his-los)*nt.pow(pws))})}){
+          Canvas(Modifier.fillMaxSize()){val w=size.width;val cy=size.height/2;val th=4.dp.toPx();val r=(Cur.sl["thumb"]?:7f).dp.toPx()+3.dp.toPx()*grow
+          drawRoundRect(ih.c.copy(.22f),Offset(0f,cy-th),Size(w,th*2),CornerRadius(th))
+          drawRoundRect(Brush.horizontalGradient(listOf(ih.c.copy(.45f),ih.c)),Offset(0f,cy-th),Size(max(th*2,w*t),th*2),CornerRadius(th))
+          drawCircle(ih.c,r,Offset((w*t).coerceIn(r,w-r),cy))}}
+          T(if(hi-lo>=50f)"%.0f".format(v) else "%.2f".format(v),11,Modifier.width(44.dp).then(if(ed)Modifier.clickable{Cur.se=SlCtx(id,n,lo0,hi0,pw0,def,{vs},fs);Cur.rq()} else Modifier))}}
+          @Composable fun SL(n:String,v:Float,r:ClosedFloatingPointRange<Float>,def:Float?=null,pw:Float?=null,id:String=n,ed:Boolean=true,f:(Float)->Unit){
+          GS(n,v,r.start,r.endInclusive,def,pw?:(if(r.endInclusive>=100f&&r.start<=8f)2.2f else 1f),92.dp,id,ed){f(it);Cur.rq()}}
+          @Composable fun Chip(s:String,on:Boolean,f:()->Unit){val ih=inkHost();Box(Modifier.clip(RoundedCornerShape(50)).background(if(on)ih.c.copy(.2f)else Color.Transparent).clickable{f();Cur.rq()}.then(ih.m).padding(horizontal=10.dp,vertical=5.dp)){T(s,13)}}
+          @Composable fun MiniB(k:String,on:Float,f:()->Unit){val ih=inkHost();val a by animateFloatAsState(on,spring(.6f,300f),label="m");Box(Modifier.size(34.dp).clip(CircleShape).clickable{f();Cur.rq()}.then(ih.m),Alignment.Center){Ico(k,a,ih.c,18.dp)}}
+          @Composable fun PH(t:String,c:Boolean,tg:()->Unit,x:()->Unit){Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){T(t,15,Modifier.weight(1f));MiniB("chev",if(c)0f else 1f,tg);MiniB("x",0f,x)}}
+          @Composable fun BrushPanel(){
+          val gs=when(Cur.tool){2->listOf("Liquify");3->listOf("Lasso");4->listOf("Select");else->listOf("Shape","Flow","Dynamics","Stroke","Texture","Color")}
+          var tab by remember{mutableStateOf("Shape")};val tb=if(tab in gs)tab else gs[0]
+          Column(Modifier.animateContentSize(spring(.85f,380f)).padding(14.dp).fillMaxWidth()){
+          PH(when(Cur.tool){0->"Brush";1->"Eraser";2->"Liquify";3->"Lasso";else->"Select"},Cur.cb,{Cur.cb=!Cur.cb},{Cur.pb=false})
+          if(!Cur.cb){
+          if(gs.size>1)Row(Modifier.horizontalScroll(rememberScrollState())){gs.forEach{Chip(it,it==tb){tab=it}}}
+          if(tb=="Liquify"){Row(Modifier.horizontalScroll(rememberScrollState())){listOf("Push","Twirl R","Twirl L","Bloat","Pucker","Restore","Smooth").forEachIndexed{i,n->Chip(n,Cur.lq==i){Cur.lq=i}}}
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Bake on release",Cur.bk){Cur.bk=!Cur.bk}
+          Chip("Bake layer",false){Cur.q{Cur.layers.getOrNull(Cur.sel)?.let{Cur.r?.bake(it)}}};Chip("Bake all",false){Cur.q{Cur.layers.forEach{Cur.r?.bake(it)}}}}}
+          if(tb=="Lasso"){Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Freehand",Cur.ls==0){Cur.ls=0;Cur.q{Cur.r?.lpts?.clear()}};Chip("Polygon",Cur.ls==1){Cur.ls=1;Cur.q{Cur.r?.lpts?.clear()}}
+          Chip("Fill",Cur.le==0){Cur.le=0;Cur.er=false};Chip("Erase",Cur.le==1){Cur.le=1;Cur.er=true};if(Cur.ls==1)Chip("Close shape",false){Cur.q{Cur.r?.closePoly()}}}}
+          if(tb=="Select"){
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Freehand",Cur.ls==0){Cur.ls=0;Cur.q{Cur.r?.lpts?.clear()}};Chip("Polygon",Cur.ls==1){Cur.ls=1;Cur.q{Cur.r?.lpts?.clear()}}
+          Chip("New",Cur.lm==0){Cur.lm=0};Chip("Add",Cur.lm==1){Cur.lm=1;Cur.er=false};Chip("Subtract",Cur.lm==2){Cur.lm=2;Cur.er=true}}
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Invert",false){Cur.q{Cur.r?.selInvert()}};Chip("Deselect",false){Cur.q{Cur.r?.deselect()}};Chip("Fill",false){Cur.q{Cur.r?.fillSel(false)}};Chip("Clear",false){Cur.q{Cur.r?.fillSel(true)}}
+          if(Cur.ls==1)Chip("Close shape",false){Cur.q{Cur.r?.closePoly()}}}}
+          Column(Modifier.heightIn(max=190.dp).verticalScroll(rememberScrollState())){
+          if(tb=="Stroke")StabModes();if(tb=="Color"){SL("Hue",Cur.hue,0f..360f,220f,1f){Cur.hue=it};SL("Saturation",Cur.sat,0f..1f,.8f){Cur.sat=it};SL("Value",Cur.vl,0f..1f,.9f){Cur.vl=it}
+          Box(Modifier.fillMaxWidth().height(22.dp).background(Color(Cur.col()),RoundedCornerShape(11.dp)))}
+          DEFS.filter{it.g==tb}.forEach{d->SL(d.n,Cur.b[d.k]!!,d.lo..d.hi,d.d,null,"b."+d.k){Cur.b[d.k]=it}}}}}}
+          @Composable fun Layers(){
+          fun mv(d:Int){val i=Cur.sel;val j=i+d;if(j in Cur.layers.indices){Cur.layers.add(j,Cur.layers.removeAt(i));Cur.sel=j}}
+          Column(Modifier.animateContentSize(spring(.85f,380f)).padding(12.dp).width(250.dp)){
+          PH("Layers",Cur.cl,{Cur.cl=!Cur.cl},{Cur.pl=false})
+          if(!Cur.cl){
+          Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){
+          MiniB("plus",0f){Cur.layers.add(Layer("Layer ${Cur.layers.size}"));Cur.sel=Cur.layers.lastIndex}
+          MiniB("minus",0f){if(Cur.layers.size>1){val l=Cur.layers.removeAt(Cur.sel);Cur.r?.trash?.add(l);Cur.q{Cur.r?.forget(l)};Cur.sel=Cur.sel.coerceAtMost(Cur.layers.lastIndex)}}
+          MiniB("up",0f){mv(1)};MiniB("down",0f){mv(-1)}}
+          LazyColumn(Modifier.heightIn(max=190.dp)){items(Cur.layers.indices.reversed().toList()){i->
+          val l=Cur.layers.getOrNull(i)
+          if(l!=null)Row(Modifier.fillMaxWidth().clickable{Cur.sel=i}.background(if(i==Cur.sel)Color.Gray.copy(.28f)else Color.Transparent,RoundedCornerShape(12.dp)).padding(start=8.dp),verticalAlignment=Alignment.CenterVertically){
+          T(l.name,13,Modifier.weight(1f));MiniB("liquify",if(l.liq)1f else 0f){l.liq=!l.liq};MiniB("lock",if(l.lock)1f else 0f){l.lock=!l.lock};MiniB("eye",if(l.vis)0f else 1f){l.vis=!l.vis}}}}
+          Cur.layers.getOrNull(Cur.sel)?.let{l->SL("Opacity",l.op,0f..1f,1f){l.op=it};Chip("Blend: "+BLENDS[l.mode].first,true){Cur.tab("pm")}}}}}
+          val FPRE=linkedMapOf("Dreamy" to mapOf("bloom" to 1.1f,"bThr" to .5f,"bRad" to 28f,"fsat" to 1.15f,"vig" to .2f),"Cinematic" to mapOf("gamma" to .92f,"gain" to 1.06f,"fsat" to .88f,"vig" to .5f,"fgrain" to .22f,"chroma" to 2f),
+          "Glitch" to mapOf("chroma" to 14f,"fgrain" to .3f,"sharp" to 1f),"Crisp" to mapOf("sharp" to 1.3f,"gain" to 1.04f,"fsat" to 1.15f),"Soft" to mapOf("blur" to 5f,"bloom" to .6f,"bRad" to 20f))
+          @Composable fun FilterPanel(){
+          Column(Modifier.animateContentSize(spring(.85f,380f)).padding(14.dp).fillMaxWidth()){
+          PH("Filters  ·  live preview",Cur.cf,{Cur.cf=!Cur.cf},{Cur.pf=false})
+          if(!Cur.cf){
+          Row(Modifier.horizontalScroll(rememberScrollState())){FPRE.keys.forEach{n->Chip(n,false){FX.forEach{Cur.fx[it.k]=it.d};FPRE[n]!!.forEach{(k,v)->Cur.fx[k]=v}}}}
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Apply to layer",false){Cur.q{Cur.r?.fxApply()}};Chip("Reset",false){FX.forEach{Cur.fx[it.k]=it.d}};Chip("Before / after",Cur.fx["off"]==1f){Cur.fx["off"]=if(Cur.fx["off"]==1f)0f else 1f}}
+          Column(Modifier.heightIn(max=220.dp).verticalScroll(rememberScrollState())){FX.forEach{d->SL(d.n,Cur.fx[d.k]!!,d.lo..d.hi,d.d,null,"f."+d.k){Cur.fx[d.k]=it}}}}}}
+          @Composable fun ThemePanel(){
+          val ctx=LocalContext.current;var tab by remember{mutableStateOf("Glass")}
+          fun tog(k:String){Cur.inp[k]=if(Cur.inp[k]==1f)0f else 1f}
+          Column(Modifier.animateContentSize(spring(.85f,380f)).padding(14.dp).width(420.dp)){
+          PH("Settings",Cur.ct,{Cur.ct=!Cur.ct},{Cur.pt=false})
+          if(!Cur.ct){
+          Row(Modifier.horizontalScroll(rememberScrollState())){listOf("Glass","Canvas","Input","Stab","Layout","Sliders","Menu").forEach{Chip(it,it==tab){tab=it}}}
+          if(tab=="Glass"){
+          Row(Modifier.horizontalScroll(rememberScrollState())){PRESETS.keys.forEach{n->Chip(n,false){PRESETS[n]!!.forEachIndexed{i,v->Cur.th[THEME[i].k]=v}}}}
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Move icons",Cur.edit){Cur.edit=!Cur.edit;Cur.pt=false};Chip("Reset layout",false){Cur.pos.clear()}
+          Chip("Paste design",false){val t=(ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip?.getItemAt(0)?.text?.toString()
+          t?.split(";")?.forEach{val p=it.split("=");val v=if(p.size==2)p[1].toFloatOrNull() else null;if(v!=null){if(p[0].contains("."))Cur.pos[p[0]]=v else if(Cur.th.containsKey(p[0]))Cur.th[p[0]]=v}}}}
+          Column(Modifier.heightIn(max=260.dp).verticalScroll(rememberScrollState())){THEME.forEach{d->SL(d.n,Cur.th[d.k]!!,d.lo..d.hi,d.d,null,"t."+d.k){Cur.th[d.k]=it}}}}
+          if(tab=="Canvas"){
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Size / opacity HUD",Cur.hud){Cur.hud=!Cur.hud}}
+          Column(Modifier.heightIn(max=260.dp).verticalScroll(rememberScrollState())){CVS.forEach{d->SL(d.n,Cur.cv[d.k]!!,d.lo..d.hi,d.d,if(d.k=="pH")1f else null,"c."+d.k){Cur.cv[d.k]=it}}}}
+          if(tab=="Menu")MenuSet()
+          if(tab=="Stab"){StabModes()
+          Column(Modifier.heightIn(max=260.dp).verticalScroll(rememberScrollState())){STK.forEach{k->val d=DEFS.first{it.k==k};SL(d.n,Cur.b[k]!!,d.lo..d.hi,d.d,null,"b."+k){Cur.b[k]=it}}}}
+          if(tab=="Layout"){
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Customize mode",Cur.edit){Cur.edit=!Cur.edit;Cur.pt=false};Chip("Reset layout",false){Cur.pos.clear()};Chip("Ruler",Cur.lay["ruler"]==1f){layT("ruler")};Chip("Snap",Cur.lay["snap"]==1f){layT("snap")}}
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Glass docks",Cur.lay["docks"]==1f){layT("docks")};Chip("Hold menu btn",holdB(1)){holdT(1)};Chip("Hold orb btn",holdB(2)){holdT(2)};Chip("Close tab behind",Cur.lay["excl"]==1f){layT("excl")};Chip("Tap outside closes",Cur.lay["outClose"]==1f){layT("outClose")}}
+          Column(Modifier.heightIn(max=220.dp).verticalScroll(rememberScrollState())){UID.forEach{d->SL(d.n,Cur.lay[d.k]!!,d.lo..d.hi,d.d,null,"l."+d.k){Cur.lay[d.k]=it}}}}
+          if(tab=="Sliders"){
+          Column(Modifier.heightIn(max=260.dp).verticalScroll(rememberScrollState())){
+          SL("Drag sensitivity",Cur.sl["sens"]!!,0.2f..3f,1f,1f,"s.sens",false){Cur.sl["sens"]=it}
+          SL("Fine-zone distance",Cur.sl["fz"]!!,0.3f..3f,1f,1f,"s.fz",false){Cur.sl["fz"]=it}
+          SL("Slider height",Cur.sl["hSl"]!!,28f..64f,40f,1f,"s.hSl",false){Cur.sl["hSl"]=it}
+          SL("Thumb size",Cur.sl["thumb"]!!,4f..14f,7f,1f,"s.th",false){Cur.sl["thumb"]=it}
+          SL("Brush size max",Cur.sl["b.size.mx"]?:400f,50f..2000f,400f,2.2f,"s.bmx",false){Cur.sl["b.size.mx"]=it}
+          SL("Brush size sensitivity",Cur.sl["b.size.se"]?:1f,0.1f..4f,1f,1f,"s.bse",false){Cur.sl["b.size.se"]=it}
+          SL("Brush size curve",Cur.sl["b.size.pw"]?:2.2f,0.3f..4f,2.2f,1f,"s.bpw",false){Cur.sl["b.size.pw"]=it}
+          T("Tap a slider number to edit its value, range, curve and sensitivity",12,Modifier.padding(6.dp))
+          Chip("Reset all slider scales",false){Cur.sl.keys.toList().filter{it.contains(".")}.forEach{Cur.sl.remove(it)}}}}
+          if(tab=="Input"){
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Two-finger tap = undo",Cur.inp["tapUndo"]==1f){tog("tapUndo")};Chip("Three-finger tap = redo",Cur.inp["redo3"]==1f){tog("redo3")};Chip("Finger draws",Cur.inp["fingerDraw"]==1f){tog("fingerDraw")}}
+          Row(Modifier.horizontalScroll(rememberScrollState())){T("Splash",13,Modifier.padding(8.dp));listOf("Off","Short","Full").forEachIndexed{i,n->Chip(n,Cur.inp["splash"]==i.toFloat()){Cur.inp["splash"]=i.toFloat()}}}
+          Column(Modifier.heightIn(max=260.dp).verticalScroll(rememberScrollState())){INPD.forEach{d->SL(d.n,Cur.inp[d.k]!!,d.lo..d.hi,d.d,null,"i."+d.k){Cur.inp[d.k]=it}}}}}}}
+          @Composable fun Hud(){
+          val lq=Cur.tool==2;val ks=if(lq)"lqR" else "size";val ko=if(lq)"lqK" else "opacity";val dS=DEFS.first{it.k==ks};val dO=DEFS.first{it.k==ko}
+          Column(Modifier.padding(horizontal=16.dp,vertical=4.dp).fillMaxWidth()){
+          GS(if(lq)"Radius" else "Size",Cur.b[ks]!!,dS.lo,dS.hi,dS.d,2.2f,64.dp,"b."+ks){Cur.b[ks]=it;Cur.rq()}
+          GS(if(lq)"Strength" else "Opacity",Cur.b[ko]!!,dO.lo,dO.hi,dO.d,1f,64.dp,"b."+ko){Cur.b[ko]=it;Cur.rq()}}}
+          @Composable fun ColorFloat(){
+          Column(Modifier.padding(14.dp).width(250.dp)){
+          Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){T("Color",15,Modifier.weight(1f));T("#%06X".format(Cur.col() and 0xFFFFFF),12);MiniB("x",0f){Cur.pc=false}}
+          Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(14.dp))
+          .pointerInput(Unit){fun set(p:Offset){Cur.sat=(p.x/size.width).coerceIn(0f,1f);Cur.vl=(1f-p.y/size.height).coerceIn(0f,1f);Cur.rq()}
+          detectDragGestures(onDragStart={set(it)},onDragEnd={Cur.pushRecent()},onDrag={c,_->c.consume();set(c.position)})}
+          .pointerInput(Unit){detectTapGestures{Cur.sat=(it.x/size.width).coerceIn(0f,1f);Cur.vl=(1f-it.y/size.height).coerceIn(0f,1f);Cur.pushRecent();Cur.rq()}}){
+          Canvas(Modifier.fillMaxSize()){drawRect(Brush.horizontalGradient(listOf(Color.White,Color.hsv(Cur.hue.coerceIn(0f,359.9f),1f,1f))));drawRect(Brush.verticalGradient(listOf(Color.Transparent,Color.Black)))
+          val c=Offset(Cur.sat*size.width,(1f-Cur.vl)*size.height);drawCircle(Color.White,10.dp.toPx(),c,style=Stroke(3f));drawCircle(Color(Cur.col()),7.dp.toPx(),c)}}
+          Spacer(Modifier.height(10.dp))
+          Box(Modifier.fillMaxWidth().height(28.dp).clip(RoundedCornerShape(14.dp))
+          .pointerInput(Unit){detectDragGestures(onDragStart={Cur.hue=(it.x/size.width*360f).coerceIn(0f,359.9f);Cur.rq()},onDragEnd={Cur.pushRecent()},onDrag={c,_->c.consume();Cur.hue=(c.position.x/size.width*360f).coerceIn(0f,359.9f);Cur.rq()})}
+          .pointerInput(Unit){detectTapGestures{Cur.hue=(it.x/size.width*360f).coerceIn(0f,359.9f);Cur.pushRecent();Cur.rq()}}){
+          Canvas(Modifier.fillMaxSize()){drawRect(Brush.horizontalGradient((0..6).map{Color.hsv(minOf(it*60f,359.9f),1f,1f)}));drawCircle(Color.White,11.dp.toPx(),Offset(Cur.hue/360f*size.width,size.height/2),style=Stroke(3f))}}
+          Spacer(Modifier.height(8.dp))
+          Row(Modifier.horizontalScroll(rememberScrollState())){Cur.recent.toList().forEach{c->Box(Modifier.padding(3.dp).size(28.dp).clip(CircleShape).background(Color(c)).border(1.dp,Color.White.copy(.5f),CircleShape).clickable{val h=FloatArray(3);android.graphics.Color.colorToHSV(c,h);Cur.hue=h[0];Cur.sat=h[1];Cur.vl=h[2];Cur.rq()}){}}}}}
+          @Composable fun MBtn(s:String,f:()->Unit){val ih=inkHost();Box(Modifier.fillMaxWidth().padding(vertical=3.dp).clip(RoundedCornerShape(16.dp)).background(ih.c.copy(.13f)).clickable{f();Cur.rq()}.then(ih.m).padding(vertical=12.dp),Alignment.Center){T(s,15)}}
+          @Composable fun ProjCard(p:ProjInfo){
+          val bmp=remember(p.time){BitmapFactory.decodeFile(java.io.File(p.dir,"thumb.jpg").path)?.asImageBitmap()}
+          Box(Modifier.padding(4.dp).size(96.dp).clip(RoundedCornerShape(14.dp)).background(Color.Gray.copy(.3f)).clickable{Cur.q{Cur.r?.loadProject(p.dir)};Cur.menu=false}){
+          if(bmp!=null)Image(bmp,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)
+          Box(Modifier.align(Alignment.TopEnd)){MiniB("x",0f){if(Cur.proj==p.dir)Cur.proj=null;p.dir.deleteRecursively();Cur.refreshProjs()}}}}
+          @Composable fun Menu(){
+          LaunchedEffect(Cur.menu){if(Cur.menu)Cur.refreshProjs()}
+          Column(Modifier.padding(20.dp).width(310.dp),horizontalAlignment=Alignment.CenterHorizontally){
+          T("LiquidArt",26);Spacer(Modifier.height(10.dp))
+          MBtn("Continue"){if(Cur.proj==null&&Cur.projs.isNotEmpty()){val d=Cur.projs[0].dir;Cur.q{Cur.r?.loadProject(d)}};Cur.menu=false}
+          MBtn("New canvas"){Cur.q{Cur.r?.newProject()};Cur.menu=false}
+          MBtn("Export and speedpaint"){Cur.menu=false;Cur.tab("exp",true)}
+          MBtn("Settings"){Cur.menu=false;Cur.tab("pt",true)}
+          if(Cur.projs.isNotEmpty()){Spacer(Modifier.height(8.dp));T("Recent projects",12);LazyRow(Modifier.fillMaxWidth().height(110.dp)){items(Cur.projs.toList()){p->ProjCard(p)}}}}}
+          @Composable fun ExportPanel(){
+          val fmt=Cur.exo["fmt"]!!;val sec=Cur.exo["sec"]!!
+          Column(Modifier.padding(16.dp).width(310.dp)){
+          Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){T("Export",16,Modifier.weight(1f));MiniB("x",0f){Cur.exp=false}}
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("PNG",fmt==0f){Cur.exo["fmt"]=0f};Chip("JPG",fmt==1f){Cur.exo["fmt"]=1f};if(fmt==0f)Chip("Paper color",Cur.exo["bg"]==1f){Cur.exo["bg"]=if(Cur.exo["bg"]==1f)0f else 1f}}
+          if(fmt==1f)SL("Quality",Cur.exo["q"]!!,50f..100f,92f){Cur.exo["q"]=it}
+          MBtn("Save image to gallery"){val f=Cur.exo["fmt"]!!.toInt();val bg=Cur.exo["bg"]==1f;val q=Cur.exo["q"]!!.toInt();Cur.q{Cur.r?.exportImage(f,bg,q)}}
+          Spacer(Modifier.height(10.dp));T("Speedpaint",14)
+          Row(Modifier.horizontalScroll(rememberScrollState())){Chip("Record while drawing",Cur.rec){Cur.rec=!Cur.rec};listOf(10,20,30,45).forEach{Chip(it.toString()+"s",sec==it.toFloat()){Cur.exo["sec"]=it.toFloat()}}}
+          T(Cur.frames.toString()+" frames captured",12,Modifier.padding(4.dp))
+          MBtn("Render video to gallery"){val d=Cur.proj;val ctx=Cur.app;val s=Cur.exo["sec"]!!.toInt()
+          if(d==null||ctx==null||Cur.frames<2)Cur.msg="Draw a bit first, no frames yet" else if(Cur.busy.isEmpty()){Cur.busy="Rendering video..."
+          Thread{val ok=Speed.export(ctx,d,30,s){i,n->Cur.busy="Rendering video "+i+"/"+n};Cur.busy="";Cur.msg=if(ok)"Saved to Movies/LiquidArt" else "Video failed"}.start()}}
+          MBtn("Clear recording"){val d=Cur.proj;if(d!=null){java.io.File(d,"frames").deleteRecursively();Cur.frames=0;Cur.msg="Recording cleared"}}}}
+          @Composable fun Pill(){var last by remember{mutableStateOf("")};val t=if(Cur.busy.isNotEmpty())Cur.busy else Cur.msg;SideEffect{if(t.isNotEmpty())last=t}
+          Row(Modifier.padding(horizontal=18.dp,vertical=10.dp)){T(if(t.isNotEmpty())t else last,14)}}
+          fun frac(x:Float)=x-floor(x)
+          fun ease(a:Float)=a*a*(3f-2f*a)
+          @Composable fun Splash(){
+          val t=remember{Animatable(0f)};val dur=if(Cur.inp["splash"]==1f)1300 else 2800
+          LaunchedEffect(Unit){coroutineScope{launch{t.animateTo(1f,tween(dur,easing=LinearEasing))};launch{delay((dur*.55f).toLong());for(i in 1..15){Cur.boot=i;delay(55)}}};Cur.boot=99;Cur.splash=false;Cur.menu=true}
+          val x=t.value;val a=ease(min(x/.55f,1f));val b=ease(max(0f,(x-.55f)/.45f));val ta=ease(((a-.45f)/.45f).coerceIn(0f,1f))*(1f-min(1f,b*2.2f))
+          Box(Modifier.fillMaxSize().graphicsLayer{compositingStrategy=CompositingStrategy.Offscreen}.pointerInput(Unit){detectTapGestures{Cur.boot=99;Cur.splash=false;Cur.menu=true}}){
+          Canvas(Modifier.fillMaxSize()){
+          val cx=size.width/2;val cy=size.height*.45f;val diag=hypot(size.width,size.height);val md=size.minDimension
+          drawRect(Brush.verticalGradient(listOf(Color(0xFF07080D),Color(0xFF191331))))
+          for(i in 0 until 26){val th=i*2.39996f+(1f-a)*3.2f*(1f+(i%3)*.3f);val rr=md*(.12f+.62f*frac(i*.618f))*(1f-a);val px=cx+cos(th)*rr;val py=cy+sin(th)*rr*1.3f;val rad=md*(.05f+.05f*frac(i*.37f))*(1f+a*.6f)
+          drawCircle(Brush.radialGradient(listOf(Color.hsv((200f+i*9f)%360f,.65f,1f).copy(alpha=.85f),Color.Transparent),center=Offset(px,py),radius=rad),rad,Offset(px,py),blendMode=BlendMode.Plus)}
+          val core=md*.22f*(a+.2f);drawCircle(Brush.radialGradient(listOf(Color.White.copy(.9f*a),Color.Transparent),center=Offset(cx,cy),radius=core),core,Offset(cx,cy),blendMode=BlendMode.Plus)
+          if(b>0f){val rr=diag*b*b*1.15f;drawCircle(Color.White.copy(.45f*(1f-b)),rr,Offset(cx,cy),style=Stroke(3f));drawCircle(Color.Black,rr,Offset(cx,cy),blendMode=BlendMode.Clear)}}
+          Text("LiquidArt",Modifier.align(Alignment.Center).offset(y=(-64).dp),color=Color.White.copy(alpha=ta),fontSize=34.sp,letterSpacing=(10f*(1f-ta)+2f).sp)}}
+          @Composable fun App(){
+          LaunchedEffect(Unit){if(Cur.inp["splash"]==0f){Cur.splash=false;Cur.boot=99;Cur.menu=true}}
+          LaunchedEffect(Cur.msg){if(Cur.msg.isNotEmpty()){delay(2500);Cur.msg=""}}
+          LaunchedEffect(Cur.tool,Cur.edit,Cur.splash){while(Cur.tool>=2||Cur.edit||Cur.splash){withFrameNanos{Cur.ph=((it/1_000_000L)%1_000_000L)/1000f}}}
+          Box(Modifier.fillMaxSize().onSizeChanged{Cur.sw=it.width;Cur.sh=it.height}.pointerInput(Unit){awaitPointerEventScope{while(true){val e=awaitPointerEvent(PointerEventPass.Initial);val c=e.changes.firstOrNull{ch->ch.pressed&&!ch.previousPressed};if(c!=null)Cur.outside(c.position.x,c.position.y)}}}){
+          AndroidView({CanvasView(it)},Modifier.fillMaxSize())
+          val ui=!Cur.focus&&Cur.boot>=8&&!Cur.menu
+          Glass(2,Cur.pl&&ui,Modifier.align(Alignment.CenterEnd).offset{IntOffset((-.11f*Cur.sw).roundToInt(),0)}){Layers()}
+          Glass(3,Cur.pb&&ui,Modifier.align(Alignment.BottomCenter).offset{IntOffset(0,(-.165f*Cur.sh).roundToInt())}.fillMaxWidth(.78f)){BrushPanel()}
+          Glass(9,Cur.pf&&ui,Modifier.align(Alignment.BottomCenter).offset{IntOffset(0,(-.165f*Cur.sh).roundToInt())}.fillMaxWidth(.78f)){FilterPanel()}
+          Glass(5,Cur.pt&&ui,Modifier.align(Alignment.Center)){ThemePanel()}
+          Glass(4,Cur.pm,Modifier.align(Alignment.Center)){LazyColumn(Modifier.padding(14.dp).width(230.dp).height(380.dp)){items(BLENDS.size){i->
+          T(BLENDS[i].first,15,Modifier.fillMaxWidth().clickable{Cur.layers.getOrNull(Cur.sel)?.mode=i;Cur.pm=false;if(Cur.lay["excl"]==1f)Cur.pl=true;Cur.rq()}.padding(9.dp))}}}
+          Glass(6,Cur.hud&&ui&&!Cur.edit,Modifier.align(Alignment.BottomCenter).offset{IntOffset(0,(-(Cur.lay["hudY"]?:.056f)*Cur.sh).roundToInt())}.fillMaxWidth(Cur.lay["hudW"]?:.66f),rad=26f){Hud()}
+          Glass(8,Cur.hs&&ui&&!Cur.edit&&!Cur.pc,Modifier.align(Alignment.TopCenter).offset{IntOffset(0,(.27f*Cur.sh).roundToInt())},rad=24f){
+          Row(Modifier.padding(horizontal=12.dp,vertical=4.dp),verticalAlignment=Alignment.CenterVertically){T("Selection active",13);Chip("Invert",false){Cur.q{Cur.r?.selInvert()}};Chip("Deselect",false){Cur.q{Cur.r?.deselect()}}}}
+          Glass(7,Cur.edit,Modifier.align(Alignment.BottomCenter).padding(bottom=96.dp),rad=26f){
+          EditBar()}
+          Glass(10,Cur.pc&&ui,Modifier.align(Alignment.BottomCenter).offset{IntOffset(0,(-.165f*Cur.sh).roundToInt())},rad=30f){ColorFloat()}
+          Glass(12,Cur.exp&&!Cur.menu,Modifier.align(Alignment.Center),rad=34f){ExportPanel()}
+          Glass(14,Cur.se!=null&&!Cur.menu,Modifier.align(Alignment.Center),rad=30f){SliderEd()}
+          Glass(13,Cur.msg.isNotEmpty()||Cur.busy.isNotEmpty(),Modifier.align(Alignment.BottomCenter).offset{IntOffset(0,(-.165f*Cur.sh).roundToInt())},rad=26f){Pill()}
+          Docks(!Cur.focus&&!Cur.menu&&Cur.boot>=8)
+          if(Cur.edit&&Cur.lay["ruler"]==1f)Ruler()
+          IB("brush","brush",Cur.tool==0){Cur.pickTool(0)};IB("eraser","eraser",Cur.tool==1){Cur.pickTool(1)};IB("liquify","liquify",Cur.tool==2){Cur.pickTool(2)}
+          IB("lasso","lasso",Cur.tool==3){Cur.pickTool(3)};IB("select","select",Cur.tool==4){Cur.pickTool(4)}
+          IB("undo","undo",false,Cur.hu>0){Cur.q{Cur.r?.undo()}};IB("redo","redo",false,Cur.hr>0){Cur.q{Cur.r?.redo()}}
+          IB("fx","fx",Cur.pf){Cur.tab("pf")}
+          IB("layers","layers",Cur.pl){Cur.tab("pl")};IB("brushp","sliders",Cur.pb){Cur.tab("pb")};IB("theme","drop",Cur.pt){Cur.tab("pt")}
+          IB("reset","reset"){Cur.px=0f;Cur.py=0f;Cur.rot=0f;Cur.sc=(Cur.view?.let{min(it.width,it.height)*.9f/Cur.n}?:.4f);Cur.vd=true}
+          IB("orb","orb",Cur.focus){Cur.focus=!Cur.focus;Cur.rq()}
+          IB("menu","menu"){Cur.q{Cur.r?.saveIfDue()};Cur.menu=true};IB("export","export"){Cur.tab("exp")};IB("color","brush",false,true,Color(Cur.col())){Cur.tab("pc")};IB("erase",if(Cur.er)"eraser" else "brush",Cur.er){Cur.er=!Cur.er;Cur.pickTool(if(Cur.tool<=1)(if(Cur.er)1 else 0) else Cur.tool);Cur.rq()}
+          AnimatedVisibility(Cur.menu,enter=fadeIn(tween(350)),exit=fadeOut(tween(220))){MainMenu()}
+          
+          if(Cur.splash)Splash()
+          }}
+          EOF_6
+      - name: Build debug APK
+        run: cd liquidart && gradle assembleDebug --no-daemon --console=plain > /tmp/b.log 2>&1
+      - name: Compile errors
+        if: failure()
+        run: |
+          grep -m20 '^e: ' /tmp/b.log | sed 's#file://[^ ]*/liquid/##' | cut -c1-240 > /tmp/e.txt || true
+          [ -s /tmp/e.txt ] || grep -E -A1 'What went wrong|Execution failed|error:|Could not|Caused by' /tmp/b.log | head -20 | cut -c1-240 > /tmp/e.txt || true
+          cat /tmp/e.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiquidArt-debug-apk
+          path: liquidart/app/build/outputs/apk/debug/*.apk
