@@ -185,7 +185,7 @@ object Tr {
   val cf = LCfg.current; val ck = LClock.current
   val col = if (on) cf.ac else Th.fg; val soft = cf.ac2
   val seed = (n.hashCode() and 7).toFloat()
-  val slow = remember { derivedStateOf { (ck.value * 6f).toInt() / 6f } }
+  val slow = LSlow.current
   Canvas(m.size(sz)) {
     val u = size.width; val t = if (on) ck.value else slow.value; val sw = u * .08f
     val bob = if (cf.fx > 0 && on) sin(t * 2f + seed) * u * .02f else 0f
@@ -243,6 +243,19 @@ object Tr {
         "dual" -> { rr(.2f, .26f, .26f, .48f, .05f); rr(.54f, .26f, .26f, .48f, .05f) }
         "more" -> { dot(.3f, .5f, .05f, col); dot(.5f, .5f, .05f, col); dot(.7f, .5f, .05f, col) }
         "check" -> pl(.28f, .52f, .44f, .68f, .74f, .34f)
+        "heart" -> drawHeart(.5f * u, .5f * u, u * .22f, col)
+        "wand" -> { l(.3f, .75f, .62f, .43f); drawSpark(.7f * u, .3f * u, u * .12f, soft); dot(.3f, .3f, .03f, soft) }
+        "rotr" -> { drawArc(col, -60f, 280f, false, Offset(.26f * u, .28f * u), Size(.48f * u, .48f * u), style = Stroke(sw, cap = StrokeCap.Round)); pl(.66f, .2f, .74f, .32f, .6f, .36f) }
+        "crop" -> { pl(.3f, .2f, .3f, .7f, .8f, .7f); pl(.2f, .3f, .7f, .3f, .7f, .8f) }
+        "sliders" -> { l(.25f, .3f, .75f, .3f); l(.25f, .5f, .75f, .5f); l(.25f, .7f, .75f, .7f); dot(.4f, .3f, .06f, soft); dot(.62f, .5f, .06f, soft); dot(.35f, .7f, .06f, soft) }
+        "brush" -> { l(.28f, .74f, .6f, .42f); l(.6f, .42f, .72f, .3f); dot(.26f, .76f, .07f, soft) }
+        "sticker" -> { o(.5f, .5f, .27f); dot(.42f, .44f, .035f, col); dot(.58f, .44f, .035f, col); drawArc(col, 20f, 140f, false, Offset(.4f * u, .46f * u), Size(.2f * u, .16f * u), style = Stroke(sw, cap = StrokeCap.Round)) }
+        "wall" -> { rr(.26f, .2f, .48f, .6f, .08f); pl(.3f, .66f, .42f, .5f, .52f, .6f, .6f, .52f, .7f, .66f) }
+        "play" -> { HP.reset(); HP.moveTo(.38f * u, .28f * u); HP.lineTo(.7f * u, .5f * u); HP.lineTo(.38f * u, .72f * u); HP.close(); drawPath(HP, col, style = Stroke(sw, join = StrokeJoin.Round)) }
+        "save" -> { rr(.24f, .24f, .52f, .52f, .06f); rr(.34f, .24f, .32f, .16f, .02f); rr(.34f, .52f, .32f, .24f, .02f) }
+        "undo" -> { pl(.4f, .3f, .26f, .44f, .4f, .58f); pl(.26f, .44f, .64f, .44f, .74f, .54f, .74f, .7f) }
+        "plus" -> { l(.5f, .28f, .5f, .72f); l(.28f, .5f, .72f, .5f) }
+        "tab" -> { rr(.2f, .3f, .6f, .44f, .06f); l(.2f, .4f, .5f, .4f) }
         else -> drawSpark(.5f * u, .5f * u, u * .28f, col)
       }
     }

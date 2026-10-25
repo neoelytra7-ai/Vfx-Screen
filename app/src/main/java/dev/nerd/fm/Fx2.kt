@@ -5,6 +5,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Environment
 import android.util.LruCache
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.File
@@ -62,9 +65,48 @@ object Trash {
   fun empty() { root.deleteRecursively() }
 }
 
+object Idx {
+  @Volatile var all: Array<String> = emptyArray()
+  var count by mutableIntStateOf(0)
+  suspend fun build(root: File, hid: Boolean) {
+    val out = ArrayList<String>(); val st = ArrayList<File>(); st.add(root)
+    while (st.isNotEmpty()) {
+      currentCoroutineContext().ensureActive()
+      val d = st.removeAt(st.lastIndex)
+      for (f in d.listFiles() ?: continue) {
+        if (!hid && f.name.startsWith(".")) continue
+        if (f.isDirectory) { out.add("D" + f.path); if (!Fx.sym(f)) st.add(f) } else out.add("F" + f.path)
+      }
+    }
+    all = out.toTypedArray(); count = all.size
+  }
+  fun clear() { all = emptyArray(); count = 0 }
+}
+
 class Cmp(val onlyA: List<String>, val onlyB: List<String>, val diff: List<String>, val same: Int)
 
 object Fx2 {
+  suspend fun searchIdx(rootPath: String, q: Q, max: Int, hit: suspend (E) -> Unit, prog: (Int) -> Unit) {
+    val a = Idx.all; val now = System.currentTimeMillis(); var h = 0; var n = 0
+    val pre = if (rootPath.endsWith("/")) rootPath else "$rootPath/"
+    val baseDepth = pre.count { it == '/' }
+    for (s in a) {
+      n++
+      if ((n and 2047) == 0) { currentCoroutineContext().ensureActive(); prog(n) }
+      if (!s.startsWith(pre, 1)) continue
+      if (q.depth < 64 && s.count { it == '/' } - baseDepth > q.depth) continue
+      val f = File(s.substring(1))
+      if (q.ok(f, s[0] == 'D', now)) { hit(E(f)); h++; if (h >= max) break }
+    }
+    prog(n)
+  }
+  fun recent(root: File, n: Int): List<File> {
+    val dirs = listOf("Download", "DCIM", "Pictures", "Documents", "Movies", "Music", "Telegram", "WhatsApp/Media").map { File(root, it) }.filter { it.isDirectory }
+    val out = ArrayList<File>()
+    for (d in dirs) for (f in d.walkTopDown().maxDepth(3)) if (f.isFile && !f.name.startsWith(".")) out.add(f)
+    return out.sortedByDescending { it.lastModified() }.take(n)
+  }
+
   fun shred(f: File) {
     if (f.isDirectory) { f.listFiles()?.forEach { shred(it) }; f.delete(); return }
     try {

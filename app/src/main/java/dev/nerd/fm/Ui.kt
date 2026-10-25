@@ -18,6 +18,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.geometry.CornerRadius
@@ -52,12 +57,14 @@ import kotlin.random.Random
 
 val LCfg = staticCompositionLocalOf<Cfg> { error("cfg") }
 val LClock = staticCompositionLocalOf<State<Float>> { mutableStateOf(0f) }
+val LSlow = staticCompositionLocalOf<State<Float>> { mutableStateOf(0f) }
 private val Back = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
 private val INK = Color(0xFF3B2A38)
 internal val HP = Path()
 
 @Immutable class Snap(val dir: File, val items: List<E>)
 class Pane(d: File) {
+  val id = java.util.UUID.randomUUID().toString()
   val hist = arrayListOf(d)
   var hi by mutableIntStateOf(0)
   var snap by mutableStateOf(Snap(d, emptyList()))
@@ -259,92 +266,148 @@ class Burst {
 }
 
 // ───────── procedural cute file icons ─────────
+object IcoCache {
+  private val c = android.util.LruCache<String, ImageBitmap>(96)
+  fun get(key: String, px: Int, draw: DrawScope.() -> Unit): ImageBitmap {
+    c.get(key)?.let { return it }
+    val bm = ImageBitmap(px, px)
+    CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, androidx.compose.ui.graphics.Canvas(bm), Size(px.toFloat(), px.toFloat()), draw)
+    c.put(key, bm); return bm
+  }
+}
+
+fun DrawScope.icoDraw(kind: Int, col: Color, dk: Color, face: Boolean, t: Float, o: Float, ph: Float, sel: Boolean, fxOn: Boolean) {
+  val w = size.width; val h = size.height; val wh = Color.White.copy(alpha = .9f)
+  val bob = if (o > .02f && fxOn) sin(ph * 3f + kind) * h * .015f else 0f
+  var fy = h * .64f
+  if (kind == 0) {
+    drawRoundRect(dk, Offset(w * .06f, h * .2f + bob), Size(w * .88f, h * .5f), CornerRadius(w * .14f))
+    drawRoundRect(dk, Offset(w * .06f, h * .14f + bob), Size(w * .4f, h * .2f), CornerRadius(w * .09f))
+    if (o > .05f) drawRoundRect(wh, Offset(w * .2f, h * (.3f - .1f * o) + bob), Size(w * .6f, h * .3f), CornerRadius(w * .06f))
+    rotate(-9f * o, Offset(w * .06f, h * .89f + bob)) { drawRoundRect(col, Offset(w * .06f, h * .34f + bob), Size(w * .88f, h * .55f), CornerRadius(w * .16f)) }
+    fy = h * .64f + bob
+  } else {
+    drawRoundRect(col, Offset(w * .17f, h * .08f + bob), Size(w * .66f, h * .84f), CornerRadius(w * .14f))
+    drawRoundRect(dk, Offset(w * .6f, h * .08f + bob), Size(w * .23f, h * .22f), CornerRadius(w * .08f))
+    val cx = w * .5f; val y = h * .31f + bob
+    when (kind) {
+      1 -> { drawCircle(wh, w * .06f * (1f + .15f * sin(ph * 3f) + .3f * o), Offset(cx + w * .1f, y - h * .04f)); HP.reset(); HP.moveTo(cx - w * .2f, y + h * .1f); HP.lineTo(cx - w * .05f, y - h * .05f); HP.lineTo(cx + w * .1f, y + h * .1f); HP.close(); drawPath(HP, wh) }
+      2 -> { val ps = 1f + .12f * sin(ph * 4f) + .3f * o; HP.reset(); HP.moveTo(cx - w * .07f * ps, y - h * .09f * ps); HP.lineTo(cx + w * .1f * ps, y); HP.lineTo(cx - w * .07f * ps, y + h * .09f * ps); HP.close(); drawPath(HP, wh) }
+      3 -> { val nb = sin(ph * 5f) * h * .02f; drawCircle(wh, w * .05f, Offset(cx - w * .04f, y + h * .07f + nb)); drawLine(wh, Offset(cx + w * .01f, y + h * .07f + nb), Offset(cx + w * .01f, y - h * .1f), w * .025f); drawLine(wh, Offset(cx + w * .01f, y - h * .1f), Offset(cx + w * .1f, y - h * .05f + nb), w * .025f) }
+      4 -> { val zs = if (o > .5f) ((ph * 1.5f) % 1f) * h * .08f else 0f; for (k in 0..2) drawRect(wh, Offset(cx - w * .03f + (k % 2) * w * .06f, y - h * .11f + k * h * .08f + zs), Size(w * .06f, h * .05f)) }
+      5 -> { val wg = sin(ph * 4f) * w * .02f; drawArc(wh, 180f, 180f, true, Offset(cx - w * .12f, y - h * .02f), Size(w * .24f, h * .2f)); drawLine(wh, Offset(cx - w * .08f, y - h * .02f), Offset(cx - w * .12f + wg, y - h * .1f), w * .02f); drawLine(wh, Offset(cx + w * .08f, y - h * .02f), Offset(cx + w * .12f - wg, y - h * .1f), w * .02f) }
+      6 -> { val sp = w * .02f * sin(ph * 3f); drawLine(wh, Offset(cx - w * .04f - sp, y - h * .07f), Offset(cx - w * .11f - sp, y), w * .03f); drawLine(wh, Offset(cx - w * .11f - sp, y), Offset(cx - w * .04f - sp, y + h * .07f), w * .03f); drawLine(wh, Offset(cx + w * .04f + sp, y - h * .07f), Offset(cx + w * .11f + sp, y), w * .03f); drawLine(wh, Offset(cx + w * .11f + sp, y), Offset(cx + w * .04f + sp, y + h * .07f), w * .03f) }
+      7 -> for (k in 0..2) { val ex = if (k == 2) cx + w * (-.05f + .12f * (.5f + .5f * sin(ph * 3f))) else cx + w * (.13f - (k % 2) * .08f); drawLine(wh, Offset(cx - w * .13f, y - h * .08f + k * h * .08f), Offset(ex, y - h * .08f + k * h * .08f), w * .025f) }
+      else -> drawSpark(cx, y, w * .1f * (1f + .2f * sin(ph * 3f)), wh)
+    }
+    fy = h * .68f + bob
+  }
+  if (face) {
+    val cx = w * .5f; val op = if ((t + kind * 1.3f) % 4f > 3.85f) .15f else 1f
+    for (sg in listOf(-1f, 1f)) drawOval(INK, Offset(cx + sg * w * .12f - w * .04f, fy - w * .05f * op), Size(w * .08f, w * .1f * op))
+    if (o > .5f) drawOval(INK, Offset(cx - w * .035f, fy + w * .03f), Size(w * .07f, w * .08f))
+    else drawArc(INK, 20f, 140f, false, Offset(cx - w * .05f, fy + w * .02f), Size(w * .1f, w * .07f), style = Stroke(w * .025f, cap = StrokeCap.Round))
+  }
+  if (sel) drawHeart(w * .88f, h * .14f, w * .09f, Color(0xFFFF6B9A))
+}
+
 @Composable fun Ico(e: E, sz: Dp, sel: Boolean = false, act: Boolean = false, m: Modifier = Modifier) {
   val ck = LClock.current; val cf = LCfg.current; val ctx = LocalContext.current
   val kind = Fx.kind(e)
   val tone = Sk.f("icon.tone", 1f); val idle = Sk.f("icon.idle", 1f); val face = Sk.b("icon.face", true)
   val hue = (cf.hue + floatArrayOf(0f, 12f, -22f, 28f, -38f, 44f, -12f, 20f, 0f)[kind] + 360f) % 360f
-  val slow = remember { derivedStateOf { (ck.value * 6f).toInt() / 6f } }
   val lt = Th.pal.light
   val bs = if (kind == 8) .12f else (if (lt) .55f else .5f) * tone
   val col = Color.hsv(hue, bs.coerceIn(0f, 1f), if (lt) .92f else 1f)
   val dk = Color.hsv(hue, (if (kind == 8) .15f else .6f * tone).coerceIn(0f, 1f), if (lt) .7f else .82f)
   val th = if (Thumbs.ok(e)) produceState<ImageBitmap?>(null, e.f.path) { value = withContext(Dispatchers.IO) { Thumbs.get(ctx.packageManager, e.f, 96)?.asImageBitmap() } }.value else null
-  val wh = Color.White.copy(alpha = .9f)
-  val open by animateFloatAsState(if (act || sel) 1f else 0f, spring(.45f, 380f), label = "ico")
-  Canvas(m.size(sz).graphicsLayer { rotationZ = if (sel && cf.fx > 0) sin(ck.value * 9f) * 6f else 0f; val s = 1f + .12f * open; scaleX = s; scaleY = s }) {
-    val w = size.width; val h = size.height; val o = open; val t = if (o > .02f) ck.value else slow.value
-    if (th != null) {
-      val s = min(th.width, th.height)
+  val px = with(LocalDensity.current) { sz.roundToPx() }.coerceAtLeast(8)
+  val active = act || sel
+  if (th != null) {
+    val sc = if (active) animateFloatAsState(1.12f, spring(.45f, 380f), label = "ico").value else 1f
+    Canvas(m.size(sz).graphicsLayer { scaleX = sc; scaleY = sc }) {
+      val w = size.width; val h = size.height; val s = min(th.width, th.height)
       drawRoundRect(col, Offset.Zero, size, CornerRadius(w * .24f))
       drawImage(th, IntOffset((th.width - s) / 2, (th.height - s) / 2), IntSize(s, s), IntOffset(w.toInt() / 16, w.toInt() / 16), IntSize(w.toInt() * 7 / 8, h.toInt() * 7 / 8))
       if (sel) drawHeart(w * .88f, h * .14f, w * .09f, Color(0xFFFF6B9A))
-      return@Canvas
     }
-    val ph = if (o > .02f) t * idle else 0f
-    val bob = if (o > .02f && cf.fx > 0) sin(ph * 3f + kind) * h * .015f else 0f
-    var fy = h * .64f
-    if (kind == 0) {
-      drawRoundRect(dk, Offset(w * .06f, h * .2f + bob), Size(w * .88f, h * .5f), CornerRadius(w * .14f))
-      drawRoundRect(dk, Offset(w * .06f, h * .14f + bob), Size(w * .4f, h * .2f), CornerRadius(w * .09f))
-      if (o > .05f) drawRoundRect(wh, Offset(w * .2f, h * (.3f - .1f * o) + bob), Size(w * .6f, h * .3f), CornerRadius(w * .06f))
-      rotate(-9f * o, Offset(w * .06f, h * .89f + bob)) { drawRoundRect(col, Offset(w * .06f, h * .34f + bob), Size(w * .88f, h * .55f), CornerRadius(w * .16f)) }
-      fy = h * .64f + bob
-    } else {
-      drawRoundRect(col, Offset(w * .17f, h * .08f + bob), Size(w * .66f, h * .84f), CornerRadius(w * .14f))
-      drawRoundRect(dk, Offset(w * .6f, h * .08f + bob), Size(w * .23f, h * .22f), CornerRadius(w * .08f))
-      val cx = w * .5f; val y = h * .31f + bob
-      when (kind) {
-        1 -> { drawCircle(wh, w * .06f * (1f + .15f * sin(ph * 3f) + .3f * o), Offset(cx + w * .1f, y - h * .04f)); HP.reset(); HP.moveTo(cx - w * .2f, y + h * .1f); HP.lineTo(cx - w * .05f, y - h * .05f); HP.lineTo(cx + w * .1f, y + h * .1f); HP.close(); drawPath(HP, wh) }
-        2 -> { val ps = 1f + .12f * sin(ph * 4f) + .3f * o; HP.reset(); HP.moveTo(cx - w * .07f * ps, y - h * .09f * ps); HP.lineTo(cx + w * .1f * ps, y); HP.lineTo(cx - w * .07f * ps, y + h * .09f * ps); HP.close(); drawPath(HP, wh) }
-        3 -> { val nb = sin(ph * 5f) * h * .02f; drawCircle(wh, w * .05f, Offset(cx - w * .04f, y + h * .07f + nb)); drawLine(wh, Offset(cx + w * .01f, y + h * .07f + nb), Offset(cx + w * .01f, y - h * .1f), w * .025f); drawLine(wh, Offset(cx + w * .01f, y - h * .1f), Offset(cx + w * .1f, y - h * .05f + nb), w * .025f) }
-        4 -> { val zs = if (o > .5f) ((ph * 1.5f) % 1f) * h * .08f else 0f; for (k in 0..2) drawRect(wh, Offset(cx - w * .03f + (k % 2) * w * .06f, y - h * .11f + k * h * .08f + zs), Size(w * .06f, h * .05f)) }
-        5 -> { val wg = sin(ph * 4f) * w * .02f; drawArc(wh, 180f, 180f, true, Offset(cx - w * .12f, y - h * .02f), Size(w * .24f, h * .2f)); drawLine(wh, Offset(cx - w * .08f, y - h * .02f), Offset(cx - w * .12f + wg, y - h * .1f), w * .02f); drawLine(wh, Offset(cx + w * .08f, y - h * .02f), Offset(cx + w * .12f - wg, y - h * .1f), w * .02f) }
-        6 -> { val sp = w * .02f * sin(ph * 3f); drawLine(wh, Offset(cx - w * .04f - sp, y - h * .07f), Offset(cx - w * .11f - sp, y), w * .03f); drawLine(wh, Offset(cx - w * .11f - sp, y), Offset(cx - w * .04f - sp, y + h * .07f), w * .03f); drawLine(wh, Offset(cx + w * .04f + sp, y - h * .07f), Offset(cx + w * .11f + sp, y), w * .03f); drawLine(wh, Offset(cx + w * .11f + sp, y), Offset(cx + w * .04f + sp, y + h * .07f), w * .03f) }
-        7 -> for (k in 0..2) { val ex = if (k == 2) cx + w * (-.05f + .12f * (.5f + .5f * sin(ph * 3f))) else cx + w * (.13f - (k % 2) * .08f); drawLine(wh, Offset(cx - w * .13f, y - h * .08f + k * h * .08f), Offset(ex, y - h * .08f + k * h * .08f), w * .025f) }
-        else -> drawSpark(cx, y, w * .1f * (1f + .2f * sin(ph * 3f)), wh)
-      }
-      fy = h * .68f + bob
+  } else if (active) {
+    val open = animateFloatAsState(1f, spring(.45f, 380f), label = "ico").value
+    Canvas(m.size(sz).graphicsLayer { rotationZ = if (sel && cf.fx > 0) sin(ck.value * 9f) * 6f else 0f; val s = 1f + .12f * open; scaleX = s; scaleY = s }) {
+      val t = ck.value
+      icoDraw(kind, col, dk, face, t, open, t * idle, sel, cf.fx > 0)
     }
-    if (face) {
-      val cx = w * .5f; val op = if ((t + kind * 1.3f) % 4f > 3.85f) .15f else 1f
-      for (sg in listOf(-1f, 1f)) drawOval(INK, Offset(cx + sg * w * .12f - w * .04f, fy - w * .05f * op), Size(w * .08f, w * .1f * op))
-      if (o > .5f) drawOval(INK, Offset(cx - w * .035f, fy + w * .03f), Size(w * .07f, w * .08f))
-      else drawArc(INK, 20f, 140f, false, Offset(cx - w * .05f, fy + w * .02f), Size(w * .1f, w * .07f), style = Stroke(w * .025f, cap = StrokeCap.Round))
-    }
-    if (sel) drawHeart(w * .88f, h * .14f, w * .09f, Color(0xFFFF6B9A))
+  } else {
+    val key = "${col.toArgb()}|${dk.toArgb()}|$kind|$face|$px"
+    val bm = remember(key) { IcoCache.get(key, px) { icoDraw(kind, col, dk, face, 0f, 0f, 0f, false, false) } }
+    Image(bm, null, m.size(sz))
   }
 }
 
 // ───────── rows, grid cells, pane ─────────
-@Composable fun Rw(e: E, i: Int, sel: Boolean, anySel: Boolean, jelly: () -> Float, tap: () -> Unit, lng: () -> Unit, quick: Subs) {
-  val cf = LCfg.current; val ac = cf.ac; val fx = cf.fx
+@Composable fun Rw(e: E, sel: Boolean, tap: () -> Unit, showMenu: Boolean, quick: () -> Subs, closeMenu: () -> Unit) {
+  val cf = LCfg.current; val ac = cf.ac
   val sh = RoundedCornerShape(Sk.f("row.round", 12f).dp)
   val src = remember { MutableInteractionSource() }
-  val pr by src.collectIsPressedAsState()
-  var menu by remember { mutableStateOf(false) }
-  val hp = LocalHapticFeedback.current
+  val prs = src.collectIsPressedAsState()
   val showSub = Sk.b("row.sub", true)
   val sub = remember(e, cf.cSize, cf.cDate, cf.cPerm) { buildList { if (e.dir) add(e.cnt.toString() + " items") else if (cf.cSize) add(Fx.sz(e.sz)); if (cf.cDate) add(Fx.dt(e.mt)); if (cf.cPerm) add(e.pm) }.joinToString(" · ") }
-  val pop by animateFloatAsState(if (sel) 1f else 0f, spring(.5f, 600f), label = "p")
-  val press by animateFloatAsState(if (pr && fx > 0) .97f else 1f, spring(.6f, 700f), label = "pr")
-  val jel = fx == 2 && Sk.b("fx.jelly", false)
   Box {
     Row(Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 1.dp)
-      .graphicsLayer { scaleX = press; scaleY = press; translationX = if (jel) jelly() * (if (i % 2 == 0) .35f else -.35f) else 0f }
+      .graphicsLayer { val s = if (prs.value && cf.fx > 0) .97f else 1f; scaleX = s; scaleY = s }
       .ed("row").clip(sh).background(if (sel) ac.copy(alpha = Sk.f("row.sel", .2f)) else Color.Transparent)
       .then(if (sel) Modifier.border(1.dp, ac.copy(alpha = .55f), sh) else Modifier)
-      .combinedClickable(src, LocalIndication.current, onClick = tap, onLongClick = { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.LongPress); lng(); if (!anySel && quick.isNotEmpty()) menu = true })
+      .clickable(src, LocalIndication.current) { tap() }
       .padding(horizontal = 6.dp, vertical = (cf.pad + Sk.f("row.pad", 0f)).coerceAtLeast(0f).dp),
       verticalAlignment = Alignment.CenterVertically) {
-      Ico(e, Sk.f("row.icon", 30f).dp, sel, pr)
+      Ico(e, Sk.f("row.icon", 30f).dp, sel, prs.value)
       Column(Modifier.weight(1f).padding(start = 8.dp)) {
         T(e.n, if (e.dir) ac else Th.fg, 13f, FontWeight.Medium)
         if (showSub && sub.isNotEmpty()) T(sub, Th.dim, 9f)
       }
-      if (pop > .01f) Canvas(Modifier.size(16.dp).graphicsLayer { scaleX = pop; scaleY = pop }) { drawHeart(size.width / 2, size.height / 2, size.width * .3f, Color(0xFFFF6B9A)) }
+      if (sel) Canvas(Modifier.size(16.dp)) { drawHeart(size.width / 2, size.height / 2, size.width * .3f, Color(0xFFFF6B9A)) }
     }
-    if (menu) SubMenu(quick) { menu = false }
+    if (showMenu) SubMenu(quick()) { closeMenu() }
+  }
+}
+
+@Composable fun FootRow(subs: Subs) {
+  val cf = LCfg.current; val sh = RoundedCornerShape(14.dp)
+  Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    subs.forEach { (n, f) ->
+      Column(Modifier.weight(1f).clip(sh).background(cf.ac.copy(alpha = .08f)).border(1.dp, cf.ac.copy(alpha = .3f), sh).clickable { f() }.padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Gly(n.substringBefore('|', ""), 22.dp); T(n.substringAfter('|'), Th.dim, 9f)
+      }
+    }
+  }
+}
+
+@Composable fun ListBody(p: Pane, s: Snap, tap: (E) -> Unit, quick: (E) -> Subs, foot: () -> Subs) {
+  val ls = rememberLazyListState()
+  var qf by remember { mutableStateOf<String?>(null) }
+  var drag by remember { mutableStateOf(false) }
+  val hp = LocalHapticFeedback.current; val cf = LCfg.current
+  val list = s.items
+  fun idxAt(y: Float): Int = ls.layoutInfo.visibleItemsInfo.firstOrNull { y >= it.offset && y <= it.offset + it.size }?.index ?: -1
+  LazyColumn(Modifier.fillMaxSize().pointerInput(list) {
+    var base = emptySet<String>(); var a = -1; var moved = false; var first = false
+    detectDragGesturesAfterLongPress(
+      onDragStart = { pos ->
+        val i = idxAt(pos.y); moved = false; a = i; drag = true
+        if (i >= 0 && i < list.size) { if (cf.haptic) hp.performHapticFeedback(HapticFeedbackType.LongPress); base = p.sel; first = base.isEmpty(); p.sel = base + list[i].f.path }
+      },
+      onDrag = { ch, _ ->
+        val i = idxAt(ch.position.y)
+        if (i >= 0 && i < list.size && a >= 0 && i != a) { moved = true; qf = null; p.sel = base + list.subList(minOf(a, i), maxOf(a, i) + 1).map { it.f.path } }
+      },
+      onDragEnd = { drag = false; if (!moved && a >= 0 && a < list.size && first) qf = list[a].f.path },
+      onDragCancel = { drag = false })
+  }, state = ls, userScrollEnabled = !drag) {
+    items(count = list.size, key = { list[it].f.path }, contentType = { if (list[it].dir) 0 else 1 }) { i ->
+      val e = list[i]
+      Rw(e, e.f.path in p.sel, { tap(e) }, qf == e.f.path, { quick(e) }) { qf = null }
+    }
+    item(key = "foot") { FootRow(foot()) }
   }
 }
 
@@ -380,7 +443,7 @@ class Burst {
   }
 }
 
-@Composable fun PaneView(p: Pane, on: Boolean, m: Modifier, go: (File) -> Unit, tap: (E) -> Unit, lng: (E) -> Unit, crumb: (File) -> Subs, quick: (E) -> Subs) {
+@Composable fun PaneView(p: Pane, on: Boolean, m: Modifier, go: (File) -> Unit, tap: (E) -> Unit, lng: (E) -> Unit, crumb: (File) -> Subs, quick: (E) -> Subs, foot: () -> Subs) {
   val cf = LCfg.current; val ac = cf.ac; val fx = cf.fx
   val jl = remember { Animatable(0f) }; val sc = rememberCoroutineScope()
   val conn = remember {
@@ -415,16 +478,12 @@ class Burst {
         if (initialState.dir == targetState.dir) EnterTransition.None togetherWith ExitTransition.None
         else Tr.folder(fx, if (targetState.dir.path.length < initialState.dir.path.length) -1 else 1)
       }, label = "nav", contentKey = { it.dir }) { s ->
-        if (s.items.isEmpty()) Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) { Mochi(80.dp, 1); T("nothing here~ zzz", Th.dim) }
+        if (s.items.isEmpty()) Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) { Mochi(80.dp, 1); T("nothing here~ zzz", Th.dim); Spacer(Modifier.height(8.dp)); FootRow(foot()) }
         else if (cf.grid) LazyVerticalGrid(GridCells.Adaptive(78.dp), Modifier.fillMaxSize().nestedScroll(conn)) {
           items(count = s.items.size, key = { s.items[it].f.path }) { i -> val e = s.items[i]; Gc(e, e.f.path in p.sel, { tap(e) }, { lng(e) }) }
+          item(span = { GridItemSpan(maxLineSpan) }) { FootRow(foot()) }
         }
-        else LazyColumn(Modifier.fillMaxSize().nestedScroll(conn)) {
-          items(count = s.items.size, key = { s.items[it].f.path }, contentType = { if (s.items[it].dir) 0 else 1 }) { i ->
-            val e = s.items[i]
-            Rw(e, i, e.f.path in p.sel, p.sel.isNotEmpty(), { jl.value }, { tap(e) }, { lng(e) }, quick(e))
-          }
-        }
+        else ListBody(p, s, tap, quick, foot)
       }
     }
     val st = remember(p.snap) { p.snap.items.size.toString() + " items · " + Fx.sz(p.snap.items.sumOf { it.sz }) }

@@ -31,6 +31,11 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import android.media.MediaScannerConnection
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.text.AnnotatedString
@@ -97,11 +102,10 @@ class MainActivity : ComponentActivity() {
   val ctx = LocalContext.current
   val scope = rememberCoroutineScope()
   val root = remember { Environment.getExternalStorageDirectory() }
-  val pa = remember { Pane(root) }
-  val pb = remember { Pane(root) }
+  val panes = remember { mutableStateListOf<Pane>().also { l -> val sv = cf.tabs.split('\n').filter { it.isNotEmpty() }.map { File(it) }.filter { it.isDirectory }; if (sv.isEmpty()) l.add(Pane(root)) else sv.forEach { l.add(Pane(it)) } } }
   val burst = remember { Burst() }
   val lt = remember { floatArrayOf(300f, 500f) }
-  val pager = rememberPagerState(pageCount = { if (cf.dual) 2 else 1 })
+  val pager = rememberPagerState(pageCount = { panes.size })
   var tab by remember { mutableIntStateOf(0) }
   var sub by remember { mutableStateOf<String?>(null) }
   var vf by remember { mutableStateOf<File?>(null) }
@@ -114,10 +118,10 @@ class MainActivity : ComponentActivity() {
   var clip by remember { mutableStateOf(listOf<File>()) }
   var cut by remember { mutableStateOf(false) }
   var rev by remember { mutableIntStateOf(0) }
-  val dual = cf.dual
-  val act = if (dual) pager.currentPage.coerceIn(0, 1) else 0
-  val P = if (act == 0 || !dual) pa else pb
-  val O = if (P === pa) pb else pa
+  val act = pager.currentPage.coerceIn(0, panes.size - 1)
+  val P = panes[act]
+  var navVis by remember { mutableStateOf(true) }
+  val navConn = remember { object : NestedScrollConnection { override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset { if (cf.navHide) { if (available.y < -14f) navVis = false else if (available.y > 14f) navVis = true }; return Offset.Zero } } }
 
   LaunchedEffect(snack) { if (snack != null) { delay(if (snackAct != null) 5000L else 2400L); snack = null; snackAct = null } }
   fun toast(s: String) { snack = s; snackAct = null }
@@ -127,10 +131,10 @@ class MainActivity : ComponentActivity() {
     p.job?.cancel()
     p.job = scope.launch {
       val l = withContext(Dispatchers.IO) { Fx.list(d, cf.hidden, cf.sort, cf.desc) }
-      p.sel = emptySet(); p.snap = Snap(d, l); boot.loaded++
+      p.sel = emptySet(); p.snap = Snap(d, l); boot.loaded++; cf.tabs = panes.joinToString("\n") { it.dir.path }
     }
   }
-  LaunchedEffect(rev, Ev.t, cf.sort, cf.desc, cf.hidden) { load(pa, pa.dir, false); load(pb, pb.dir, false) }
+  LaunchedEffect(rev, Ev.t, cf.sort, cf.desc, cf.hidden) { panes.toList().forEach { load(it, it.dir, false) } }
 
   fun sf(p: Pane): List<File> = p.snap.items.filter { it.f.path in p.sel }.map { it.f }
   fun bg(msg: String, xp: Int = 0, undo: (() -> Unit)? = null, work: () -> String?) {
@@ -144,8 +148,8 @@ class MainActivity : ComponentActivity() {
     }
   }
   fun uri(f: File): Uri = FileProvider.getUriForFile(ctx, "dev.nerd.fm.fp", f)
-  fun opn(f: File) {
-    try { ctx.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri(f), Fx.mime(f)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)) }
+  fun opn(f: File, mime: String = Fx.mime(f)) {
+    try { ctx.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri(f), mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)) }
     catch (e: Exception) { toast("no app can open this") }
   }
   fun share(fs: List<File>) {
@@ -269,29 +273,38 @@ class MainActivity : ComponentActivity() {
       }
     }
   }
-  fun paste() {
+  fun paste(p: Pane = P) {
     if (clip.isEmpty()) { toast("clipboard empty"); return }
-    val d = P.dir; val c = clip; val mv = cut
+    val d = p.dir; val c = clip; val mv = cut
     bg(if (mv) "moving…" else "copying…", 3) {
       c.forEach { s -> val t = Fx.uniq(File(d, s.name)); if (mv) Fx.mv(s, t) else Fx.cp(s, t) }
       "${c.size} → ${d.name}"
     }
     if (mv) clip = emptyList()
   }
-  fun xfer(mv: Boolean) {
+  fun xferTo(t: Pane, mv: Boolean) {
     val fs = sf(P)
     if (fs.isEmpty()) { toast("select first"); return }
-    val d = O.dir
+    val d = t.dir
     bg(if (mv) "moving…" else "copying…", 3) {
-      fs.forEach { s -> val t = Fx.uniq(File(d, s.name)); if (mv) Fx.mv(s, t) else Fx.cp(s, t) }
+      fs.forEach { s -> val x = Fx.uniq(File(d, s.name)); if (mv) Fx.mv(s, x) else Fx.cp(s, x) }
       "${fs.size} → ${d.name}"
     }
   }
   fun batch() {
     val fs = sf(P)
     if (fs.isEmpty()) { toast("select files in FILES first (long-press)"); return }
-    val fi = mutableStateOf("(.*)"); val re = mutableStateOf("\$1")
-    fun nn(f: File, i: Int): String = Regex(fi.value).replace(f.name, re.value.replace("{n}", (i + 1).toString()))
+    val fi = mutableStateOf("(.*)"); val re = mutableStateOf("\$1"); val tf = mutableIntStateOf(0)
+    fun nn(f: File, i: Int): String {
+      val dt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date(f.lastModified()))
+      val n = Regex(fi.value).replace(f.name, re.value.replace("{n}", (i + 1).toString()).replace("{date}", dt).replace("{ext}", f.extension))
+      return when (tf.intValue) {
+        1 -> n.uppercase(); 2 -> n.lowercase()
+        3 -> n.split(' ').joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercase() } }
+        4 -> n.replace(' ', '_'); 5 -> n.replace(Regex("[^A-Za-z0-9._-]+"), "_")
+        else -> n
+      }
+    }
     dg = Dg("BATCH RENAME ${fs.size}", "APPLY", {
       bg("renaming…", 2) {
         var c = 0
@@ -300,7 +313,11 @@ class MainActivity : ComponentActivity() {
       }
     }) {
       Inp(fi.value, { fi.value = it }, "find (regex)", Modifier.fillMaxWidth())
-      Inp(re.value, { re.value = it }, "replace  \$1 {n}", Modifier.fillMaxWidth())
+      Inp(re.value, { re.value = it }, "replace  \$1 {n} {date} {ext}", Modifier.fillMaxWidth())
+      FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Bt("{n}") { re.value += "{n}" }; Bt("{date}") { re.value += "{date}" }; Bt("{ext}") { re.value += "{ext}" }
+        listOf("as is", "UPPER", "lower", "Title", "a_b", "clean").forEachIndexed { i, s -> Bt(s, tf.intValue == i) { tf.intValue = i } }
+      }
       fs.take(6).forEachIndexed { i, f -> T(f.name + " → " + (runCatching { nn(f, i) }.getOrDefault("?")), Th.dim, 10f, ml = 2) }
     }
   }
@@ -317,6 +334,17 @@ class MainActivity : ComponentActivity() {
       }
     }
   }
+  fun otherPane(): Pane? = if (panes.size > 1) panes[(act + 1) % panes.size] else null
+  fun saveTabs() { cf.tabs = panes.joinToString("\n") { it.dir.path } }
+  fun addTab(d: File) { val np = Pane(d); panes.add(np); load(np, d, false); scope.launch { delay(80); pager.animateScrollToPage(panes.size - 1) } }
+  fun closeTab(i: Int) { if (panes.size > 1) { panes.removeAt(i); saveTabs() } else toast("last tab") }
+  fun closeOthers(i: Int) { val k = panes[i]; panes.clear(); panes.add(k); saveTabs() }
+  fun closeRight(i: Int) { while (panes.size > i + 1) panes.removeAt(panes.lastIndex); saveTabs() }
+  fun dupFiles(fs: List<File>) { if (fs.isEmpty()) { toast("select first"); return }; bg("duplicating…", 2) { fs.forEach { Fx.cp(it, Fx.uniq(File(it.parentFile, it.name))) }; "duplicated ${fs.size}" } }
+  fun scanMedia(fs: List<File>) { val ps = fs.filter { it.isFile }.map { it.path }.toTypedArray(); if (ps.isEmpty()) { toast("select files"); return }; MediaScannerConnection.scanFile(ctx, ps, null, null); toast("scanning ${ps.size} file(s)") }
+  fun newFromClip() { val t = clipb.getText()?.text ?: ""; if (t.isEmpty()) toast("clipboard is empty") else { val d = P.dir; ask("FILE NAME", "clip.txt") { n -> bg("writing…") { File(d, n).writeText(t); null } } } }
+  fun permsDlg(f: File) { dg = Dg("PERMISSIONS · " + f.name, "OK", null) { PermBody(f) } }
+  fun compareDlg(fs: List<File>) { if (fs.size == 2 && fs.all { it.isFile }) dg = Dg("COMPARE FILES", "OK", null) { CmpFiles(fs[0], fs[1]) } else toast("select exactly 2 files") }
   fun fileMenu(e: E) {
     val f = e.f; val k = Ar.kind(f)
     dg = Dg(f.name, "CLOSE", null) {
@@ -331,6 +359,11 @@ class MainActivity : ComponentActivity() {
         if (e.ex in Fx.IMG) Bt("IMAGE") { dg = null; vf = f; sub = "img" }
         if (k.isNotEmpty()) { Bt("EXTRACT") { dg = null; unDlg(f) }; Bt("PEEK") { dg = Dg("PEEK · " + f.name, "OK", null) { PeekBody(f) } } }
         Bt("HASH") { dg = Dg("CHECKSUMS · " + f.name, "OK", null) { HashBody(f) } }
+        Bt("DUPLICATE") { dg = null; dupFiles(listOf(f)) }
+        Bt("OPEN AS", subs = listOf<Pair<String, () -> Unit>>("doc|as text" to { dg = null; opn(f, "text/*") }, "photo|as image" to { dg = null; opn(f, "image/*") },
+          "music|as audio" to { dg = null; opn(f, "audio/*") }, "video|as video" to { dg = null; opn(f, "video/*") }, "tools|as anything" to { dg = null; opn(f, "*/*") })) { dg = null; opn(f) }
+        Bt("PERMS") { permsDlg(f) }
+        Bt("SCAN MEDIA") { dg = null; scanMedia(listOf(f)) }
         Bt("SHARE") { dg = null; share(listOf(f)) }
         Bt("INFO", subs = listOf<Pair<String, () -> Unit>>(
           "copy path" to { clipb.setText(AnnotatedString(f.path)); toast("path copied") },
@@ -341,11 +374,11 @@ class MainActivity : ComponentActivity() {
     }
   }
   fun togg(p: Pane, e: E) { p.sel = if (e.f.path in p.sel) p.sel - e.f.path else p.sel + e.f.path; cheer(3) }
-  fun tapE(p: Pane, e: E) { if (p.sel.isNotEmpty()) togg(p, e) else if (e.dir) load(p, e.f) else fileMenu(e) }
+  fun tapE(p: Pane, e: E) { if (p.sel.isNotEmpty()) togg(p, e) else if (e.dir) load(p, e.f) else if (e.ex in Fx.IMG) { vf = e.f; sub = "img" } else fileMenu(e) }
   fun sb(vararg p: Pair<String, () -> Unit>): Subs = p.toList()
   fun renameFile(f: File) { ask("RENAME", f.name) { n -> bg("renaming…") { if (n.isNotBlank() && !File(f.parentFile, n).exists()) { f.renameTo(File(f.parentFile, n)); null } else "✕ invalid or exists" } } }
-  fun newFolder() { val d = P.dir; ask("NEW FOLDER", "") { n -> bg("mkdir…") { File(d, n).mkdirs(); null } } }
-  fun newFile(def: String) { val d = P.dir; ask("NEW FILE", def) { n -> bg("touch…") { File(d, n).createNewFile(); null } } }
+  fun newFolder(p: Pane = P) { val d = p.dir; ask("NEW FOLDER", "") { n -> bg("mkdir…") { File(d, n).mkdirs(); null } } }
+  fun newFile(p: Pane, def: String) { val d = p.dir; ask("NEW FILE", def) { n -> bg("touch…") { File(d, n).createNewFile(); null } } }
   fun upDir(p: Pane) { val par = p.dir.parentFile; if (par != null) load(p, par) else toast("top of storage") }
   fun trashNow(fs: List<File>) {
     if (fs.isEmpty()) { toast("select first"); return }
@@ -364,7 +397,7 @@ class MainActivity : ComponentActivity() {
   fun crumbSubs(f: File): Subs = sb(
     "copy|copy path" to { clipb.setText(AnnotatedString(f.path)); toast("path copied") },
     (if (f.path in bms()) "star|unbookmark" else "star|bookmark") to { cf.bm = (if (f.path in bms()) bms() - f.path else bms() + f.path).joinToString("\n") },
-    "dual|open in other pane" to { cf.dual = true; load(O, f) },
+    "tab|open in new tab" to { addTab(f) },
     "chart|analyze folder" to { load(P, f); sub = "ana" },
     "folderplus|new folder here" to { ask("NEW FOLDER", "") { n -> bg("mkdir…") { File(f, n).mkdirs(); null } } })
   fun quick(p: Pane, e: E): Subs = sb(
@@ -399,17 +432,24 @@ class MainActivity : ComponentActivity() {
     }
   }
   SideEffect { Hub.act = { a -> doAct(a) } ; Hub.cheer = { n -> cheer(n) }; Hub.toast = { s -> toast(s) } }
+  fun footFor(pn: Pane): Subs = sb("folderplus|folder" to { newFolder(pn) }, "fileplus|file" to { newFile(pn, "") },
+    (if (clip.isNotEmpty()) "paste|paste ${clip.size}" else "all|select all") to { if (clip.isNotEmpty()) paste(pn) else pn.sel = pn.snap.items.map { it.f.path }.toSet() }, "up|up" to { upDir(pn) })
+  fun tabSubs(i: Int): Subs = sb(
+    "tab|duplicate" to { addTab(panes[i].dir) }, "x|close" to { closeTab(i) }, "x|close others" to { closeOthers(i) }, "x|close right" to { closeRight(i) },
+    "copy|send selection here (copy)" to { if (i != act) xferTo(panes[i], false) else toast("pick another tab") },
+    "cut|send selection here (move)" to { if (i != act) xferTo(panes[i], true) else toast("pick another tab") })
+  fun tabTargets(mv: Boolean): Subs = panes.filter { it !== P }.map { pn -> ("tab|→ " + pn.dir.name.ifEmpty { "storage" }) to { xferTo(pn, mv) } }
   val findSubs: Subs = sb("clock|recent here" to { doAct("q:~file age<3d") }, "photo|photos here" to { doAct("q:~type:img") }, "video|videos here" to { doAct("q:~type:vid") },
     "big|big files here" to { doAct("q:~size>50m") }, "doc|docs here" to { doAct("q:~type:doc") }, "box|archives here" to { doAct("q:~type:arc") })
-  val moreSubs: Subs = sb("refresh|reload" to { rev++ }, "eye|hidden files" to { cf.hidden = !cf.hidden }, "dual|dual panes" to { cf.dual = !cf.dual },
+  val moreSubs: Subs = sb("refresh|reload" to { rev++ }, "eye|hidden files" to { cf.hidden = !cf.hidden }, "tab|new tab" to { addTab(P.dir) },
     "star|bookmarks" to { bmDlg() }, "chart|disk map" to { sub = "ana" }, "broom|cleaner" to { sub = "clean" }, "trash|trash" to { sub = "trash" },
-    "edit|root editor" to { Ed.on = true }, "all|select all" to { P.sel = P.snap.items.map { it.f.path }.toSet() })
+    "paste|new from clipboard" to { newFromClip() }, "cmp|compare tabs" to { sub = "cmp" }, "edit|root editor" to { Ed.on = true }, "all|select all" to { P.sel = P.snap.items.map { it.f.path }.toSet() })
   fun sideItems(): List<SItem> {
     val fs = sf(P); val has = fs.isNotEmpty(); val l = ArrayList<SItem>()
+    val cp = sb("copy|copy paths" to { clipb.setText(AnnotatedString(fs.joinToString("\n") { it.path })); toast("paths copied") }, "copy|copy names" to { clipb.setText(AnnotatedString(fs.joinToString("\n") { it.name })); toast("names copied") })
     if (has) {
-      l.add(SItem("copy", "Copy", false, if (dual) sb("dual|copy to other pane" to { xfer(false) }, "copy|copy paths" to { clipb.setText(AnnotatedString(fs.joinToString("\n") { it.path })); toast("paths copied") })
-        else sb("copy|copy paths" to { clipb.setText(AnnotatedString(fs.joinToString("\n") { it.path })); toast("paths copied") })) { clip = fs; cut = false; P.sel = emptySet(); toast("${fs.size} copied") })
-      l.add(SItem("cut", "Cut", false, if (dual) sb("dual|move to other pane" to { xfer(true) }) else emptyList()) { clip = fs; cut = true; P.sel = emptySet(); toast("${fs.size} cut") })
+      l.add(SItem("copy", "Copy", false, tabTargets(false) + cp) { clip = fs; cut = false; P.sel = emptySet(); toast("${fs.size} copied") })
+      l.add(SItem("cut", "Cut", false, tabTargets(true)) { clip = fs; cut = true; P.sel = emptySet(); toast("${fs.size} cut") })
       if (clip.isNotEmpty()) l.add(SItem("paste", "Paste", true, sb("x|clear clipboard" to { clip = emptyList() })) { paste() })
       if (fs.size == 1) l.add(SItem("edit", "Rename", false, sb("edit|batch rename" to { batch() })) { renameFile(fs[0]) })
       else l.add(SItem("edit", "Batch") { batch() })
@@ -418,16 +458,18 @@ class MainActivity : ComponentActivity() {
         "box|tar.gz" to { zipNow(false, 6, false) }, "tools|options…" to { zipDlg() })) { zipNow(true, 6, false) })
       l.add(SItem("share", "Share", false, sb("share|share files" to { share(fs) })) { share(fs) })
       val hf = fs.firstOrNull { it.isFile }
-      l.add(SItem("info", "Info", false, sb("info|checksums" to { if (hf != null) dg = Dg("CHECKSUMS · " + hf.name, "OK", null) { HashBody(hf) } else toast("select a file") })) { infoDlg(fs) })
-      l.add(SItem("more", "More", false, sb("edit|batch rename" to { batch() }, "squish|squish photos" to { squishDlg() },
+      l.add(SItem("info", "Info", false, sb("info|checksums" to { if (hf != null) dg = Dg("CHECKSUMS · " + hf.name, "OK", null) { HashBody(hf) } else toast("select a file") },
+        "tools|permissions" to { if (hf != null) permsDlg(hf) else toast("select a file") })) { infoDlg(fs) })
+      l.add(SItem("more", "More", false, sb("copy|duplicate" to { dupFiles(fs) }, "cmp|compare 2 files" to { compareDlg(fs) }, "edit|batch rename" to { batch() }, "squish|squish photos" to { squishDlg() },
         "box|extract" to { val ar = fs.firstOrNull { Ar.kind(it).isNotEmpty() }; if (ar != null) unDlg(ar) else toast("select an archive") },
-        "all|select all" to { P.sel = P.snap.items.map { it.f.path }.toSet() }), true) {})
+        "refresh|scan media" to { scanMedia(fs) }, "all|select all" to { P.sel = P.snap.items.map { it.f.path }.toSet() }), true) {})
       l.add(SItem("all", "Select", false, selSubs()) { P.sel = P.snap.items.map { it.f.path }.toSet() })
       l.add(SItem("x", "Clear") { P.sel = emptySet() })
     } else {
       val cur = P.dir.path
       l.add(SItem("up", "Up", false, histSubs(P)) { upDir(P) })
-      l.add(SItem("folderplus", "New", false, sb("folderplus|new folder" to { newFolder() }, "fileplus|new file" to { newFile("") }, "fileplus|new .txt" to { newFile("note.txt") })) { newFolder() })
+      l.add(SItem("folderplus", "New", false, sb("folderplus|new folder" to { newFolder() }, "fileplus|new file" to { newFile(P, "") }, "fileplus|new .txt" to { newFile(P, "note.txt") }, "paste|from clipboard" to { newFromClip() })) { newFolder() })
+      l.add(SItem("tab", "Tab", false, sb("plus|new tab here" to { addTab(P.dir) }, "x|close tab" to { closeTab(act) }, "x|close others" to { closeOthers(act) })) { addTab(P.dir) })
       l.add(SItem("search", "Find", false, findSubs) { pendingQ = "~"; tab = 2 })
       if (clip.isNotEmpty()) l.add(SItem("paste", "Paste", true, sb("x|clear clipboard" to { clip = emptyList() })) { paste() })
       else l.add(SItem("all", "Select", false, selSubs()) { P.sel = P.snap.items.map { it.f.path }.toSet() })
@@ -435,7 +477,7 @@ class MainActivity : ComponentActivity() {
       l.add(SItem("star", "Fav", cur in bms(), sb("star|bookmarks" to { bmDlg() })) { cf.bm = (if (cur in bms()) bms() - cur else bms() + cur).joinToString("\n") })
       l.add(SItem(if (cf.grid) "list" else "grid", "View", false, sortSubs) { cf.grid = !cf.grid })
       l.add(SItem("eye", "Hidden", cf.hidden) { cf.hidden = !cf.hidden })
-      l.add(SItem("dual", "Dual", cf.dual, sb("cmp|mirror dir to other" to { load(O, P.dir) }, "cmp|compare panes" to { sub = "cmp" })) { cf.dual = !cf.dual })
+      l.add(SItem("cmp", "Diff", false, sb("cmp|compare tabs" to { sub = "cmp" })) { sub = "cmp" })
       l.add(SItem("refresh", "Reload", false, sb("trash|open trash" to { sub = "trash" })) { rev++ })
     }
     return l
@@ -444,7 +486,7 @@ class MainActivity : ComponentActivity() {
     when (i) {
       0 -> sb("broom|cleaner" to { doAct("nav:clean") }, "chart|breakdown" to { doAct("nav:break") }, "trash|trash" to { doAct("nav:trash") },
         "dup|duplicates" to { doAct("nav:dupe") }, "clock|recent files" to { doAct("q:file age<3d") }, "edit|root editor" to { Ed.on = true })
-      1 -> sb("grid|grid / list" to { cf.grid = !cf.grid }, "eye|hidden files" to { cf.hidden = !cf.hidden }, "dual|dual panes" to { cf.dual = !cf.dual },
+      1 -> sb("grid|grid / list" to { cf.grid = !cf.grid }, "eye|hidden files" to { cf.hidden = !cf.hidden }, "tab|new tab" to { addTab(P.dir) },
         "refresh|reload" to { rev++ }, "star|bookmarks" to { bmDlg() }, "up|go up" to { upDir(P) })
       2 -> sb("clock|recent" to { doAct("q:file age<3d") }, "photo|photos" to { doAct("q:type:img") }, "video|videos" to { doAct("q:type:vid") }, "music|music" to { doAct("q:type:aud") },
         "doc|docs" to { doAct("q:type:doc") }, "box|archives" to { doAct("q:type:arc") }, "droid|apks" to { doAct("q:type:apk") }, "big|big files" to { doAct("q:size>100m") })
@@ -461,6 +503,7 @@ class MainActivity : ComponentActivity() {
   }
 
   val route = if (sub != null) "s:$sub" else "t:$tab"
+  LaunchedEffect(route) { navVis = true }
   Box(Modifier.fillMaxSize().pointerInput(Unit) {
     awaitPointerEventScope {
       while (true) {
@@ -475,49 +518,58 @@ class MainActivity : ComponentActivity() {
   }) {
     Column(Modifier.fillMaxSize().padding(horizontal = 6.dp).padding(top = 6.dp, bottom = 4.dp)) {
       if (Sk.b("nav.top", false)) NavBar(tab, navSubs) { i -> sub = null; if (i != 2) pendingQ = ""; tab = i }
-      Box(Modifier.weight(1f).fillMaxWidth()) {
+      Box(Modifier.weight(1f).fillMaxWidth().nestedScroll(navConn)) {
         AnimatedContent(route, transitionSpec = {
           val o = { r: String -> if (r.startsWith("t:")) r.substring(2).toInt() else 10 }
           Tr.tab(cf.fx, if (o(targetState) >= o(initialState)) 1 else -1)
         }, label = "route") { r ->
           Column(Modifier.fillMaxSize()) {
             when (r) {
-              "t:0" -> HomeScr({ a -> doAct(a) }) { mochiTap() }
+              "t:0" -> HomeScr({ a -> doAct(a) }, { mochiTap() }, { e -> if (e.ex in Fx.IMG) { vf = e.f; sub = "img" } else fileMenu(e) }, { d -> load(P, d); tab = 1 }, root)
               "t:1" -> {
-                Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val strip = rememberScrollState()
+                Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                   IconBtn("up", histSubs(P)) { upDir(P) }
-                  Column(Modifier.weight(1f)) {
-                    T(P.dir.name.ifEmpty { "storage" }, cf.ac, 15f, FontWeight.Bold)
-                    T(busy ?: P.dir.path, if (busy != null) cf.ac2 else Th.dim, 9f)
+                  Row(Modifier.weight(1f).horizontalScroll(strip), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    panes.forEachIndexed { i, pn ->
+                      val on = i == act; val shp = RoundedCornerShape(12.dp)
+                      Hold(tabSubs(i), Modifier.clip(shp).background(if (on) cf.ac.copy(alpha = .2f) else Th.fg.copy(alpha = .05f))
+                        .border(1.dp, if (on) cf.ac.copy(alpha = .65f) else cf.ac.copy(alpha = .22f), shp).padding(horizontal = 9.dp, vertical = 5.dp), { scope.launch { pager.animateScrollToPage(i) } }) {
+                        T((if (busy != null && on) "… " else "") + pn.dir.name.ifEmpty { "storage" }, if (on) cf.ac else Th.dim, 11f, if (on) FontWeight.Bold else null)
+                      }
+                    }
                   }
-                  IconBtn("search", findSubs) { pendingQ = "~"; tab = 2 }
-                  IconBtn(if (cf.grid) "list" else "grid", sortSubs) { cf.grid = !cf.grid }
+                  IconBtn("plus", sb("tab|new tab here" to { addTab(P.dir) }, "tab|new tab at storage" to { addTab(root) }, "x|close others" to { closeOthers(act) })) { addTab(P.dir) }
                   IconBtn("more", moreSubs, true) { }
                 }
                 if (busy != null) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = cf.ac, trackColor = Th.fg.copy(alpha = .1f))
-                if (dual) Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                  listOf(pa, pb).forEachIndexed { i, pn ->
-                    val on = act == i; val sh = RoundedCornerShape(10.dp)
-                    Box(Modifier.weight(1f).clip(sh).background(if (on) cf.ac.copy(alpha = .16f) else Th.fg.copy(alpha = .04f))
-                      .border(1.dp, if (on) cf.ac.copy(alpha = .6f) else cf.ac.copy(alpha = .2f), sh)
-                      .clickable { scope.launch { pager.animateScrollToPage(i) } }.padding(horizontal = 8.dp, vertical = 3.dp)) {
-                      T((if (i == 0) "A · " else "B · ") + pn.dir.name.ifEmpty { "/" }, if (on) cf.ac else Th.dim, 10f, if (on) FontWeight.Bold else null)
-                    }
+                if (P.sel.isNotEmpty()) {
+                  val selSz = remember(P.sel, P.snap) { P.snap.items.filter { it.f.path in P.sel }.sumOf { it.sz } }
+                  Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(12.dp)).background(cf.ac.copy(alpha = .14f)).padding(horizontal = 8.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    T("♡ ${P.sel.size} selected · ${Fx.sz(selSz)}", cf.ac, 11f, FontWeight.Bold, Modifier.weight(1f))
+                    Bt("ALL", subs = selSubs()) { P.sel = P.snap.items.map { it.f.path }.toSet() }
+                    Bt("INV") { P.sel = P.snap.items.map { it.f.path }.filter { it !in P.sel }.toSet() }
+                    Bt("✕") { P.sel = emptySet() }
                   }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth()) {
-                  HorizontalPager(pager, Modifier.weight(1f).fillMaxHeight(), contentPadding = PaddingValues(end = if (dual) 22.dp else 0.dp), pageSpacing = 8.dp) { page ->
-                    val pn = if (page == 0) pa else pb
-                    PaneView(pn, act == page, Modifier.fillMaxSize(), { f -> load(pn, f) },
-                      { e -> if (page != pager.currentPage) scope.launch { pager.animateScrollToPage(page) }; tapE(pn, e) },
-                      { e -> if (page != pager.currentPage) scope.launch { pager.animateScrollToPage(page) }; togg(pn, e) },
-                      { f -> crumbSubs(f) }, { e -> quick(pn, e) })
+                  HorizontalPager(pager, Modifier.weight(1f).fillMaxHeight(), contentPadding = PaddingValues(end = if (panes.size > 1) 20.dp else 0.dp), pageSpacing = 8.dp, key = { panes.getOrNull(it)?.id ?: it }) { page ->
+                    val pn = panes.getOrNull(page) ?: panes[0]
+                    PaneView(pn, act == page, Modifier.fillMaxSize(), { f -> load(pn, f) }, { e -> tapE(pn, e) }, { e -> togg(pn, e) }, { f -> crumbSubs(f) }, { e -> quick(pn, e) }, { footFor(pn) })
                   }
-                  Spacer(Modifier.width(6.dp))
+                  Spacer(Modifier.width(5.dp))
                   SideBar(sideItems())
                 }
               }
-              "t:2" -> SearchScr(P.dir, root, cf.hidden, pendingQ) { e -> if (e.dir) { load(P, e.f); tab = 1 } else fileMenu(e) }
+              "t:2" -> SearchScr(P.dir, root, cf.hidden, pendingQ, { e -> if (e.dir) { load(P, e.f); tab = 1 } else if (e.ex in Fx.IMG) { vf = e.f; sub = "img" } else fileMenu(e) }) { a, fs ->
+                when (a) {
+                  "copy" -> { clip = fs; cut = false; toast("${fs.size} copied → paste in FILES") }
+                  "cut" -> { clip = fs; cut = true; toast("${fs.size} cut → paste in FILES") }
+                  "trash" -> trashNow(fs)
+                  "share" -> share(fs)
+                }
+              }
               "t:3" -> ToolsScr { a -> doAct(a) }
               "t:4" -> MeScr { mochiTap() }
               "s:ana" -> AnaScr({ sub = null }, P.dir) { f -> load(P, f); sub = null; tab = 1 }
@@ -528,17 +580,22 @@ class MainActivity : ComponentActivity() {
                 dg = Dg("EMPTY TRASH?", "EMPTY", { bg("emptying…") { Trash.empty(); "trash emptied" } }) { T("this cannot be undone", Th.dim) }
               }
               "s:break" -> BreakdownScr({ sub = null }, root)
-              "s:cmp" -> CompareScr({ sub = null }, pa.dir, pb.dir, rev) { keys, a, b -> bg("syncing…", 6) { Fx2.sync(a, b, keys); "synced ${keys.size} files" } }
+              "s:cmp" -> CompareScr({ sub = null }, P.dir, (otherPane()?.dir ?: P.dir), rev) { keys, a, b -> bg("syncing…", 6) { Fx2.sync(a, b, keys); "synced ${keys.size} files" } }
               "s:edit" -> vf?.let { f -> EditScr({ sub = null }, f) { m -> toast(m); rev++ } }
               "s:hex" -> vf?.let { f -> HexScr({ sub = null }, f) }
-              "s:img" -> vf?.let { f -> ImgScr({ sub = null }, f) }
+              "s:img" -> vf?.let { f ->
+                val imgs = P.snap.items.filter { it.ex in Fx.IMG }.map { it.f }.let { l -> if (f in l) l else listOf(f) }
+                ImgScr({ sub = null }, imgs, imgs.indexOf(f).coerceAtLeast(0), { share(listOf(it)) }, { trashNow(listOf(it)) }, { infoDlg(listOf(it)) }, { rev++ })
+              }
               else -> {}
             }
           }
         }
       }
       if (Ed.on) EditorPanel(cf, tab, { i -> sub = null; tab = i }, Modifier)
-      if (!Sk.b("nav.top", false)) NavBar(tab, navSubs) { i -> sub = null; if (i != 2) pendingQ = ""; tab = i }
+      if (!Sk.b("nav.top", false)) AnimatedVisibility(navVis || Ed.on || !cf.navHide, enter = expandVertically(tween(180)) + fadeIn(tween(180)), exit = shrinkVertically(tween(180)) + fadeOut(tween(120))) {
+        NavBar(tab, navSubs) { i -> sub = null; if (i != 2) pendingQ = ""; tab = i }
+      }
     }
     Wipe(tab)
     ParticleLayer(burst)

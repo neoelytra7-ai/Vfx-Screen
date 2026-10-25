@@ -53,7 +53,7 @@ private val TILES = listOf(
   }
 }
 
-@Composable fun HomeScr(act: (String) -> Unit, mochiTap: () -> Unit) {
+@Composable fun HomeScr(act: (String) -> Unit, mochiTap: () -> Unit, openFile: (E) -> Unit, goDir: (File) -> Unit, root: File) {
   val cf = LCfg.current; val ac = cf.ac; val a2 = cf.ac2
   val h = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
   val greet = when { h < 5 -> "still awake? (・ω・)"; h < 11 -> "good morning!"; h < 17 -> "hello hello!"; h < 21 -> "good evening~"; else -> "sleepy time soon…" }
@@ -87,6 +87,22 @@ private val TILES = listOf(
         T(Fx.sz(fr) + " free", a2, 12f); T("of " + Fx.sz(tot), Th.dim, 10f)
         T("Lv ${cf.level} · ${cf.streak}d streak ♡", ac, 11f, FontWeight.Medium)
       }
+    }
+    val recent = produceState(listOf<E>(), Ev.t) { value = withContext(Dispatchers.IO) { Fx2.recent(root, 10).map { E(it) } } }.value
+    if (recent.isNotEmpty()) {
+      T("RECENT", a2, 10f, FontWeight.Bold)
+      Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        recent.forEach { e ->
+          Column(Modifier.width(76.dp).clip(RoundedCornerShape(14.dp)).background(Th.fg.copy(alpha = .05f)).border(1.dp, ac.copy(alpha = .25f), RoundedCornerShape(14.dp)).clickable { openFile(e) }.padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Ico(e, 40.dp); T(e.n, Th.fg, 9f); T(Fx.sz(e.sz), Th.dim, 8f)
+          }
+        }
+      }
+    }
+    val favs = cf.bm.split('\n').filter { it.isNotEmpty() }
+    if (favs.isNotEmpty()) {
+      T("FAVORITES", a2, 10f, FontWeight.Bold)
+      Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) { favs.forEach { p -> val d = File(p); Bt("★ " + d.name.ifEmpty { "/" }) { goDir(d) } } }
     }
     TILES.chunked(3).forEachIndexed { r, row ->
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -160,7 +176,7 @@ private val TILES = listOf(
       Bt("SIZE", cf.cSize) { cf.cSize = !cf.cSize }
       Bt("DATE", cf.cDate) { cf.cDate = !cf.cDate }
       Bt("PERM", cf.cPerm) { cf.cPerm = !cf.cPerm }
-      Bt("DUAL", cf.dual) { cf.dual = !cf.dual }
+      Bt("AUTO-HIDE NAV", cf.navHide) { cf.navHide = !cf.navHide }
       Bt("GRID", cf.grid) { cf.grid = !cf.grid }
     }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -184,7 +200,8 @@ class Cat(val ic: String, val name: String, val files: List<File>, val bytes: Lo
         Triple("🧽", "Junk files", "file ext:tmp,temp,log,bak,old,cache,dmp,crdownload,part,thumbdata"),
         Triple("🤖", "Leftover APKs", "type:apk"),
         Triple("🐘", "Big & old (>100M, >180d)", "size>100m age>180d"),
-        Triple("🖼️", "Thumbnail caches", "dir .thumbnails")
+        Triple("🖼️", "Thumbnail caches", "dir .thumbnails"),
+        Triple("⭕", "Empty files", "file size<2")
       ).map { (ic, n, p) -> val fs = Fx2.collect(root, p, true); Cat(ic, n, fs, fs.sumOf { if (it.isDirectory) Fx.du(it) else it.length() }) }
       q + Cat("📂", "Empty folders", Fx.empties(root), 0L)
     }
@@ -302,4 +319,20 @@ class Cat(val ic: String, val name: String, val files: List<File>, val bytes: Lo
     T("${l.size}${if (l.size >= 1000) "+" else ""} entries · " + Fx.sz(l.sumOf { it.second.coerceAtLeast(0L) }), Th.dim, 10f)
     l.take(150).forEach { (n, s) -> T(n + "  " + Fx.sz(s.coerceAtLeast(0L)), Th.fg, 10f) }
   }
+}
+
+@Composable fun PermBody(f: File) {
+  var r by remember { mutableStateOf(f.canRead()) }; var w by remember { mutableStateOf(f.canWrite()) }; var x by remember { mutableStateOf(f.canExecute()) }
+  T(f.path, Th.dim, 10f, ml = 3)
+  FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    Bt("READ", r) { f.setReadable(!r, true); r = f.canRead() }
+    Bt("WRITE", w) { f.setWritable(!w, true); w = f.canWrite() }
+    Bt("EXECUTE", x) { f.setExecutable(!x, true); x = f.canExecute() }
+  }
+}
+
+@Composable fun CmpFiles(a: File, b: File) {
+  val r = produceState<Pair<String, String>?>(null, a, b) { value = withContext(Dispatchers.IO) { Fx.hash(a, "SHA-256", Long.MAX_VALUE) to Fx.hash(b, "SHA-256", Long.MAX_VALUE) } }.value
+  T(a.name + "  " + Fx.sz(a.length()), Th.fg, 11f, ml = 2); T(b.name + "  " + Fx.sz(b.length()), Th.fg, 11f, ml = 2)
+  if (r == null) Wave("hashing…", 12f) else T(if (r.first == r.second) "✓ identical content" else "✕ different content", if (r.first == r.second) LCfg.current.ac else Color(0xFFFF8080), 13f, FontWeight.Bold)
 }

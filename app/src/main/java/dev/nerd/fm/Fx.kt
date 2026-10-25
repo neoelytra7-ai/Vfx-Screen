@@ -22,10 +22,10 @@ import kotlin.math.min
   val mt = f.lastModified()
   val cnt = if (dir) (f.list()?.size ?: 0) else 0
   val ex = if (dir) "" else n.substringAfterLast('.', "").lowercase()
-  val pm = (if (f.canRead()) "r" else "-") + (if (f.canWrite()) "w" else "-") + (if (f.canExecute()) "x" else "-")
+  val pm: String get() = (if (f.canRead()) "r" else "-") + (if (f.canWrite()) "w" else "-") + (if (f.canExecute()) "x" else "-")
 }
 
-class Q(raw: String, rx: Boolean, private val cs: Boolean) {
+class Q(raw: String, rx: Boolean, private val cs: Boolean, private val fz: Boolean = false) {
   private val inc = ArrayList<(String) -> Boolean>()
   private val exc = ArrayList<(String) -> Boolean>()
   var minS = 0L; var maxS = Long.MAX_VALUE
@@ -38,6 +38,7 @@ class Q(raw: String, rx: Boolean, private val cs: Boolean) {
 
   private fun mk(b: String, rx: Boolean): (String) -> Boolean {
     val opt = if (cs) emptySet() else setOf(RegexOption.IGNORE_CASE)
+    if (fz && !rx) return { Fx.fuzzy(it, b, !cs) }
     if (rx) { val r = Regex(b, opt); return { r.containsMatchIn(it) } }
     if (b.contains('*') || b.contains('?')) { val r = Regex(Fx.glob(b), opt); return { r.matches(it) } }
     return { it.contains(b, !cs) }
@@ -111,6 +112,7 @@ object Fx {
   val TYPES = mapOf("img" to IMG, "vid" to VID, "aud" to AUD, "doc" to DOC, "arc" to ARC, "apk" to setOf("apk", "xapk", "apks"), "code" to CODE)
   private val df = SimpleDateFormat("yy-MM-dd HH:mm", Locale.US)
 
+  fun fuzzy(n: String, t: String, ic: Boolean): Boolean { var i = 0; for (ch in n) { if (i < t.length && ch.equals(t[i], ic)) i++ }; return i == t.length }
   fun dt(t: Long): String = df.format(Date(t))
   fun sz(n: Long): String {
     if (n < 1024) return "${n}B"

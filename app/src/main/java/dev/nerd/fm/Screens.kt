@@ -28,72 +28,6 @@ import kotlinx.coroutines.*
 import java.io.File
 import kotlin.math.max
 
-private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type:arc", "type:apk", "type:code",
-  "size>10m", "size>100m", "size<10k", "age<1d", "age<7d", "age>365d", "dir", "file", "depth:1", "depth:3")
-
-@Composable fun SearchScr(here: File, all: File, hid: Boolean, initQ: String, go: (E) -> Unit) {
-  val cf = LCfg.current
-  var q by remember { mutableStateOf(initQ.removePrefix("~")) }
-  var wide by remember { mutableStateOf(initQ.isNotEmpty() && !initQ.startsWith("~")) }
-  val root = if (wide) all else here
-  var rx by remember { mutableStateOf(false) }
-  var cs by remember { mutableStateOf(false) }
-  var res by remember { mutableStateOf(listOf<E>()) }
-  var scanned by remember { mutableIntStateOf(0) }
-  var ms by remember { mutableLongStateOf(0L) }
-  var run by remember { mutableStateOf(false) }
-  var bad by remember { mutableStateOf(false) }
-  LaunchedEffect(q, rx, cs, wide) {
-    res = emptyList(); scanned = 0; bad = false; run = false
-    if (q.isBlank()) return@LaunchedEffect
-    delay(400)
-    val qq = Q(q, rx, cs)
-    bad = qq.bad
-    if (bad) return@LaunchedEffect
-    run = true
-    val t0 = System.currentTimeMillis()
-    val buf = ArrayList<E>()
-    withContext(Dispatchers.IO) {
-      Fx.search(root, qq, hid, 3000, { e ->
-        buf.add(e)
-        if (buf.size >= 40) { val s = buf.toList(); buf.clear(); withContext(Dispatchers.Main) { res = res + s } }
-      }, { scanned = it })
-    }
-    res = res + buf.toList()
-    ms = System.currentTimeMillis() - t0
-    run = false
-    val qt = q.trim()
-    if (qt.length > 2 && res.isNotEmpty()) cf.qh = (listOf(qt) + cf.qh.split('\n').filter { it.isNotEmpty() && it != qt }).take(6).joinToString("\n")
-  }
-  fun tog(t: String) { val l = q.split(" ").filter { it.isNotEmpty() }; q = (if (t in l) l - t else l + t).joinToString(" ") }
-  Column(Modifier.fillMaxSize()) {
-    Wave("FIND", 18f)
-    Inp(q, { q = it }, "name* -skip  ext:jpg,png  size>10m  age<7d  c:text  type:img  depth:3", Modifier.fillMaxWidth())
-    Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-      Bt(".*", rx) { rx = !rx }; Bt("Aa", cs) { cs = !cs }; Bt(if (wide) "ALL" else "HERE", wide) { wide = !wide }
-      if (run) Wave("scan", 11f)
-      T(if (bad) "bad regex" else "$scanned scanned · ${res.size} hits · ${ms}ms", Th.dim, 10f)
-    }
-    val hq = cf.qh.split('\n').filter { it.isNotEmpty() }
-    if (hq.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) { hq.forEach { h -> Bt("↺ " + h) { q = h } } }
-    val toks = q.split(" ")
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-      CHIPS.forEach { c -> Bt(c, c in toks) { tog(c) } }
-    }
-    LazyColumn(Modifier.weight(1f).padding(top = 6.dp)) {
-      items(res, key = { it.f.path }) { e ->
-        Column(Modifier.fillMaxWidth().clickable { go(e) }.padding(vertical = 4.dp, horizontal = 4.dp)) {
-          Row {
-            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) { Ico(e, 28.dp); Spacer(Modifier.width(6.dp)); T(e.n, if (e.dir) cf.ac else Th.fg, 13f, null, Modifier.weight(1f)) }
-            if (!e.dir) T(Fx.sz(e.sz), Th.dim, 10f)
-          }
-          T(e.f.parent ?: "", Th.dim, 9f)
-        }
-      }
-    }
-  }
-}
-
 @Composable fun AnaScr(back: () -> Unit, dir: File, go: (File) -> Unit) {
   val cf = LCfg.current
   val r = produceState<List<Pair<File, Long>>?>(null, dir) {
@@ -207,31 +141,6 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
   }
 }
 
-@Composable fun ImgScr(back: () -> Unit, f: File) {
-  val bm = produceState<ImageBitmap?>(null, f) {
-    value = withContext(Dispatchers.IO) {
-      runCatching {
-        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(f.path, o)
-        var s = 1
-        while (o.outWidth / s > 1400 || o.outHeight / s > 1400) s *= 2
-        BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s })?.asImageBitmap()
-      }.getOrNull()
-    }
-  }.value
-  var sc by remember { mutableFloatStateOf(1f) }
-  var off by remember { mutableStateOf(Offset.Zero) }
-  Column(Modifier.fillMaxSize()) {
-    Hdr(f.name, back)
-    Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(0.dp)).pointerInput(Unit) {
-      detectTransformGestures { _, pan, zoom, _ -> sc = (sc * zoom).coerceIn(1f, 8f); off += pan }
-    }, Alignment.Center) {
-      if (bm == null) Wave("decoding…", 14f)
-      else Image(bm, f.name, Modifier.fillMaxSize().graphicsLayer { scaleX = sc; scaleY = sc; translationX = off.x; translationY = off.y }, contentScale = ContentScale.Fit)
-    }
-  }
-}
-
 @Composable fun InfoBody(fs: List<File>) {
   val cf = LCfg.current
   val sz = produceState(-1L, fs) { value = withContext(Dispatchers.IO) { fs.sumOf { Fx.du(it) } } }.value
@@ -241,5 +150,9 @@ private val CHIPS = listOf("type:img", "type:vid", "type:aud", "type:doc", "type
   kv("path", f.parent ?: "/")
   kv("size", if (sz < 0) "…" else Fx.sz(sz) + " (" + sz + " B)")
   kv("files", if (n < 0) "…" else n.toString())
+  if (fs.size == 1 && f.isFile && f.extension.lowercase() in Fx.TXT && f.length() < 2_000_000) {
+    val st = produceState("", f) { value = withContext(Dispatchers.IO) { runCatching { val tx = f.readText(); "${tx.count { it == '\n' } + 1} lines · ${tx.split(Regex("\\s+")).count { it.isNotEmpty() }} words · ${tx.length} chars" }.getOrDefault("") } }.value
+    if (st.isNotEmpty()) kv("text", st)
+  }
   if (fs.size == 1) { kv("mod", Fx.dt(f.lastModified())); kv("perm", E(f).pm + if (f.isHidden) " hidden" else ""); kv("mime", if (f.isDirectory) "dir" else Fx.mime(f)) }
 }
