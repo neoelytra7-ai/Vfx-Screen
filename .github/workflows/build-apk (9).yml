@@ -1,0 +1,2280 @@
+name: Build UI Showcase APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      # ------------------------------------------------------------------
+      # 1. Project skeleton (Gradle + manifest)
+      # ------------------------------------------------------------------
+      - name: Generate project skeleton
+        run: |
+          mkdir -p app/src/main/java/com/showcase/ui app/src/main/res/values
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "UiShowcase"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g
+          kotlin.daemon.jvmargs=-Xmx3g
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.showcase.ui"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.showcase.ui"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+                  freeCompilerArgs += listOf(
+                      "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+                      "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi",
+                      "-opt-in=androidx.compose.foundation.layout.ExperimentalLayoutApi",
+                      "-opt-in=androidx.compose.animation.ExperimentalAnimationApi",
+                      "-opt-in=androidx.compose.ui.ExperimentalComposeUiApi"
+                  )
+              }
+          }
+          dependencies {
+              val bom = platform("androidx.compose:compose-bom:2024.06.00")
+              implementation(bom)
+              implementation("androidx.activity:activity-compose:1.9.1")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-core")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.animation:animation")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="UI Showcase"
+                  android:theme="@style/Theme.Showcase">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.Showcase" parent="@android:style/Theme.Material.Light.NoActionBar" />
+          </resources>
+          EOF
+
+      # ------------------------------------------------------------------
+      # 2. App shell: activity + section registry
+      # ------------------------------------------------------------------
+      - name: Generate app shell
+        run: |
+          D=app/src/main/java/com/showcase/ui
+
+          cat > $D/MainActivity.kt <<'EOF'
+          package com.showcase.ui
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.isSystemInDarkTheme
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      MaterialTheme(
+                          colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
+                      ) { ShowcaseApp() }
+                  }
+              }
+          }
+
+          private val groups: Map<String, List<Pair<String, @Composable () -> Unit>>> =
+              sections.groupBy { s ->
+                  val n = s.first.replace(Regex("\\s+\\d+$"), "")
+                  if (n == s.first) "Core" else n
+              }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun ShowcaseApp() {
+              var open by remember { mutableStateOf<String?>(null) }
+              BackHandler(enabled = open != null) { open = null }
+              Scaffold(
+                  topBar = { TopAppBar(title = { Text(open ?: "UI Showcase") }) }
+              ) { pad ->
+                  Box(Modifier.padding(pad).fillMaxSize()) {
+                      val g = open
+                      if (g == null) {
+                          Column(Modifier.verticalScroll(rememberScrollState())) {
+                              groups.forEach { (name, items) ->
+                                  Column(
+                                      Modifier.fillMaxWidth().clickable { open = name }
+                                          .padding(horizontal = 16.dp, vertical = 12.dp)
+                                  ) {
+                                      Text(name, style = MaterialTheme.typography.titleMedium)
+                                      Text(
+                                          "${items.size} items",
+                                          fontSize = 11.sp,
+                                          color = MaterialTheme.colorScheme.onSurfaceVariant
+                                      )
+                                  }
+                                  HorizontalDivider()
+                              }
+                          }
+                      } else {
+                          LazyColumn(
+                              Modifier.fillMaxSize(),
+                              contentPadding = PaddingValues(16.dp),
+                              verticalArrangement = Arrangement.spacedBy(10.dp)
+                          ) {
+                              items(groups[g].orEmpty()) { s ->
+                                  Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                      Text(
+                                          s.first,
+                                          fontSize = 11.sp,
+                                          color = MaterialTheme.colorScheme.onSurfaceVariant
+                                      )
+                                      s.second()
+                                      HorizontalDivider()
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          # Registry. To add a section: create a new file and append a line here.
+          cat > $D/Registry.kt <<'EOF'
+          package com.showcase.ui
+
+          import androidx.compose.runtime.Composable
+
+          val baseSections: List<Pair<String, @Composable () -> Unit>> = listOf(
+              "Buttons" to { ButtonsSection() },
+              "Text inputs" to { InputsSection() },
+              "Selection controls" to { SelectionSection() },
+              "Progress & loading" to { ProgressSection() },
+              "Sliders" to { SlidersSection() },
+              "Cards" to { CardsSection() },
+              "Chips" to { ChipsSection() },
+              "Dialogs & menus" to { DialogsSection() },
+              "Tabs" to { TabsSection() },
+              "Animations" to { AnimationsSection() },
+              "Typography" to { TypographySection() },
+              "Color scheme" to { ColorsSection() },
+              "Shapes & elevation" to { ShapesSection() },
+              "Lists" to { ListsSection() },
+          )
+          EOF
+
+      # ------------------------------------------------------------------
+      # 3. Showcase sections (one heredoc per file; append more freely)
+      # ------------------------------------------------------------------
+      - name: Generate sections A (buttons, inputs, selection, progress, sliders)
+        run: |
+          D=app/src/main/java/com/showcase/ui
+
+          cat > $D/Section1.kt <<'EOF'
+          package com.showcase.ui
+
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.unit.dp
+
+          @Composable
+          fun ButtonsSection() {
+              Button(onClick = {}) { Text("Filled") }
+              FilledTonalButton(onClick = {}) { Text("Tonal") }
+              OutlinedButton(onClick = {}) { Text("Outlined") }
+              ElevatedButton(onClick = {}) { Text("Elevated") }
+              TextButton(onClick = {}) { Text("Text") }
+              Button(onClick = {}, enabled = false) { Text("Disabled") }
+              Button(onClick = {}) {
+                  Icon(Icons.Default.Favorite, null, Modifier.size(18.dp))
+                  Spacer(Modifier.width(8.dp))
+                  Text("With icon")
+              }
+              Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                  FloatingActionButton(onClick = {}) { Icon(Icons.Default.Add, null) }
+                  SmallFloatingActionButton(onClick = {}) { Icon(Icons.Default.Star, null) }
+                  ExtendedFloatingActionButton(onClick = {}) {
+                      Icon(Icons.Default.Search, null); Spacer(Modifier.width(6.dp)); Text("Search")
+                  }
+              }
+              Row {
+                  IconButton(onClick = {}) { Icon(Icons.Default.Home, null) }
+                  FilledIconButton(onClick = {}) { Icon(Icons.Default.Settings, null) }
+                  OutlinedIconButton(onClick = {}) { Icon(Icons.Default.Person, null) }
+              }
+          }
+
+          @Composable
+          fun InputsSection() {
+              var a by remember { mutableStateOf("") }
+              var b by remember { mutableStateOf("") }
+              var c by remember { mutableStateOf("secret") }
+              OutlinedTextField(a, { a = it }, label = { Text("Outlined") }, modifier = Modifier.fillMaxWidth())
+              TextField(b, { b = it }, label = { Text("Filled") }, modifier = Modifier.fillMaxWidth())
+              OutlinedTextField(
+                  c, { c = it }, label = { Text("Password") },
+                  visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                  modifier = Modifier.fillMaxWidth()
+              )
+              OutlinedTextField(
+                  "bad", {}, label = { Text("Error state") }, isError = true,
+                  supportingText = { Text("Something is wrong") }, modifier = Modifier.fillMaxWidth()
+              )
+              OutlinedTextField(
+                  a, { a = it }, label = { Text("With icons") },
+                  leadingIcon = { Icon(Icons.Default.Search, null) },
+                  trailingIcon = { Icon(Icons.Default.Close, null) },
+                  modifier = Modifier.fillMaxWidth()
+              )
+          }
+
+          @Composable
+          fun SelectionSection() {
+              var cb by remember { mutableStateOf(true) }
+              var sw by remember { mutableStateOf(true) }
+              var radio by remember { mutableStateOf(0) }
+              var tri by remember { mutableStateOf(androidx.compose.ui.state.ToggleableState.Indeterminate) }
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                  Checkbox(cb, { cb = it }); Text("Checkbox")
+              }
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                  TriStateCheckbox(tri, onClick = {}); Text("Tri-state")
+              }
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                  Switch(sw, { sw = it }); Spacer(Modifier.width(8.dp)); Text("Switch")
+              }
+              listOf("Alpha", "Beta", "Gamma").forEachIndexed { i, t ->
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      RadioButton(radio == i, { radio = i }); Text(t)
+                  }
+              }
+              SingleChoiceSegmentedButtonRow {
+                  listOf("Day", "Week", "Month").forEachIndexed { i, t ->
+                      SegmentedButton(
+                          selected = radio == i, onClick = { radio = i },
+                          shape = SegmentedButtonDefaults.itemShape(i, 3)
+                      ) { Text(t) }
+                  }
+              }
+          }
+
+          @Composable
+          fun ProgressSection() {
+              Text("Indeterminate linear"); LinearProgressIndicator(Modifier.fillMaxWidth())
+              Text("Determinate linear"); LinearProgressIndicator({ 0.65f }, Modifier.fillMaxWidth())
+              Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                  CircularProgressIndicator()
+                  CircularProgressIndicator({ 0.4f })
+                  CircularProgressIndicator({ 0.9f }, strokeWidth = 8.dp)
+              }
+          }
+
+          @Composable
+          fun SlidersSection() {
+              var s by remember { mutableStateOf(0.3f) }
+              var step by remember { mutableStateOf(2f) }
+              var range by remember { mutableStateOf(0.2f..0.8f) }
+              Text("Value: %.2f".format(s)); Slider(s, { s = it })
+              Text("Stepped: ${step.toInt()}")
+              Slider(step, { step = it }, valueRange = 0f..10f, steps = 9)
+              RangeSlider(range, { range = it })
+          }
+          EOF
+
+      - name: Generate sections B (cards, chips, dialogs, tabs)
+        run: |
+          D=app/src/main/java/com/showcase/ui
+
+          cat > $D/Section2.kt <<'EOF'
+          package com.showcase.ui
+
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.unit.dp
+
+          @Composable
+          fun CardsSection() {
+              Card(Modifier.fillMaxWidth()) {
+                  Column(Modifier.padding(16.dp)) {
+                      Text("Filled card", style = MaterialTheme.typography.titleMedium)
+                      Text("Default container color.")
+                  }
+              }
+              ElevatedCard(Modifier.fillMaxWidth()) {
+                  Column(Modifier.padding(16.dp)) {
+                      Text("Elevated card", style = MaterialTheme.typography.titleMedium)
+                      Text("Has a shadow.")
+                  }
+              }
+              OutlinedCard(Modifier.fillMaxWidth()) {
+                  Column(Modifier.padding(16.dp)) {
+                      Text("Outlined card", style = MaterialTheme.typography.titleMedium)
+                      Text("Has a border.")
+                  }
+              }
+              Card(
+                  onClick = {}, Modifier.fillMaxWidth(),
+                  colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+              ) {
+                  Row(Modifier.padding(16.dp)) {
+                      Badge { Text("3") }
+                      Spacer(Modifier.width(12.dp))
+                      Text("Clickable, tinted card")
+                  }
+              }
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun ChipsSection() {
+              var sel by remember { mutableStateOf(setOf("Kotlin")) }
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  AssistChip(onClick = {}, label = { Text("Assist") },
+                      leadingIcon = { Icon(Icons.Default.Star, null, Modifier.size(18.dp)) })
+                  SuggestionChip(onClick = {}, label = { Text("Suggestion") })
+              }
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  listOf("Kotlin", "Java", "Rust").forEach { t ->
+                      FilterChip(
+                          selected = t in sel,
+                          onClick = { sel = if (t in sel) sel - t else sel + t },
+                          label = { Text(t) },
+                          leadingIcon = if (t in sel) {
+                              { Icon(Icons.Default.Check, null, Modifier.size(18.dp)) }
+                          } else null
+                      )
+                  }
+              }
+              InputChip(selected = false, onClick = {}, label = { Text("Input") },
+                  trailingIcon = { Icon(Icons.Default.Close, null, Modifier.size(18.dp)) })
+          }
+
+          @Composable
+          fun DialogsSection() {
+              var dlg by remember { mutableStateOf(false) }
+              var menu by remember { mutableStateOf(false) }
+              Button(onClick = { dlg = true }) { Text("Show dialog") }
+              Box {
+                  OutlinedButton(onClick = { menu = true }) { Text("Show menu") }
+                  DropdownMenu(menu, { menu = false }) {
+                      listOf("Copy", "Paste", "Delete").forEach {
+                          DropdownMenuItem(text = { Text(it) }, onClick = { menu = false })
+                      }
+                  }
+              }
+              if (dlg) AlertDialog(
+                  onDismissRequest = { dlg = false },
+                  title = { Text("Alert") },
+                  text = { Text("This is a Material 3 alert dialog.") },
+                  icon = { Icon(Icons.Default.Settings, null) },
+                  confirmButton = { TextButton({ dlg = false }) { Text("OK") } },
+                  dismissButton = { TextButton({ dlg = false }) { Text("Cancel") } }
+              )
+          }
+
+          @Composable
+          fun TabsSection() {
+              var t by remember { mutableStateOf(0) }
+              val names = listOf("Home", "Search", "Profile")
+              TabRow(t) { names.forEachIndexed { i, n -> Tab(t == i, { t = i }, text = { Text(n) }) } }
+              SecondaryTabRow(t) { names.forEachIndexed { i, n -> Tab(t == i, { t = i }, text = { Text(n) }) } }
+              NavigationBar {
+                  listOf(Icons.Default.Home, Icons.Default.Search, Icons.Default.Person).forEachIndexed { i, ic ->
+                      NavigationBarItem(t == i, { t = i }, { Icon(ic, null) }, label = { Text(names[i]) })
+                  }
+              }
+              Text("Selected: ${names[t]}")
+          }
+          EOF
+
+      - name: Generate sections C (animations, typography, colors, shapes, lists)
+        run: |
+          D=app/src/main/java/com/showcase/ui
+
+          cat > $D/Section3.kt <<'EOF'
+          package com.showcase.ui
+
+          import androidx.compose.animation.*
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.rotate
+          import androidx.compose.ui.draw.scale
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.RectangleShape
+          import androidx.compose.ui.unit.dp
+
+          @Composable
+          fun AnimationsSection() {
+              var show by remember { mutableStateOf(true) }
+              var big by remember { mutableStateOf(false) }
+              val size by animateDpAsState(if (big) 120.dp else 56.dp, spring(Spring.DampingRatioMediumBouncy), label = "s")
+              val color by animateColorAsState(
+                  if (big) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary, label = "c")
+              val inf = rememberInfiniteTransition(label = "i")
+              val angle by inf.animateFloat(0f, 360f, infiniteRepeatable(tween(2000, easing = LinearEasing)), label = "a")
+              val pulse by inf.animateFloat(0.8f, 1.2f, infiniteRepeatable(tween(800), RepeatMode.Reverse), label = "p")
+
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  Button({ show = !show }) { Text("Toggle") }
+                  Button({ big = !big }) { Text("Resize") }
+              }
+              AnimatedVisibility(show, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
+                  Card(Modifier.fillMaxWidth()) { Text("I fade and expand", Modifier.padding(16.dp)) }
+              }
+              Box(Modifier.size(size).clip(RoundedCornerShape(16.dp)).background(color))
+              Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                  Box(Modifier.size(48.dp).rotate(angle).background(Color(0xFFE91E63), RoundedCornerShape(8.dp)))
+                  Box(Modifier.size(48.dp).scale(pulse).background(Color(0xFF2196F3), CircleShape))
+              }
+              AnimatedContent(targetState = big, label = "ac") { Text(if (it) "BIG" else "small", style = MaterialTheme.typography.headlineMedium) }
+          }
+
+          @Composable
+          fun TypographySection() {
+              val t = MaterialTheme.typography
+              listOf(
+                  "Display Large" to t.displayLarge, "Display Medium" to t.displayMedium, "Display Small" to t.displaySmall,
+                  "Headline Large" to t.headlineLarge, "Headline Medium" to t.headlineMedium, "Headline Small" to t.headlineSmall,
+                  "Title Large" to t.titleLarge, "Title Medium" to t.titleMedium, "Title Small" to t.titleSmall,
+                  "Body Large" to t.bodyLarge, "Body Medium" to t.bodyMedium, "Body Small" to t.bodySmall,
+                  "Label Large" to t.labelLarge, "Label Medium" to t.labelMedium, "Label Small" to t.labelSmall,
+              ).forEach { (n, s) -> Text(n, style = s) }
+          }
+
+          @Composable
+          fun ColorsSection() {
+              val c = MaterialTheme.colorScheme
+              listOf(
+                  "primary" to c.primary, "onPrimary" to c.onPrimary, "primaryContainer" to c.primaryContainer,
+                  "secondary" to c.secondary, "secondaryContainer" to c.secondaryContainer,
+                  "tertiary" to c.tertiary, "tertiaryContainer" to c.tertiaryContainer,
+                  "error" to c.error, "errorContainer" to c.errorContainer,
+                  "background" to c.background, "surface" to c.surface, "surfaceVariant" to c.surfaceVariant,
+                  "outline" to c.outline, "inverseSurface" to c.inverseSurface,
+              ).forEach { (n, col) ->
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      Box(Modifier.size(40.dp).background(col, RoundedCornerShape(8.dp)))
+                      Spacer(Modifier.width(12.dp)); Text(n)
+                  }
+              }
+          }
+
+          @Composable
+          fun ShapesSection() {
+              val shapes = listOf(
+                  "Rect" to RectangleShape, "Rounded 8" to RoundedCornerShape(8.dp), "Rounded 24" to RoundedCornerShape(24.dp),
+                  "Circle" to CircleShape, "Cut corner" to CutCornerShape(16.dp),
+                  "Mixed" to RoundedCornerShape(topStart = 32.dp, bottomEnd = 32.dp),
+              )
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  shapes.take(3).forEach { (_, s) -> Surface(Modifier.size(80.dp), shape = s, color = MaterialTheme.colorScheme.primary) {} }
+              }
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  shapes.drop(3).forEach { (_, s) -> Surface(Modifier.size(80.dp), shape = s, color = MaterialTheme.colorScheme.secondary) {} }
+              }
+              Text("Elevation")
+              Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                  listOf(0, 2, 6, 12).forEach { e ->
+                      Surface(Modifier.size(64.dp), shape = RoundedCornerShape(12.dp), shadowElevation = e.dp) {
+                          Box(contentAlignment = Alignment.Center) { Text("$e") }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun ListsSection() {
+              Column {
+                  repeat(8) { i ->
+                      ListItem(
+                          leadingContent = { Surface(Modifier.size(40.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
+                              Box(contentAlignment = Alignment.Center) { Text("${i + 1}") } } },
+                          headlineContent = { Text("List item ${i + 1}") },
+                          supportingContent = { Text("Supporting text") },
+                          trailingContent = { Text("12:0$i") },
+                      )
+                      HorizontalDivider()
+                  }
+              }
+          }
+          EOF
+
+      # ------------------------------------------------------------------
+      # 4. Build + upload
+      # ------------------------------------------------------------------
+      - name: Generate sections D (batch 2)
+        run: |
+          D=app/src/main/java/com/showcase/ui
+
+          # Extra registry: append new sections here, final list = base + extra
+          cat > $D/Registry2.kt <<'EOF'
+          package com.showcase.ui
+
+          import androidx.compose.runtime.Composable
+
+          val extraSections: List<Pair<String, @Composable () -> Unit>> = listOf(
+              "Snackbar" to { SnackbarSection() },
+              "Date & time pickers" to { PickersSection() },
+              "Bottom sheet" to { BottomSheetSection() },
+              "Pager" to { PagerSection() },
+              "Canvas drawing" to { CanvasSection() },
+              "Drag gestures" to { GestureSection() },
+              "Swipe to dismiss" to { SwipeSection() },
+              "Search bar" to { SearchSection() },
+              "Navigation rail & badges" to { RailSection() },
+              "Layout containers" to { LayoutSection() },
+          )
+
+          val sections: List<Pair<String, @Composable () -> Unit>> = baseSections + extraSections + bulkSections
+          EOF
+
+          cat > $D/Section4.kt <<'EOF'
+          package com.showcase.ui
+
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.gestures.detectDragGestures
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.pager.HorizontalPager
+          import androidx.compose.foundation.pager.rememberPagerState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.unit.IntOffset
+          import androidx.compose.ui.unit.dp
+          import kotlin.math.roundToInt
+          import kotlinx.coroutines.launch
+
+          @Composable
+          fun SnackbarSection() {
+              val host = remember { SnackbarHostState() }
+              val scope = rememberCoroutineScope()
+              Button(onClick = { scope.launch { host.showSnackbar("Hello from a snackbar") } }) { Text("Short") }
+              Button(onClick = {
+                  scope.launch {
+                      host.showSnackbar("With action", actionLabel = "UNDO", duration = SnackbarDuration.Long)
+                  }
+              }) { Text("With action") }
+              Box(Modifier.fillMaxWidth().height(80.dp)) {
+                  SnackbarHost(host, Modifier.align(Alignment.BottomCenter))
+              }
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun PickersSection() {
+              val date = rememberDatePickerState()
+              val time = rememberTimePickerState(10, 30, false)
+              Text("Selected millis: ${date.selectedDateMillis ?: "none"}")
+              DatePicker(date, showModeToggle = true)
+              HorizontalDivider()
+              Text("Time: %02d:%02d".format(time.hour, time.minute))
+              TimePicker(time)
+              TimeInput(rememberTimePickerState(8, 15, true))
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun BottomSheetSection() {
+              var open by remember { mutableStateOf(false) }
+              val state = rememberModalBottomSheetState()
+              val scope = rememberCoroutineScope()
+              Button(onClick = { open = true }) { Text("Open bottom sheet") }
+              if (open) ModalBottomSheet(onDismissRequest = { open = false }, sheetState = state) {
+                  Column(Modifier.padding(16.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Text("Sheet content", style = MaterialTheme.typography.titleLarge)
+                      repeat(4) { ListItem(headlineContent = { Text("Action ${it + 1}") }, leadingContent = { Icon(Icons.Default.Star, null) }) }
+                      Button(onClick = { scope.launch { state.hide() }.invokeOnCompletion { open = false } }) { Text("Close") }
+                  }
+              }
+          }
+
+          @Composable
+          fun PagerSection() {
+              val pager = rememberPagerState { 5 }
+              val colors = listOf(Color(0xFFEF5350), Color(0xFFAB47BC), Color(0xFF42A5F5), Color(0xFF66BB6A), Color(0xFFFFA726))
+              HorizontalPager(pager, Modifier.fillMaxWidth().height(160.dp), pageSpacing = 12.dp) { p ->
+                  Box(Modifier.fillMaxSize().background(colors[p], RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                      Text("Page ${p + 1}", color = Color.White, style = MaterialTheme.typography.headlineMedium)
+                  }
+              }
+              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                  repeat(5) { i ->
+                      val sel = pager.currentPage == i
+                      Box(Modifier.padding(4.dp).size(if (sel) 12.dp else 8.dp)
+                          .background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, CircleShape))
+                  }
+              }
+          }
+
+          @Composable
+          fun CanvasSection() {
+              val primary = MaterialTheme.colorScheme.primary
+              val tertiary = MaterialTheme.colorScheme.tertiary
+              Canvas(Modifier.fillMaxWidth().height(200.dp)) {
+                  drawRect(Brush.horizontalGradient(listOf(primary, tertiary)), size = size.copy(height = 60f))
+                  drawCircle(primary, radius = 40f, center = Offset(80f, 140f))
+                  drawCircle(tertiary, radius = 40f, center = Offset(200f, 140f), style = Stroke(width = 8f))
+                  drawLine(Color.Gray, Offset(300f, 100f), Offset(480f, 180f), strokeWidth = 10f, cap = StrokeCap.Round)
+                  val path = Path().apply {
+                      moveTo(520f, 180f); cubicTo(560f, 80f, 640f, 260f, 700f, 100f)
+                  }
+                  drawPath(path, primary, style = Stroke(width = 6f, cap = StrokeCap.Round))
+                  drawArc(tertiary, 0f, 270f, useCenter = true, topLeft = Offset(720f, 90f), size = androidx.compose.ui.geometry.Size(100f, 100f))
+              }
+          }
+
+          @Composable
+          fun GestureSection() {
+              var off by remember { mutableStateOf(Offset(40f, 40f)) }
+              Box(Modifier.fillMaxWidth().height(220.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))) {
+                  Box(
+                      Modifier.offset { IntOffset(off.x.roundToInt(), off.y.roundToInt()) }
+                          .size(64.dp).background(MaterialTheme.colorScheme.primary, CircleShape)
+                          .pointerInput(Unit) { detectDragGestures { c, d -> c.consume(); off += d } }
+                  )
+              }
+              Text("Drag the circle. Offset: ${off.x.roundToInt()}, ${off.y.roundToInt()}")
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun SwipeSection() {
+              val items = remember { mutableStateListOf("Alpha", "Beta", "Gamma", "Delta", "Epsilon") }
+              Column {
+                  items.toList().forEach { name ->
+                      key(name) {
+                          val st = rememberSwipeToDismissBoxState(confirmValueChange = {
+                              if (it != SwipeToDismissBoxValue.Settled) { items.remove(name); true } else false
+                          })
+                          SwipeToDismissBox(st, backgroundContent = {
+                              Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.errorContainer).padding(16.dp), contentAlignment = Alignment.CenterEnd) {
+                                  Icon(Icons.Default.Close, null)
+                              }
+                          }) { ListItem(headlineContent = { Text(name) }, modifier = Modifier.background(MaterialTheme.colorScheme.surface)) }
+                      }
+                  }
+              }
+              if (items.isEmpty()) Text("All dismissed")
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun SearchSection() {
+              var q by remember { mutableStateOf("") }
+              var active by remember { mutableStateOf(false) }
+              val all = listOf("Apple", "Banana", "Cherry", "Date", "Elderberry", "Fig", "Grape")
+              SearchBar(
+                  query = q, onQueryChange = { q = it }, onSearch = { active = false },
+                  active = active, onActiveChange = { active = it },
+                  placeholder = { Text("Search fruit") },
+                  leadingIcon = { Icon(Icons.Default.Search, null) },
+                  modifier = Modifier.fillMaxWidth().height(if (active) 320.dp else 56.dp)
+              ) {
+                  LazyColumn { items(all.filter { it.contains(q, true) }) { ListItem(headlineContent = { Text(it) }) } }
+              }
+          }
+
+          @Composable
+          fun RailSection() {
+              var sel by remember { mutableStateOf(0) }
+              Row(Modifier.height(240.dp)) {
+                  NavigationRail {
+                      listOf(Icons.Default.Home to "Home", Icons.Default.Favorite to "Likes", Icons.Default.Settings to "Prefs").forEachIndexed { i, (ic, n) ->
+                          NavigationRailItem(sel == i, { sel = i }, icon = {
+                              if (i == 1) BadgedBox(badge = { Badge { Text("9") } }) { Icon(ic, null) } else Icon(ic, null)
+                          }, label = { Text(n) })
+                      }
+                  }
+                  Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) { Text("Page $sel") }
+              }
+              Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                  BadgedBox(badge = { Badge() }) { Icon(Icons.Default.Person, null) }
+                  BadgedBox(badge = { Badge { Text("12") } }) { Icon(Icons.Default.Home, null) }
+                  BadgedBox(badge = { Badge { Text("99+") } }) { Icon(Icons.Default.Star, null) }
+              }
+          }
+
+          @OptIn(ExperimentalLayoutApi::class)
+          @Composable
+          fun LayoutSection() {
+              Text("Row weights")
+              Row(Modifier.fillMaxWidth().height(48.dp)) {
+                  Box(Modifier.weight(1f).fillMaxHeight().background(Color(0xFF42A5F5)))
+                  Box(Modifier.weight(2f).fillMaxHeight().background(Color(0xFF66BB6A)))
+                  Box(Modifier.weight(3f).fillMaxHeight().background(Color(0xFFFFA726)))
+              }
+              Text("FlowRow")
+              FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                  listOf("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten").forEach {
+                      AssistChip(onClick = {}, label = { Text(it) })
+                  }
+              }
+              Text("Box overlay")
+              Box(Modifier.size(120.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(12.dp))) {
+                  Box(Modifier.align(Alignment.TopStart).size(24.dp).background(Color.Red, CircleShape))
+                  Box(Modifier.align(Alignment.Center).size(40.dp).background(Color.Blue, CircleShape))
+                  Box(Modifier.align(Alignment.BottomEnd).size(24.dp).background(Color.Green, CircleShape))
+              }
+              Text("Horizontal scroll")
+              Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                  repeat(15) { Surface(Modifier.size(72.dp), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                      Box(contentAlignment = Alignment.Center) { Text("$it") } } }
+              }
+              Text("Divider variants")
+              HorizontalDivider(thickness = 4.dp, color = MaterialTheme.colorScheme.primary)
+              HorizontalDivider()
+              Row(Modifier.height(32.dp)) { Text("Left"); VerticalDivider(Modifier.padding(horizontal = 8.dp)); Text("Right") }
+          }
+          EOF
+
+      # ------------------------------------------------------------------
+      # 4. Bulk showcase variants (9 families x 99, parameterized)
+      # ------------------------------------------------------------------
+      - name: Generate bulk showcase
+        run: |
+          D=app/src/main/java/com/showcase/ui
+          cat > $D/Bulk.kt <<'EOF'
+          package com.showcase.ui
+
+          import androidx.compose.animation.AnimatedVisibility
+          import androidx.compose.animation.animateColor
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.shape.*
+          import androidx.compose.foundation.text.BasicTextField
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.*
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.*
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.state.ToggleableState
+          import androidx.compose.ui.text.*
+          import androidx.compose.ui.text.font.*
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.text.input.PasswordVisualTransformation
+          import androidx.compose.ui.text.input.VisualTransformation
+          import androidx.compose.ui.text.style.*
+          import androidx.compose.ui.unit.*
+          import kotlin.math.PI
+          import kotlin.math.cos
+          import kotlin.math.sin
+          import kotlin.random.Random
+
+          // 17 families. Every item is a different layout (no repeats); colors, shapes, sizes and text are seeded-random per item.
+
+          private fun rnd(i: Int, salt: Int) = Random(i * 7919 + salt * 104729)
+          private fun Random.hue() = nextInt(360).toFloat()
+          private fun <T> Random.pick(l: List<T>): T = l[nextInt(l.size)]
+          private fun hc(h: Float, s: Float = 0.65f, l: Float = 0.5f) = Color.hsl(((h % 360f) + 360f) % 360f, s, l)
+          private fun ink(c: Color) = if (c.luminance() > 0.5f) Color.Black else Color.White
+          private fun hex(c: Color) = String.format("#%06X", c.toArgb() and 0xFFFFFF)
+
+          private fun Random.shape(): Shape {
+              val r = (4 + nextInt(8) * 4).dp
+              return when (nextInt(6)) {
+                  0 -> CutCornerShape(r)
+                  1 -> RoundedCornerShape(topStart = r, bottomEnd = r)
+                  2 -> RoundedCornerShape(topEnd = r, bottomStart = r)
+                  3 -> AbsoluteCutCornerShape(topLeft = r, bottomRight = r)
+                  4 -> RoundedCornerShape(r)
+                  else -> CircleShape
+              }
+          }
+
+          private val bodyText = "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs."
+
+          // ---------------------------------------------------------------- Palette
+          @Composable
+          fun Palette(i: Int) {
+              val r = rnd(i, 1)
+              val h = r.hue()
+              val sat = 0.4f + r.nextFloat() * 0.5f
+              val sh = r.shape()
+              when (i % 8) {
+                  0 -> Row(Modifier.fillMaxWidth()) {
+                      for (k in 0 until 10) Box(Modifier.weight(1f).height(56.dp).background(hc(h, sat, 0.1f + 0.08f * k)))
+                  }
+                  1 -> {
+                      val cols = List(20) { hc(h + it * 18f, sat, 0.35f + (it % 5) * 0.1f) }
+                      for (row in 0 until 4) Row(Modifier.fillMaxWidth()) {
+                          for (c in 0 until 5) {
+                              val col = cols[row * 5 + c]
+                              Box(Modifier.weight(1f).height(44.dp).background(col), contentAlignment = Alignment.Center) {
+                                  Text(hex(col), fontSize = 9.sp, color = ink(col))
+                              }
+                          }
+                      }
+                  }
+                  2 -> {
+                      val a = hc(h, sat)
+                      val b = hc(h + 180f, sat)
+                      Row(Modifier.fillMaxWidth().height(110.dp).clip(sh)) {
+                          Box(Modifier.weight(1f).fillMaxHeight().background(a).padding(12.dp)) { Text("Base\n" + hex(a), color = ink(a)) }
+                          Box(Modifier.weight(1f).fillMaxHeight().background(b).padding(12.dp)) { Text("Contrast\n" + hex(b), color = ink(b)) }
+                      }
+                  }
+                  3 -> Row(Modifier.padding(start = 12.dp)) {
+                      for (k in 0 until 6) Box(
+                          Modifier.offset(x = (-12 * k).dp).size(64.dp).clip(CircleShape)
+                              .background(hc(h + k * 30f, sat))
+                              .border(2.dp, MaterialTheme.colorScheme.surface, CircleShape)
+                      )
+                  }
+                  4 -> {
+                      Box(Modifier.fillMaxWidth().height(40.dp).clip(sh).background(Brush.horizontalGradient(List(6) { hc(h + it * 25f, sat) })))
+                      Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          for (k in 0 until 3) {
+                              val c = hc(h + k * 40f, sat)
+                              AssistChip(onClick = {}, label = { Text(hex(c)) },
+                                  colors = AssistChipDefaults.assistChipColors(containerColor = c, labelColor = ink(c)))
+                          }
+                      }
+                  }
+                  5 -> Row(Modifier.fillMaxWidth().height(110.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                      for (k in 0 until 12) Box(Modifier.weight(1f).fillMaxHeight(0.2f + 0.8f * r.nextFloat()).background(hc(h + k * 8f, sat)))
+                  }
+                  6 -> {
+                      val cols = listOf(hc(h, sat), hc(h + 120f, sat), hc(h + 240f, sat))
+                      Canvas(Modifier.size(120.dp)) {
+                          cols.forEachIndexed { k, c ->
+                              drawArc(c, startAngle = k * 120f, sweepAngle = 116f, useCenter = false, style = Stroke(width = 28.dp.toPx()))
+                          }
+                      }
+                  }
+                  else -> {
+                      var sel by remember { mutableStateOf(0) }
+                      Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          for (k in 0 until 3) {
+                              val c = hc(h + k * 50f, sat)
+                              FilterChip(selected = sel == k, onClick = { sel = k }, label = { Text(hex(c)) },
+                                  colors = FilterChipDefaults.filterChipColors(selectedContainerColor = c, selectedLabelColor = ink(c)))
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Buttons
+          @Composable
+          fun BtnMatrix(i: Int) {
+              val r = rnd(i, 2)
+              val h = r.hue()
+              val c = hc(h)
+              val sh = r.shape()
+              val colors = ButtonDefaults.buttonColors(containerColor = c, contentColor = ink(c))
+              when (i % 8) {
+                  0 -> {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Button(onClick = {}, shape = sh, colors = colors, elevation = ButtonDefaults.buttonElevation(defaultElevation = r.nextInt(10).dp)) { Text("Filled") }
+                          OutlinedButton(onClick = {}, shape = sh, border = BorderStroke((1 + r.nextInt(4)).dp, c)) { Text("Outline", color = c) }
+                          TextButton(onClick = {}, shape = sh) { Text("Text", color = c) }
+                      }
+                      Button(onClick = {}, shape = sh, enabled = false) { Text("Disabled") }
+                  }
+                  1 -> for (k in 0 until 2) {
+                      Box(
+                          Modifier.fillMaxWidth().height(48.dp).clip(sh)
+                              .background(Brush.horizontalGradient(listOf(hc(h + k * 80f), hc(h + 60f + k * 80f))))
+                              .clickable { },
+                          contentAlignment = Alignment.Center
+                      ) { Text("Gradient action ${k + 1}", color = Color.White, fontWeight = FontWeight.Bold) }
+                  }
+                  2 -> {
+                      var sel by remember { mutableStateOf(0) }
+                      Row(Modifier.clip(sh).border(1.dp, c, sh)) {
+                          listOf("Day", "Week", "Month", "Year").forEachIndexed { k, l ->
+                              Box(
+                                  Modifier.weight(1f).background(if (sel == k) c else Color.Transparent)
+                                      .clickable { sel = k }.padding(vertical = 10.dp),
+                                  contentAlignment = Alignment.Center
+                              ) { Text(l, color = if (sel == k) ink(c) else c) }
+                          }
+                      }
+                  }
+                  3 -> Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                      FloatingActionButton(onClick = {}, containerColor = c, contentColor = ink(c)) { Text("+", fontSize = 24.sp) }
+                      SmallFloatingActionButton(onClick = {}, containerColor = hc(h + 120f)) { Text("\u2665", color = Color.White) }
+                      ExtendedFloatingActionButton(onClick = {}, containerColor = hc(h + 240f), contentColor = Color.White) { Text("Compose") }
+                  }
+                  4 -> {
+                      val ic = IconButtonDefaults.filledIconButtonColors(containerColor = c, contentColor = ink(c))
+                      Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                          FilledIconButton(onClick = {}, colors = ic) { Text("\u2605") }
+                          FilledTonalIconButton(onClick = {}) { Text("\u2665") }
+                          OutlinedIconButton(onClick = {}) { Text("\u2713") }
+                          IconButton(onClick = {}) { Text("\u2699", fontSize = 22.sp) }
+                      }
+                  }
+                  5 -> {
+                      var n by remember { mutableStateOf(0) }
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Button(onClick = { n++ }, shape = sh, colors = colors) { Text("Tapped $n times") }
+                          OutlinedButton(onClick = { n = 0 }, shape = sh) { Text("Reset") }
+                      }
+                  }
+                  6 -> Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                      BadgedBox(badge = { Badge { Text("${i % 9 + 1}") } }) {
+                          Button(onClick = {}, shape = sh, colors = colors) { Text("Inbox") }
+                      }
+                      ElevatedButton(onClick = {}, shape = sh) { Text("Elevated") }
+                  }
+                  else -> FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      ElevatedButton(onClick = {}, shape = sh) { Text("Elevated") }
+                      FilledTonalButton(onClick = {}, shape = sh) { Text("Tonal") }
+                      OutlinedButton(onClick = {}, shape = sh, border = BorderStroke(2.dp, Brush.horizontalGradient(listOf(c, hc(h + 90f))))) { Text("Gradient border") }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Cards
+          @Composable
+          fun GradCard(i: Int) {
+              val r = rnd(i, 3)
+              val h = r.hue()
+              val c1 = hc(h)
+              val c2 = hc(h + 70f + r.nextInt(100))
+              val sh = r.shape()
+              val names = listOf("Ava Moreno", "Kenji Sato", "Lina Okafor", "Mateo Rossi", "Zoe Lindqvist", "Omar Haddad")
+              when (i % 8) {
+                  0 -> Card(Modifier.fillMaxWidth(), shape = sh, elevation = CardDefaults.cardElevation((1 + r.nextInt(8)).dp)) {
+                      Box(Modifier.background(if (r.nextBoolean()) Brush.verticalGradient(listOf(c1, c2)) else Brush.horizontalGradient(listOf(c1, c2))).padding(20.dp)) {
+                          Column {
+                              Text("Gradient card $i", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                              Text("Hue ${h.toInt()}", color = Color.White.copy(alpha = 0.85f))
+                          }
+                      }
+                  }
+                  1 -> Card(Modifier.fillMaxWidth(), shape = CutCornerShape(18.dp)) {
+                      Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                          Column(Modifier.weight(1f)) {
+                              Text("ADMIT ONE", fontSize = 11.sp, letterSpacing = 2.sp, color = c1)
+                              Text("Gate ${i % 20 + 1}", style = MaterialTheme.typography.headlineSmall)
+                          }
+                          Canvas(Modifier.width(2.dp).height(60.dp)) {
+                              drawLine(c1, Offset(0f, 0f), Offset(0f, size.height), strokeWidth = 3f,
+                                  pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f)))
+                          }
+                          Text("No. ${1000 + i}", Modifier.padding(start = 16.dp), fontWeight = FontWeight.Bold)
+                      }
+                  }
+                  2 -> Card(Modifier.fillMaxWidth()) {
+                      var f by remember { mutableStateOf(false) }
+                      val name = names[i % names.size]
+                      Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                          Box(Modifier.size(52.dp).clip(CircleShape).background(Brush.linearGradient(listOf(c1, c2))), contentAlignment = Alignment.Center) {
+                              Text(name.take(1) + name.substringAfter(' ').take(1), color = Color.White, fontWeight = FontWeight.Bold)
+                          }
+                          Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                              Text(name, fontWeight = FontWeight.SemiBold)
+                              Text("@" + name.lowercase().replace(' ', '_'), fontSize = 11.sp)
+                          }
+                          if (f) OutlinedButton(onClick = { f = false }) { Text("Following") }
+                          else Button(onClick = { f = true }, colors = ButtonDefaults.buttonColors(containerColor = c1, contentColor = ink(c1))) { Text("Follow") }
+                      }
+                  }
+                  3 -> {
+                      val pts = List(12) { r.nextFloat() }
+                      Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = hc(h, 0.5f, 0.15f))) {
+                          Column(Modifier.padding(16.dp)) {
+                              Text("REVENUE", fontSize = 11.sp, color = hc(h, 0.6f, 0.7f), letterSpacing = 2.sp)
+                              Text("\$" + (100 + r.nextInt(900)) + "K", fontSize = 34.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                              Canvas(Modifier.fillMaxWidth().height(48.dp)) {
+                                  val p = Path()
+                                  pts.forEachIndexed { k, v ->
+                                      val x = size.width * k / (pts.size - 1)
+                                      val y = size.height * (1f - v)
+                                      if (k == 0) p.moveTo(x, y) else p.lineTo(x, y)
+                                  }
+                                  drawPath(p, c1, style = Stroke(width = 3.dp.toPx()))
+                              }
+                          }
+                      }
+                  }
+                  4 -> Box(Modifier.fillMaxWidth().height(150.dp).clip(sh).background(Brush.radialGradient(listOf(c1, c2)))) {
+                      Column(Modifier.align(Alignment.BottomStart).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Text("Big headline $i", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                          Button(onClick = {}, colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = c2)) { Text("Get started") }
+                      }
+                  }
+                  5 -> Card(Modifier.fillMaxWidth(), border = BorderStroke(2.dp, c1)) {
+                      Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Text(r.pick(listOf("PRO", "TEAM", "STARTER", "MAX")), color = c1, fontWeight = FontWeight.Bold)
+                          Text("\$" + (5 + i % 20) + "/mo", fontSize = 30.sp)
+                          listOf("Unlimited screens", "Dark mode", "Priority support").forEach { Text("\u2713 $it", fontSize = 13.sp) }
+                          Button(onClick = {}, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = c1, contentColor = ink(c1))) { Text("Choose") }
+                      }
+                  }
+                  6 -> Card(Modifier.fillMaxWidth()) {
+                      Row(Modifier.height(IntrinsicSize.Min)) {
+                          Box(Modifier.width(6.dp).fillMaxHeight().background(c1))
+                          Column(Modifier.padding(12.dp)) {
+                              Text("Update available", fontWeight = FontWeight.Bold)
+                              Text("Version 2.$i is ready to install", fontSize = 12.sp)
+                          }
+                      }
+                  }
+                  else -> Box(Modifier.fillMaxWidth().height(130.dp).clip(sh).background(Brush.linearGradient(listOf(c1, c2, hc(h + 200f))))) {
+                      Box(
+                          Modifier.align(Alignment.Center).fillMaxWidth(0.8f).clip(RoundedCornerShape(16.dp))
+                              .background(Color.White.copy(alpha = 0.25f))
+                              .border(1.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(16.dp)).padding(16.dp)
+                      ) { Text("Glass panel $i", color = Color.White) }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Gradients
+          @Composable
+          fun Gradient(i: Int) {
+              val r = rnd(i, 4)
+              val h = r.hue()
+              val c1 = hc(h)
+              val c2 = hc(h + 60f + r.nextInt(120))
+              val c3 = hc(h + 200f + r.nextInt(100))
+              val sh = r.shape()
+              val full = Modifier.fillMaxWidth().height(52.dp)
+              when (i % 8) {
+                  0 -> {
+                      val a = listOf(c1, c2, c3)
+                      Box(full.background(Brush.horizontalGradient(a), sh))
+                      Box(full.background(Brush.verticalGradient(a), sh))
+                      Box(full.background(Brush.radialGradient(a), sh))
+                      Box(full.background(Brush.sweepGradient(a + c1), sh))
+                      Box(full.background(Brush.linearGradient(a, start = Offset(0f, 0f), end = Offset(400f, 200f)), sh))
+                  }
+                  1 -> Box(Modifier.size(140.dp).clip(CircleShape).background(Brush.radialGradient(listOf(c1, c2, c3))))
+                  2 -> Canvas(Modifier.size(140.dp)) {
+                      drawCircle(Brush.sweepGradient(listOf(c1, c2, c3, c1)), style = Stroke(width = 24.dp.toPx()))
+                  }
+                  3 -> Canvas(Modifier.fillMaxWidth().height(100.dp)) {
+                      val step = (10 + r.nextInt(20)).dp.toPx()
+                      var x = -size.height
+                      var k = 0
+                      while (x < size.width) {
+                          drawLine(if (k % 2 == 0) c1 else c2, Offset(x, size.height), Offset(x + size.height, 0f), strokeWidth = step / 2)
+                          x += step
+                          k++
+                      }
+                  }
+                  4 -> {
+                      val centers = List(4) { Offset(r.nextFloat(), r.nextFloat()) }
+                      Box(Modifier.fillMaxWidth().height(130.dp).clip(sh).background(Color(0xFF111111))) {
+                          Canvas(Modifier.fillMaxSize()) {
+                              centers.forEachIndexed { k, o ->
+                                  val ctr = Offset(size.width * o.x, size.height * o.y)
+                                  val rad = size.width * 0.4f
+                                  drawCircle(
+                                      Brush.radialGradient(listOf(hc(h + k * 80f).copy(alpha = 0.9f), Color.Transparent), center = ctr, radius = rad),
+                                      radius = rad, center = ctr
+                                  )
+                              }
+                          }
+                      }
+                  }
+                  5 -> Text("Gradient text $i", style = TextStyle(brush = Brush.horizontalGradient(listOf(c1, c2, c3)), fontSize = 34.sp, fontWeight = FontWeight.Bold))
+                  6 -> Box(
+                      Modifier.fillMaxWidth().height(80.dp).border(4.dp, Brush.sweepGradient(listOf(c1, c2, c3, c1)), sh).padding(16.dp),
+                      contentAlignment = Alignment.Center
+                  ) { Text("Gradient border $i") }
+                  else -> Box(
+                      Modifier.fillMaxWidth().height(80.dp).clip(sh).background(
+                          Brush.horizontalGradient(0f to c1, 0.33f to c1, 0.33f to c2, 0.66f to c2, 0.66f to c3, 1f to c3)
+                      )
+                  )
+              }
+          }
+
+          // ---------------------------------------------------------------- Typography
+          @Composable
+          fun Typo(i: Int) {
+              val r = rnd(i, 5)
+              val h = r.hue()
+              val c = hc(h, 0.7f, 0.45f)
+              val c2 = hc(h + 150f)
+              val fam = r.pick(listOf(FontFamily.Serif, FontFamily.SansSerif, FontFamily.Monospace, FontFamily.Cursive, FontFamily.Default))
+              val w = FontWeight(100 + 100 * r.nextInt(9))
+              when (i % 8) {
+                  0 -> {
+                      Text("Headline $i", fontSize = (28 + r.nextInt(16)).sp, fontWeight = w, fontFamily = fam, color = c)
+                      Text(bodyText, fontSize = 14.sp, lineHeight = (18 + r.nextInt(10)).sp, fontFamily = fam,
+                          textAlign = r.pick(listOf(TextAlign.Start, TextAlign.Center, TextAlign.End, TextAlign.Justify)))
+                  }
+                  1 -> {
+                      Text("QUARTERLY REPORT", fontSize = 11.sp, letterSpacing = 3.sp, color = c)
+                      Text("" + r.nextInt(9999), fontSize = 56.sp, fontWeight = FontWeight.Thin, fontFamily = fam)
+                  }
+                  2 -> Row {
+                      Text("\u201C", fontSize = 64.sp, color = c, fontFamily = FontFamily.Serif)
+                      Column {
+                          Text("Design is how it works.", fontSize = 20.sp, fontStyle = FontStyle.Italic, fontFamily = FontFamily.Serif)
+                          Text("\u2014 Author $i", fontSize = 11.sp)
+                      }
+                  }
+                  3 -> Row {
+                      Text("T", fontSize = 64.sp, fontWeight = FontWeight.Bold, color = c, fontFamily = fam)
+                      Text("he quick brown fox jumps over the lazy dog and keeps running across the field.", Modifier.padding(start = 6.dp, top = 12.dp), fontSize = 14.sp)
+                  }
+                  4 -> Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color(0xFF1E1E2E)).padding(12.dp)) {
+                      Text("fun main() {\n    println(\"Hello $i\")\n}", fontFamily = FontFamily.Monospace, color = Color(0xFFA6E3A1), fontSize = 13.sp)
+                  }
+                  5 -> Text("Shadow $i", style = TextStyle(fontSize = 40.sp, fontWeight = FontWeight.Black, color = c,
+                      shadow = Shadow(color = c2, offset = Offset(6f, 6f), blurRadius = 8f)))
+                  6 -> Text(buildAnnotatedString {
+                      append("E = mc")
+                      withStyle(SpanStyle(baselineShift = BaselineShift.Superscript, fontSize = 14.sp)) { append("2") }
+                      append("   H")
+                      withStyle(SpanStyle(baselineShift = BaselineShift.Subscript, fontSize = 14.sp)) { append("2") }
+                      append("O")
+                  }, fontSize = 28.sp, color = c)
+                  else -> Column {
+                      listOf(100, 300, 400, 500, 700, 900).forEach { Text("Weight $it", fontWeight = FontWeight(it), fontSize = 16.sp, color = c, fontFamily = fam) }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Animation
+          @Composable
+          fun Anim(i: Int) {
+              val r = rnd(i, 6)
+              val h = r.hue()
+              val c1 = hc(h)
+              val c2 = hc(h + 150f)
+              val dur = 600 + r.nextInt(1800)
+              val ease = r.pick(listOf(LinearEasing, LinearOutSlowInEasing, FastOutLinearInEasing, FastOutSlowInEasing))
+              val sh = r.shape()
+              val t = rememberInfiniteTransition(label = "t$i")
+              when (i % 8) {
+                  0 -> {
+                      val a by t.animateFloat(0f, 360f, infiniteRepeatable(tween(dur, easing = LinearEasing), RepeatMode.Restart), label = "a")
+                      Box(Modifier.size(64.dp).rotate(a).background(c1, sh))
+                  }
+                  1 -> {
+                      val s by t.animateFloat(0.6f, 1.2f, infiniteRepeatable(tween(dur, easing = ease), RepeatMode.Reverse), label = "s")
+                      val al by t.animateFloat(0.3f, 1f, infiniteRepeatable(tween(dur, easing = ease), RepeatMode.Reverse), label = "al")
+                      Box(Modifier.size(72.dp).scale(s).alpha(al).background(c1, CircleShape))
+                  }
+                  2 -> {
+                      val ys = List(3) { k ->
+                          t.animateFloat(0f, 24f, infiniteRepeatable(tween(dur / 2, easing = ease), RepeatMode.Reverse, StartOffset(k * dur / 6)), label = "y$k")
+                      }
+                      Row(Modifier.height(48.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Bottom) {
+                          for (k in 0 until 3) Box(Modifier.offset(y = (-ys[k].value).dp).size(16.dp).background(hc(h + k * 40f), CircleShape))
+                      }
+                  }
+                  3 -> {
+                      val x by t.animateFloat(0f, 1f, infiniteRepeatable(tween(dur, easing = LinearEasing), RepeatMode.Restart), label = "x")
+                      Box(
+                          Modifier.fillMaxWidth().height(20.dp).clip(RoundedCornerShape(10.dp)).background(
+                              Brush.horizontalGradient(listOf(c1.copy(alpha = 0.15f), c1, c1.copy(alpha = 0.15f)), startX = x * 800f - 300f, endX = x * 800f + 300f)
+                          )
+                      )
+                  }
+                  4 -> {
+                      val sweep by t.animateFloat(30f, 300f, infiniteRepeatable(tween(dur, easing = ease), RepeatMode.Reverse), label = "sw")
+                      val rot by t.animateFloat(0f, 360f, infiniteRepeatable(tween(dur * 2, easing = LinearEasing), RepeatMode.Restart), label = "rot")
+                      Canvas(Modifier.size(80.dp).rotate(rot)) {
+                          drawArc(c1, 0f, sweep, false, style = Stroke(width = 8.dp.toPx(), cap = StrokeCap.Round))
+                      }
+                  }
+                  5 -> {
+                      val hs = List(5) { k ->
+                          t.animateFloat(0.2f, 1f, infiniteRepeatable(tween(dur / 2, easing = ease), RepeatMode.Reverse, StartOffset(k * dur / 8)), label = "b$k")
+                      }
+                      Row(Modifier.height(60.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Bottom) {
+                          for (k in 0 until 5) Box(Modifier.width(10.dp).fillMaxHeight(hs[k].value).background(hc(h + k * 25f), RoundedCornerShape(5.dp)))
+                      }
+                  }
+                  6 -> {
+                      val pct by t.animateFloat(0f, 50f, infiniteRepeatable(tween(dur, easing = ease), RepeatMode.Reverse), label = "p")
+                      val col by t.animateColor(c1, c2, infiniteRepeatable(tween(dur), RepeatMode.Reverse), label = "c")
+                      Box(Modifier.size(80.dp).background(col, RoundedCornerShape(pct.toInt())))
+                  }
+                  else -> {
+                      val ang by t.animateFloat(0f, 360f, infiniteRepeatable(tween(dur * 2, easing = LinearEasing), RepeatMode.Restart), label = "o")
+                      val rad = ang * 0.017453292f
+                      Box(Modifier.size(120.dp), contentAlignment = Alignment.Center) {
+                          Box(Modifier.size(24.dp).background(c2, CircleShape))
+                          Box(Modifier.size(14.dp).offset(x = (50f * cos(rad)).dp, y = (50f * sin(rad)).dp).background(c1, CircleShape))
+                      }
+                  }
+              }
+              Text("Duration $dur ms", fontSize = 11.sp)
+          }
+
+          // ---------------------------------------------------------------- Shape lab
+          @Composable
+          fun ShapeLab(i: Int) {
+              val r = rnd(i, 7)
+              val h = r.hue()
+              val c1 = hc(h)
+              val c2 = hc(h + 90f)
+              val c3 = hc(h + 200f)
+              val sh = r.shape()
+              when (i % 8) {
+                  0 -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                      Surface(Modifier.size(72.dp), shape = sh, color = c1, shadowElevation = r.nextInt(10).dp) {}
+                      Surface(Modifier.size(72.dp), shape = r.shape(), color = c2, border = BorderStroke(2.dp, c1)) {}
+                      Surface(Modifier.size(72.dp), shape = r.shape(), color = c3, tonalElevation = r.nextInt(10).dp) {}
+                      Surface(Modifier.size(72.dp), shape = r.shape(), color = Color.Transparent, border = BorderStroke(2.dp, c2)) {}
+                  }
+                  1 -> {
+                      val n = 3 + i % 7
+                      Canvas(Modifier.size(110.dp)) {
+                          val p = Path()
+                          for (k in 0 until n) {
+                              val a = (2.0 * PI * k / n - PI / 2).toFloat()
+                              val x = size.width / 2 + size.width / 2 * cos(a)
+                              val y = size.height / 2 + size.height / 2 * sin(a)
+                              if (k == 0) p.moveTo(x, y) else p.lineTo(x, y)
+                          }
+                          p.close()
+                          drawPath(p, Brush.linearGradient(listOf(c1, c2)))
+                      }
+                  }
+                  2 -> {
+                      val pts = 5 + i % 5
+                      Canvas(Modifier.size(110.dp)) {
+                          val p = Path()
+                          for (k in 0 until pts * 2) {
+                              val rad = if (k % 2 == 0) size.width / 2 else size.width / 4
+                              val a = (PI * k / pts - PI / 2).toFloat()
+                              val x = size.width / 2 + rad * cos(a)
+                              val y = size.height / 2 + rad * sin(a)
+                              if (k == 0) p.moveTo(x, y) else p.lineTo(x, y)
+                          }
+                          p.close()
+                          drawPath(p, c1)
+                      }
+                  }
+                  3 -> Box(Modifier.size(120.dp)) {
+                      Box(Modifier.size(80.dp).background(c1.copy(alpha = 0.8f), CircleShape))
+                      Box(Modifier.size(70.dp).offset(40.dp, 20.dp).background(c2.copy(alpha = 0.8f), CircleShape))
+                      Box(Modifier.size(60.dp).offset(10.dp, 50.dp).background(c3.copy(alpha = 0.8f), CircleShape))
+                  }
+                  4 -> Box(Modifier.size(120.dp), contentAlignment = Alignment.Center) {
+                      for (k in 0 until 5) Box(Modifier.size((110 - k * 18).dp).rotate(k * (10f + i % 20)).background(hc(h + k * 30f).copy(alpha = 0.7f), sh))
+                  }
+                  5 -> {
+                      val tri = GenericShape { s, _ -> moveTo(s.width / 2, 0f); lineTo(s.width, s.height); lineTo(0f, s.height); close() }
+                      val dia = GenericShape { s, _ -> moveTo(s.width / 2, 0f); lineTo(s.width, s.height / 2); lineTo(s.width / 2, s.height); lineTo(0f, s.height / 2); close() }
+                      val hex = GenericShape { s, _ ->
+                          moveTo(s.width * 0.25f, 0f); lineTo(s.width * 0.75f, 0f); lineTo(s.width, s.height / 2)
+                          lineTo(s.width * 0.75f, s.height); lineTo(s.width * 0.25f, s.height); lineTo(0f, s.height / 2); close()
+                      }
+                      Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                          Box(Modifier.size(80.dp).clip(tri).background(c1))
+                          Box(Modifier.size(80.dp).clip(dia).background(c2))
+                          Box(Modifier.size(80.dp).clip(hex).background(c3))
+                      }
+                  }
+                  6 -> Box(Modifier.size(120.dp), contentAlignment = Alignment.Center) {
+                      for (k in 0 until 5) Box(Modifier.size((120 - k * 22).dp).border((2 + k % 3).dp, hc(h + k * 40f), CircleShape))
+                  }
+                  else -> FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      for (k in 0 until 6) {
+                          val c = hc(h + k * 55f)
+                          Box(Modifier.size(width = 70.dp, height = 36.dp).background(c, r.shape()), contentAlignment = Alignment.Center) {
+                              Text("B$k", color = ink(c), fontSize = 12.sp)
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Controls
+          @Composable
+          fun Ctl(i: Int) {
+              val r = rnd(i, 8)
+              val h = r.hue()
+              val c = hc(h)
+              val sh = r.shape()
+              when (i % 8) {
+                  0 -> {
+                      var s by remember { mutableStateOf(0.2f + 0.1f * r.nextInt(8)) }
+                      var on by remember { mutableStateOf(r.nextBoolean()) }
+                      Slider(s, { s = it }, colors = SliderDefaults.colors(thumbColor = c, activeTrackColor = c, inactiveTrackColor = c.copy(alpha = 0.25f)))
+                      LinearProgressIndicator({ s }, Modifier.fillMaxWidth().height((4 + r.nextInt(8)).dp), color = c, trackColor = c.copy(alpha = 0.2f))
+                      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                          CircularProgressIndicator({ s }, color = c, strokeWidth = (2 + r.nextInt(6)).dp)
+                          Switch(on, { on = it }, colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = c))
+                          Checkbox(on, { on = it }, colors = CheckboxDefaults.colors(checkedColor = c))
+                          RadioButton(on, { on = !on }, colors = RadioButtonDefaults.colors(selectedColor = c))
+                      }
+                  }
+                  1 -> {
+                      var range by remember { mutableStateOf(0.2f..0.7f) }
+                      RangeSlider(value = range, onValueChange = { range = it },
+                          colors = SliderDefaults.colors(thumbColor = c, activeTrackColor = c))
+                      Text("${(range.start * 100).toInt()} \u2013 ${(range.endInclusive * 100).toInt()}", fontSize = 11.sp)
+                  }
+                  2 -> {
+                      var sel by remember { mutableStateOf(1) }
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          listOf("S", "M", "L", "XL").forEachIndexed { k, l ->
+                              FilterChip(selected = sel == k, onClick = { sel = k }, label = { Text(l) }, shape = sh,
+                                  colors = FilterChipDefaults.filterChipColors(selectedContainerColor = c, selectedLabelColor = ink(c)))
+                          }
+                      }
+                  }
+                  3 -> {
+                      var n by remember { mutableStateOf(r.nextInt(5)) }
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          OutlinedIconButton(onClick = { if (n > 0) n-- }) { Text("\u2212") }
+                          Text("$n", Modifier.padding(horizontal = 16.dp), fontSize = 22.sp)
+                          FilledIconButton(onClick = { n++ }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = c, contentColor = ink(c))) { Text("+") }
+                      }
+                  }
+                  4 -> {
+                      var rating by remember { mutableStateOf(1 + r.nextInt(5)) }
+                      Row {
+                          for (k in 1..5) Text(if (k <= rating) "\u2605" else "\u2606", fontSize = 32.sp, color = c, modifier = Modifier.clickable { rating = k })
+                      }
+                  }
+                  5 -> {
+                      val st = remember { mutableStateListOf(true, false, true) }
+                      listOf("Wi-Fi", "Bluetooth", "Airplane mode").forEachIndexed { k, label ->
+                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                              Text(label)
+                              Switch(st[k], { st[k] = it }, colors = SwitchDefaults.colors(checkedTrackColor = c))
+                          }
+                      }
+                  }
+                  6 -> {
+                      var p by remember { mutableStateOf(0.1f + 0.1f * r.nextInt(8)) }
+                      Box(contentAlignment = Alignment.Center) {
+                          CircularProgressIndicator({ p }, Modifier.size(100.dp), color = c, strokeWidth = 8.dp)
+                          Text("${(p * 100).toInt()}%", fontSize = 20.sp)
+                      }
+                      Slider(p, { p = it }, colors = SliderDefaults.colors(thumbColor = c, activeTrackColor = c))
+                  }
+                  else -> {
+                      val kids = remember { mutableStateListOf(true, false, true) }
+                      val parent = when {
+                          kids.all { it } -> ToggleableState.On
+                          kids.none { it } -> ToggleableState.Off
+                          else -> ToggleableState.Indeterminate
+                      }
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          TriStateCheckbox(state = parent, onClick = {
+                              val all = parent != ToggleableState.On
+                              for (k in kids.indices) kids[k] = all
+                          }, colors = CheckboxDefaults.colors(checkedColor = c))
+                          Text("Select all")
+                      }
+                      kids.forEachIndexed { k, v ->
+                          Row(Modifier.padding(start = 24.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Checkbox(v, { kids[k] = it }, colors = CheckboxDefaults.colors(checkedColor = c))
+                              Text("Option ${k + 1}")
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Text fields
+          @Composable
+          fun Field(i: Int) {
+              val r = rnd(i, 9)
+              val h = r.hue()
+              val c = hc(h)
+              val sh = r.shape()
+              var v by remember { mutableStateOf("") }
+              when (i % 8) {
+                  0 -> {
+                      OutlinedTextField(v, { v = it }, label = { Text("Outlined field $i") }, shape = sh, modifier = Modifier.fillMaxWidth(),
+                          colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c, unfocusedBorderColor = c.copy(alpha = 0.5f), focusedLabelColor = c, cursorColor = c))
+                      TextField(v, { v = it }, placeholder = { Text("Filled field $i") }, shape = sh, modifier = Modifier.fillMaxWidth(),
+                          colors = TextFieldDefaults.colors(focusedContainerColor = c.copy(alpha = 0.15f), unfocusedContainerColor = c.copy(alpha = 0.08f),
+                              focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent))
+                  }
+                  1 -> OutlinedTextField(v, { v = it }, placeholder = { Text("Search\u2026") }, leadingIcon = { Text("\uD83D\uDD0D") },
+                      trailingIcon = { if (v.isNotEmpty()) Text("\u2715", Modifier.clickable { v = "" }.padding(8.dp)) },
+                      singleLine = true, shape = CircleShape, modifier = Modifier.fillMaxWidth())
+                  2 -> {
+                      var show by remember { mutableStateOf(false) }
+                      OutlinedTextField(v, { v = it }, label = { Text("Password") }, singleLine = true, shape = sh,
+                          visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
+                          trailingIcon = { TextButton(onClick = { show = !show }) { Text(if (show) "Hide" else "Show", color = c) } })
+                  }
+                  3 -> {
+                      val d = remember { mutableStateListOf("", "", "", "") }
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          for (k in 0 until 4) OutlinedTextField(d[k], { if (it.length <= 1) d[k] = it.filter(Char::isDigit) }, Modifier.width(58.dp),
+                              singleLine = true, textStyle = TextStyle(textAlign = TextAlign.Center, fontSize = 20.sp), shape = sh)
+                      }
+                  }
+                  4 -> OutlinedTextField(v, { v = it }, label = { Text("Username") }, shape = sh, modifier = Modifier.fillMaxWidth(),
+                      isError = v.length in 1..2, supportingText = { Text(if (v.length in 1..2) "Too short" else "${v.length}/12") })
+                  5 -> TextField(v, { v = it }, minLines = 3, maxLines = 5, label = { Text("Message") }, modifier = Modifier.fillMaxWidth(),
+                      supportingText = { Text("${v.length}/200", Modifier.fillMaxWidth(), textAlign = TextAlign.End) })
+                  6 -> BasicTextField(v, { v = it }, Modifier.fillMaxWidth(),
+                      textStyle = TextStyle(fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface),
+                      decorationBox = { inner ->
+                          Column {
+                              Box { if (v.isEmpty()) Text("Type here\u2026", color = Color.Gray, fontSize = 18.sp); inner() }
+                              Box(Modifier.fillMaxWidth().padding(top = 4.dp).height(2.dp).background(c))
+                          }
+                      })
+                  else -> OutlinedTextField(v, { v = it.filter { ch -> ch.isDigit() } }, label = { Text("Amount") },
+                      prefix = { Text("\$") }, suffix = { Text(".00") }, singleLine = true, shape = sh,
+                      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+              }
+          }
+
+
+          // ================================================================= NEW FAMILIES (10 layouts each, every one shown once)
+          private val people = listOf("Ava Moreno", "Kenji Sato", "Lina Okafor", "Mateo Rossi", "Zoe Lindqvist", "Omar Haddad", "Priya Nair", "Leo Fischer")
+
+          @Composable
+          private fun Av(name: String, c: Color, s: Dp = 40.dp) {
+              Box(Modifier.size(s).clip(CircleShape).background(c), contentAlignment = Alignment.Center) {
+                  Text(name.take(1) + name.substringAfter(' ', "").take(1), color = ink(c), fontWeight = FontWeight.Bold, fontSize = (s.value / 3).sp)
+              }
+          }
+
+          @Composable
+          private fun shimmerBrush(): Brush {
+              val t = rememberInfiniteTransition(label = "sh")
+              val x by t.animateFloat(0f, 1f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "x")
+              val base = MaterialTheme.colorScheme.surfaceVariant
+              return Brush.horizontalGradient(listOf(base, base.copy(alpha = 0.35f), base), startX = x * 900f - 300f, endX = x * 900f)
+          }
+
+          // ---------------------------------------------------------------- Navigation
+          @Composable
+          fun NavFam(i: Int) {
+              val r = rnd(i, 11)
+              val h = r.hue()
+              val c = hc(h)
+              val sh = r.shape()
+              var sel by remember { mutableStateOf(0) }
+              when (i % 10) {
+                  0 -> Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c).padding(horizontal = 12.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Text("\u2190", color = ink(c), fontSize = 20.sp)
+                      Text("Page title", Modifier.weight(1f).padding(horizontal = 12.dp), color = ink(c), fontWeight = FontWeight.Bold)
+                      Text("\u22EE", color = ink(c), fontSize = 20.sp)
+                  }
+                  1 -> NavigationBar {
+                      listOf("🏠" to "Home", "🔍" to "Search", "❤" to "Saved", "👤" to "Me").forEachIndexed { k, (g, l) ->
+                          NavigationBarItem(selected = sel == k, onClick = { sel = k }, icon = { Text(g, fontSize = 20.sp) }, label = { Text(l) })
+                      }
+                  }
+                  2 -> TabRow(selectedTabIndex = sel, containerColor = Color.Transparent, contentColor = c) {
+                      listOf("Photos", "Videos", "Albums").forEachIndexed { k, l -> Tab(selected = sel == k, onClick = { sel = k }, text = { Text(l) }) }
+                  }
+                  3 -> ScrollableTabRow(selectedTabIndex = sel, edgePadding = 0.dp, containerColor = Color.Transparent, contentColor = c) {
+                      listOf("For you", "Trending", "News", "Sports", "Music", "Gaming").forEachIndexed { k, l -> Tab(selected = sel == k, onClick = { sel = k }, text = { Text(l) }) }
+                  }
+                  4 -> Box(Modifier.height(210.dp)) {
+                      NavigationRail {
+                          listOf("🏠" to "Home", "📊" to "Stats", "⚙" to "Config").forEachIndexed { k, (g, l) ->
+                              NavigationRailItem(selected = sel == k, onClick = { sel = k }, icon = { Text(g, fontSize = 20.sp) }, label = { Text(l) })
+                          }
+                      }
+                  }
+                  5 -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                      listOf("Home", "Library", "Albums", "Item $i").forEachIndexed { k, l ->
+                          Text(l, color = if (k == 3) c else MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = if (k == 3) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.clickable { })
+                          if (k < 3) Text("\u203A")
+                      }
+                  }
+                  6 -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                      TextButton(onClick = { if (sel > 0) sel-- }) { Text("Prev") }
+                      Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                          for (k in 0 until 5) Box(Modifier.size(if (k == sel) 12.dp else 8.dp).background(if (k == sel) c else c.copy(alpha = 0.3f), CircleShape))
+                      }
+                      TextButton(onClick = { if (sel < 4) sel++ }) { Text("Next") }
+                  }
+                  7 -> {
+                      val step = 1 + r.nextInt(3)
+                      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                          for (k in 0 until 4) {
+                              Box(Modifier.size(28.dp).background(if (k <= step) c else c.copy(alpha = 0.25f), CircleShape), contentAlignment = Alignment.Center) {
+                                  Text(if (k < step) "\u2713" else "${k + 1}", color = ink(c), fontSize = 12.sp)
+                              }
+                              if (k < 3) Box(Modifier.weight(1f).height(2.dp).background(if (k < step) c else c.copy(alpha = 0.25f)))
+                          }
+                      }
+                  }
+                  8 -> Row(Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant).padding(4.dp)) {
+                      listOf("Feed", "Explore", "Inbox").forEachIndexed { k, l ->
+                          Box(Modifier.clip(CircleShape).background(if (sel == k) c else Color.Transparent).clickable { sel = k }.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                              Text(l, color = if (sel == k) ink(c) else MaterialTheme.colorScheme.onSurface)
+                          }
+                      }
+                  }
+                  else -> Column(Modifier.width(260.dp)) {
+                      listOf("📥" to "Inbox", "📤" to "Sent", "🗑" to "Trash").forEachIndexed { k, (g, l) ->
+                          NavigationDrawerItem(label = { Text(l) }, selected = sel == k, onClick = { sel = k }, icon = { Text(g) })
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Lists & rows
+          @Composable
+          fun ListFam(i: Int) {
+              val r = rnd(i, 12)
+              val h = r.hue()
+              val c = hc(h)
+              val sh = r.shape()
+              when (i % 10) {
+                  0 -> {
+                      val n = people[r.nextInt(people.size)]
+                      ListItem(headlineContent = { Text(n) }, supportingContent = { Text("Last seen ${1 + r.nextInt(50)} min ago") },
+                          leadingContent = { Av(n, c) }, trailingContent = { Text("2m", fontSize = 11.sp) })
+                  }
+                  1 -> {
+                      val st = remember { mutableStateListOf(true, false, false) }
+                      listOf("Buy groceries", "Write report", "Call mom").forEachIndexed { k, l ->
+                          Row(Modifier.fillMaxWidth().clickable { st[k] = !st[k] }, verticalAlignment = Alignment.CenterVertically) {
+                              Checkbox(st[k], { st[k] = it }, colors = CheckboxDefaults.colors(checkedColor = c))
+                              Text(l, textDecoration = if (st[k]) TextDecoration.LineThrough else TextDecoration.None)
+                          }
+                      }
+                  }
+                  2 -> {
+                      var open by remember { mutableStateOf(false) }
+                      Card(Modifier.fillMaxWidth().clickable { open = !open }) {
+                          Column(Modifier.padding(16.dp)) {
+                              Row { Text("Details", Modifier.weight(1f), fontWeight = FontWeight.Bold); Text(if (open) "\u25B2" else "\u25BC") }
+                              AnimatedVisibility(open) { Text(bodyText, Modifier.padding(top = 8.dp)) }
+                          }
+                      }
+                  }
+                  3 -> {
+                      val st = remember { mutableStateListOf(true, false, true) }
+                      listOf("🔔" to "Notifications", "🌙" to "Dark mode", "📍" to "Location").forEachIndexed { k, (g, l) ->
+                          Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Text(g, fontSize = 22.sp)
+                              Text(l, Modifier.weight(1f).padding(start = 12.dp))
+                              Switch(st[k], { st[k] = it }, colors = SwitchDefaults.colors(checkedTrackColor = c))
+                          }
+                      }
+                  }
+                  4 -> Column {
+                      listOf("A" to listOf(people[0], people[5]), "K" to listOf(people[1]), "L" to listOf(people[2])).forEach { (letter, ns) ->
+                          Text(letter, Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 4.dp), color = c, fontWeight = FontWeight.Bold)
+                          ns.forEach { n -> Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Av(n, hc(h + n.length * 20f), 32.dp); Text(n, Modifier.padding(start = 12.dp)) } }
+                      }
+                  }
+                  5 -> {
+                      val n = people[r.nextInt(people.size)]
+                      Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                          Av(n, c, 48.dp)
+                          Column(Modifier.weight(1f).padding(horizontal = 12.dp)) { Text(n, fontWeight = FontWeight.SemiBold); Text("Sounds good, see you then!", fontSize = 12.sp, maxLines = 1) }
+                          Badge(containerColor = c) { Text("${1 + r.nextInt(9)}") }
+                      }
+                  }
+                  6 -> Column {
+                      for (k in 0 until 4) Row(Modifier.height(IntrinsicSize.Min)) {
+                          Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                              Box(Modifier.size(12.dp).background(c, CircleShape))
+                              if (k < 3) Box(Modifier.width(2.dp).weight(1f).background(c.copy(alpha = 0.3f)))
+                          }
+                          Column(Modifier.padding(start = 12.dp, bottom = 12.dp)) { Text("Step ${k + 1}", fontWeight = FontWeight.Bold); Text("Detail text for this step", fontSize = 12.sp) }
+                      }
+                  }
+                  7 -> listOf("🥇", "🥈", "🥉").forEachIndexed { k, m ->
+                      Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                          Text(m, fontSize = 24.sp)
+                          Text(people[(k + i) % people.size], Modifier.weight(1f).padding(start = 12.dp))
+                          Text("${900 - k * 120 - r.nextInt(50)} pts", fontWeight = FontWeight.Bold, color = c)
+                      }
+                  }
+                  8 -> {
+                      val items = remember { mutableStateListOf("Item A", "Item B", "Item C") }
+                      items.toList().forEach { s ->
+                          Row(Modifier.fillMaxWidth().clip(sh).background(c.copy(alpha = 0.12f)).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Text(s, Modifier.weight(1f)); Text("\u2715", Modifier.clickable { items.remove(s) }.padding(12.dp))
+                          }
+                      }
+                      if (items.isEmpty()) Text("All cleared \u2728")
+                  }
+                  else -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      for (row in 0 until 2) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          for (col in 0 until 3) Box(Modifier.weight(1f).aspectRatio(1f).clip(sh).background(hc(h + (row * 3 + col) * 40f)), contentAlignment = Alignment.Center) {
+                              Text("${row * 3 + col + 1}", color = Color.White, fontWeight = FontWeight.Bold)
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Feedback & states
+          @Composable
+          fun FeedFam(i: Int) {
+              val r = rnd(i, 13)
+              val h = r.hue()
+              val c = hc(h)
+              when (i % 10) {
+                  0 -> listOf(Triple("Info", Color(0xFF1976D2), "Your trial ends in 3 days"), Triple("Warning", Color(0xFFF9A825), "Storage almost full"), Triple("Error", Color(0xFFD32F2F), "Payment failed")).forEach { (_, col, msg) ->
+                      Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(col.copy(alpha = 0.12f)), verticalAlignment = Alignment.CenterVertically) {
+                          Box(Modifier.width(4.dp).height(44.dp).background(col)); Text(msg, Modifier.padding(12.dp))
+                      }
+                  }
+                  1 -> Snackbar(action = { TextButton(onClick = {}) { Text("UNDO") } }) { Text("Item archived") }
+                  2 -> Card(Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(8.dp)) {
+                      Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                          Text("Delete item?", style = MaterialTheme.typography.titleLarge)
+                          Text("This action cannot be undone.")
+                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                              TextButton(onClick = {}) { Text("Cancel") }
+                              TextButton(onClick = {}) { Text("Delete", color = Color(0xFFD32F2F)) }
+                          }
+                      }
+                  }
+                  3 -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                      Box(Modifier.clip(RoundedCornerShape(8.dp)).background(Color(0xFF333333)).padding(8.dp)) { Text("Helpful tip $i", color = Color.White, fontSize = 12.sp) }
+                      Box(Modifier.size(10.dp).rotate(45f).offset(y = (-5).dp).background(Color(0xFF333333)))
+                  }
+                  4 -> Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                      BadgedBox(badge = { Badge() }) { Text("🔔", fontSize = 28.sp) }
+                      BadgedBox(badge = { Badge { Text("8") } }) { Text("✉", fontSize = 28.sp) }
+                      BadgedBox(badge = { Badge { Text("99+") } }) { Text("🛒", fontSize = 28.sp) }
+                  }
+                  5 -> Box(Modifier.clip(CircleShape).background(Color(0xFF222222)).padding(horizontal = 20.dp, vertical = 10.dp)) { Text("\u2713 Copied to clipboard", color = Color.White) }
+                  6 -> {
+                      var p by remember { mutableStateOf(0.3f) }
+                      Card(Modifier.fillMaxWidth()) {
+                          Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                              Text("Uploading photo.png")
+                              LinearProgressIndicator({ p }, Modifier.fillMaxWidth(), color = c)
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Text("${(p * 100).toInt()}%"); Spacer(Modifier.weight(1f))
+                                  TextButton(onClick = { p = (p + 0.2f).coerceAtMost(1f) }) { Text("+20%") }
+                              }
+                          }
+                      }
+                  }
+                  7 -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Box(Modifier.size(80.dp).background(c.copy(alpha = 0.15f), CircleShape), contentAlignment = Alignment.Center) { Text("📭", fontSize = 36.sp) }
+                      Text("Nothing here yet", style = MaterialTheme.typography.titleMedium)
+                      Text("Items you add will show up here", fontSize = 12.sp)
+                      Button(onClick = {}, colors = ButtonDefaults.buttonColors(containerColor = c, contentColor = ink(c))) { Text("Add item") }
+                  }
+                  8 -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Text("⚠", fontSize = 44.sp, color = Color(0xFFF9A825))
+                      Text("Something went wrong", style = MaterialTheme.typography.titleMedium)
+                      OutlinedButton(onClick = {}) { Text("Retry") }
+                  }
+                  else -> {
+                      var done by remember { mutableStateOf(false) }
+                      val s by animateFloatAsState(if (done) 1f else 0.7f, label = "s")
+                      Box(Modifier.size(80.dp).scale(s).background(if (done) Color(0xFF2E7D32) else Color.Gray, CircleShape).clickable { done = !done }, contentAlignment = Alignment.Center) {
+                          Text(if (done) "\u2713" else "?", color = Color.White, fontSize = 36.sp)
+                      }
+                      Text("Tap to toggle", fontSize = 11.sp)
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Charts & data
+          @Composable
+          fun VizFam(i: Int) {
+              val r = rnd(i, 14)
+              val h = r.hue()
+              val c = hc(h)
+              val sh = r.shape()
+              when (i % 10) {
+                  0 -> {
+                      val v = List(7) { 0.15f + 0.85f * r.nextFloat() }
+                      Row(Modifier.fillMaxWidth().height(130.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          v.forEachIndexed { k, x ->
+                              Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Bottom, horizontalAlignment = Alignment.CenterHorizontally) {
+                                  Box(Modifier.fillMaxWidth().fillMaxHeight(x * 0.85f).background(hc(h + k * 10f), RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp)))
+                                  Text("MTWTFSS"[k].toString(), fontSize = 10.sp)
+                              }
+                          }
+                      }
+                  }
+                  1 -> {
+                      val pts = List(10) { 0.1f + 0.8f * r.nextFloat() }
+                      Canvas(Modifier.fillMaxWidth().height(120.dp)) {
+                          val line = Path(); val area = Path()
+                          pts.forEachIndexed { k, v ->
+                              val x = size.width * k / (pts.size - 1); val y = size.height * (1f - v)
+                              if (k == 0) { line.moveTo(x, y); area.moveTo(x, y) } else { line.lineTo(x, y); area.lineTo(x, y) }
+                          }
+                          area.lineTo(size.width, size.height); area.lineTo(0f, size.height); area.close()
+                          drawPath(area, Brush.verticalGradient(listOf(c.copy(alpha = 0.4f), Color.Transparent)))
+                          drawPath(line, c, style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round))
+                      }
+                  }
+                  2 -> {
+                      val parts = List(5) { 0.1f + r.nextFloat() }
+                      val total = parts.sum()
+                      Canvas(Modifier.size(140.dp)) {
+                          var a = -90f
+                          parts.forEachIndexed { k, p -> val sw = 360f * p / total; drawArc(hc(h + k * 60f), a, sw, true); a += sw }
+                      }
+                  }
+                  3 -> {
+                      val parts = List(4) { 0.1f + r.nextFloat() }
+                      val total = parts.sum()
+                      Box(Modifier.size(150.dp), contentAlignment = Alignment.Center) {
+                          Canvas(Modifier.fillMaxSize().padding(14.dp)) {
+                              var a = -90f
+                              parts.forEachIndexed { k, p -> val sw = 360f * p / total; drawArc(hc(h + k * 70f), a, sw - 2f, false, style = Stroke(width = 22.dp.toPx())); a += sw }
+                          }
+                          Text("${(total * 10).toInt()}k", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                      }
+                  }
+                  4 -> {
+                      val pct = 0.15f + 0.8f * r.nextFloat()
+                      Box(Modifier.size(width = 180.dp, height = 100.dp).clipToBounds()) {
+                          Canvas(Modifier.fillMaxSize()) {
+                              val w = size.width - 40f
+                              drawArc(c.copy(alpha = 0.2f), 180f, 180f, false, topLeft = Offset(20f, 20f), size = Size(w, w), style = Stroke(width = 20f, cap = StrokeCap.Round))
+                              drawArc(c, 180f, 180f * pct, false, topLeft = Offset(20f, 20f), size = Size(w, w), style = Stroke(width = 20f, cap = StrokeCap.Round))
+                          }
+                          Text("${(pct * 100).toInt()}%", Modifier.align(Alignment.BottomCenter), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                      }
+                  }
+                  5 -> Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                      for (row in 0 until 5) Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                          for (col in 0 until 12) Box(Modifier.weight(1f).aspectRatio(1f).background(c.copy(alpha = 0.1f + 0.9f * r.nextFloat()), RoundedCornerShape(3.dp)))
+                      }
+                  }
+                  6 -> listOf("Kotlin", "Swift", "Rust", "Go").forEachIndexed { k, l ->
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Text(l, Modifier.width(60.dp), fontSize = 12.sp)
+                          Box(Modifier.weight(1f).height(14.dp).clip(CircleShape).background(c.copy(alpha = 0.15f))) {
+                              Box(Modifier.fillMaxWidth(0.2f + 0.8f * r.nextFloat()).fillMaxHeight().background(hc(h + k * 30f)))
+                          }
+                      }
+                  }
+                  7 -> {
+                      val pts = List(25) { Offset(r.nextFloat(), r.nextFloat()) }
+                      Canvas(Modifier.fillMaxWidth().height(120.dp).border(1.dp, c.copy(alpha = 0.3f))) {
+                          pts.forEach { drawCircle(c.copy(alpha = 0.7f), radius = (3 + it.x * 6).dp.toPx(), center = Offset(it.x * size.width, it.y * size.height)) }
+                      }
+                  }
+                  8 -> {
+                      val vals = List(5) { 0.3f + 0.7f * r.nextFloat() }
+                      Canvas(Modifier.size(150.dp)) {
+                          val cx = size.width / 2; val cy = size.height / 2; val rad = size.width / 2 * 0.9f
+                          fun poly(f: (Int) -> Float): Path {
+                              val p = Path()
+                              for (k in 0 until 5) {
+                                  val a = (2.0 * PI * k / 5 - PI / 2).toFloat()
+                                  val x = cx + rad * f(k) * cos(a); val y = cy + rad * f(k) * sin(a)
+                                  if (k == 0) p.moveTo(x, y) else p.lineTo(x, y)
+                              }
+                              p.close(); return p
+                          }
+                          for (g in 1..3) drawPath(poly { g / 3f }, c.copy(alpha = 0.3f), style = Stroke(width = 1.dp.toPx()))
+                          drawPath(poly { vals[it] }, c.copy(alpha = 0.4f))
+                          drawPath(poly { vals[it] }, c, style = Stroke(width = 2.dp.toPx()))
+                      }
+                  }
+                  else -> {
+                      val parts = List(4) { 0.2f + r.nextFloat() }
+                      Row(Modifier.fillMaxWidth().height(28.dp).clip(sh)) {
+                          parts.forEachIndexed { k, p -> Box(Modifier.weight(p).fillMaxHeight().background(hc(h + k * 70f))) }
+                      }
+                      Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                          for (k in parts.indices) Row(verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(8.dp).background(hc(h + k * 70f), CircleShape)); Text(" S${k + 1}", fontSize = 11.sp) }
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Forms & screens
+          @Composable
+          fun FormFam(i: Int) {
+              val r = rnd(i, 15)
+              val h = r.hue()
+              val c = hc(h)
+              val c2 = hc(h + 90f)
+              var a by remember { mutableStateOf("") }
+              var b by remember { mutableStateOf("") }
+              val btn = ButtonDefaults.buttonColors(containerColor = c, contentColor = ink(c))
+              when (i % 10) {
+                  0 -> Card(Modifier.fillMaxWidth()) {
+                      Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                          Text("Welcome back", style = MaterialTheme.typography.titleLarge)
+                          OutlinedTextField(a, { a = it }, label = { Text("Email") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                          OutlinedTextField(b, { b = it }, label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                          Button(onClick = {}, Modifier.fillMaxWidth(), colors = btn) { Text("Sign in") }
+                          TextButton(onClick = {}) { Text("Forgot password?") }
+                      }
+                  }
+                  1 -> {
+                      var ok by remember { mutableStateOf(false) }
+                      OutlinedTextField(a, { a = it }, label = { Text("Full name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                      OutlinedTextField(b, { b = it }, label = { Text("Email") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                      Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(ok, { ok = it }); Text("I agree to the terms") }
+                      Button(onClick = {}, Modifier.fillMaxWidth(), enabled = ok, colors = btn) { Text("Create account") }
+                  }
+                  2 -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Av(people[i % people.size], c, 80.dp)
+                      TextButton(onClick = {}) { Text("Change photo") }
+                      OutlinedTextField(a, { a = it }, label = { Text("Display name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                      OutlinedTextField(b, { b = it }, label = { Text("Bio") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+                  }
+                  3 -> Column {
+                      listOf("ACCOUNT" to listOf("Profile", "Security"), "APP" to listOf("Language", "Storage", "About")).forEach { (sec, rows) ->
+                          Text(sec, fontSize = 11.sp, color = c, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+                          rows.forEach { l -> Row(Modifier.fillMaxWidth().clickable { }.padding(vertical = 10.dp)) { Text(l, Modifier.weight(1f)); Text("\u203A") }; HorizontalDivider() }
+                      }
+                  }
+                  4 -> Box(Modifier.fillMaxWidth().height(160.dp).clip(RoundedCornerShape(16.dp)).background(Brush.linearGradient(listOf(c, c2))).padding(16.dp)) {
+                      Text("VISA", Modifier.align(Alignment.TopEnd), color = Color.White, fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic)
+                      Column(Modifier.align(Alignment.BottomStart)) {
+                          Text("\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 ${1000 + r.nextInt(9000)}", color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 18.sp)
+                          Text("VALID THRU 12/${27 + i % 5}", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp)
+                      }
+                  }
+                  5 -> {
+                      val sel = remember { mutableStateListOf(true, false, false) }
+                      OutlinedTextField(a, { a = it }, placeholder = { Text("Search places") }, singleLine = true, shape = CircleShape, modifier = Modifier.fillMaxWidth())
+                      Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          listOf("Open now", "Top rated", "Nearby").forEachIndexed { k, l -> FilterChip(selected = sel[k], onClick = { sel[k] = !sel[k] }, label = { Text(l) }) }
+                      }
+                      ListItem(headlineContent = { Text("Cafe Aurora") }, supportingContent = { Text("0.4 km \u2022 \u2605 4.7") })
+                  }
+                  6 -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Box(Modifier.size(120.dp).clip(CircleShape).background(Brush.linearGradient(listOf(c, c2))), contentAlignment = Alignment.Center) { Text(r.pick(listOf("🚀", "🌍", "🎨", "🔒")), fontSize = 48.sp) }
+                      Text("Welcome", style = MaterialTheme.typography.headlineSmall)
+                      Text("Everything you need in one place.", fontSize = 12.sp, textAlign = TextAlign.Center)
+                      Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { for (k in 0 until 3) Box(Modifier.size(if (k == 0) 12.dp else 8.dp).background(if (k == 0) c else c.copy(alpha = 0.3f), CircleShape)) }
+                      Button(onClick = {}, colors = btn) { Text("Next") }
+                  }
+                  7 -> Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                      Text("Enter the 6-digit code")
+                      Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          for (k in 0 until 6) Box(Modifier.size(width = 40.dp, height = 48.dp).border(2.dp, if (k < 4) c else c.copy(alpha = 0.3f), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) { if (k < 4) Text("${r.nextInt(10)}", fontSize = 20.sp) }
+                      }
+                      TextButton(onClick = {}) { Text("Resend code") }
+                  }
+                  8 -> {
+                      var stars by remember { mutableStateOf(3) }
+                      Row { for (k in 1..5) Text(if (k <= stars) "\u2605" else "\u2606", fontSize = 32.sp, color = c, modifier = Modifier.clickable { stars = k }) }
+                      OutlinedTextField(a, { a = it }, label = { Text("Tell us more") }, minLines = 3, modifier = Modifier.fillMaxWidth())
+                      Button(onClick = {}, colors = btn) { Text("Send feedback") }
+                  }
+                  else -> {
+                      var sel by remember { mutableStateOf(0) }
+                      listOf("Standard", "Express", "Overnight").forEachIndexed { k, l ->
+                          Row(Modifier.fillMaxWidth().clickable { sel = k }, verticalAlignment = Alignment.CenterVertically) {
+                              RadioButton(sel == k, { sel = k }, colors = RadioButtonDefaults.colors(selectedColor = c)); Text(l); Spacer(Modifier.weight(1f)); Text("\$${(k + 1) * 4}.99")
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Social & media
+          @Composable
+          fun SocialFam(i: Int) {
+              val r = rnd(i, 16)
+              val h = r.hue()
+              val c = hc(h)
+              val c2 = hc(h + 100f)
+              val n = people[i % people.size]
+              when (i % 10) {
+                  0 -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                          Box(Modifier.clip(RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(10.dp)) { Text("Hey! Are we still on?") }
+                      }
+                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                          Box(Modifier.clip(RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)).background(c).padding(10.dp)) { Text("Yes, see you at 6", color = ink(c)) }
+                      }
+                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                          Box(Modifier.clip(RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(10.dp)) { Text("Perfect \uD83D\uDC4D") }
+                      }
+                  }
+                  1 -> {
+                      var p by remember { mutableStateOf(0.35f) }
+                      var playing by remember { mutableStateOf(false) }
+                      Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                          Box(Modifier.size(140.dp).clip(RoundedCornerShape(16.dp)).background(Brush.linearGradient(listOf(c, c2))), contentAlignment = Alignment.Center) { Text("\u266A", color = Color.White, fontSize = 48.sp) }
+                          Text("Song title $i", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
+                          Text(n, fontSize = 11.sp)
+                          Slider(p, { p = it }, colors = SliderDefaults.colors(thumbColor = c, activeTrackColor = c))
+                          Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Text("\u25C0\u25C0", fontSize = 20.sp)
+                              Box(Modifier.size(48.dp).background(c, CircleShape).clickable { playing = !playing }, contentAlignment = Alignment.Center) { Text(if (playing) "||" else "\u25B6", color = ink(c)) }
+                              Text("\u25B6\u25B6", fontSize = 20.sp)
+                          }
+                      }
+                  }
+                  2 -> Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(12.dp)).background(Brush.linearGradient(listOf(c, c2)))) {
+                      Box(Modifier.align(Alignment.Center).size(56.dp).background(Color.Black.copy(alpha = 0.5f), CircleShape), contentAlignment = Alignment.Center) { Text("\u25B6", color = Color.White, fontSize = 24.sp) }
+                      Box(Modifier.align(Alignment.BottomEnd).padding(8.dp).background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) { Text("${r.nextInt(9) + 1}:${10 + r.nextInt(49)}", color = Color.White, fontSize = 11.sp) }
+                  }
+                  3 -> Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                      for (k in 0 until 4) Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                          val sc = hc(h + k * 40f)
+                          Box(Modifier.size(62.dp).border(3.dp, Brush.sweepGradient(listOf(sc, hc(h + k * 40f + 90f), sc)), CircleShape).padding(5.dp).clip(CircleShape).background(sc))
+                          Text(people[k].substringBefore(' '), fontSize = 10.sp)
+                      }
+                  }
+                  4 -> {
+                      var liked by remember { mutableStateOf(false) }
+                      Card(Modifier.fillMaxWidth()) {
+                          Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                              Row(verticalAlignment = Alignment.CenterVertically) { Av(n, c); Column(Modifier.padding(start = 10.dp)) { Text(n, fontWeight = FontWeight.SemiBold); Text("2h ago", fontSize = 11.sp) } }
+                              Text(bodyText)
+                              Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                  Text(if (liked) "\u2665" else "\u2661", color = if (liked) Color.Red else Color.Unspecified, modifier = Modifier.clickable { liked = !liked })
+                                  Text("${12 + (if (liked) 1 else 0)}"); Text("\uD83D\uDCAC ${r.nextInt(30)}")
+                              }
+                          }
+                      }
+                  }
+                  5 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Row { Av(n, c, 32.dp); Column(Modifier.padding(start = 8.dp)) { Text(n, fontWeight = FontWeight.SemiBold, fontSize = 13.sp); Text("Love this design!", fontSize = 13.sp) } }
+                      Row(Modifier.padding(start = 24.dp).height(IntrinsicSize.Min)) {
+                          Box(Modifier.width(2.dp).fillMaxHeight().background(c.copy(alpha = 0.4f)))
+                          Row(Modifier.padding(start = 8.dp)) { Av(people[(i + 3) % people.size], c2, 28.dp); Column(Modifier.padding(start = 8.dp)) { Text("Thanks so much!", fontSize = 13.sp); Text("Reply", fontSize = 11.sp, color = c) } }
+                      }
+                  }
+                  6 -> Card(Modifier.width(220.dp)) {
+                      Column {
+                          Box(Modifier.fillMaxWidth().height(110.dp).background(Brush.linearGradient(listOf(c, c2))), contentAlignment = Alignment.Center) { Text(r.pick(listOf("👟", "🎧", "⌚", "🎒")), fontSize = 40.sp) }
+                          Column(Modifier.padding(12.dp)) {
+                              Text("Product $i", fontWeight = FontWeight.Bold)
+                              Text("\u2605\u2605\u2605\u2605\u2606 (${r.nextInt(500)})", fontSize = 11.sp)
+                              Row(verticalAlignment = Alignment.CenterVertically) { Text("\$${40 + r.nextInt(120)}", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium); Button(onClick = {}, colors = ButtonDefaults.buttonColors(containerColor = c, contentColor = ink(c))) { Text("Add") } }
+                          }
+                      }
+                  }
+                  7 -> {
+                      val cnt = remember { mutableStateListOf(3, 1, 7) }
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          listOf("👍", "😂", "🔥").forEachIndexed { k, e -> FilterChip(selected = false, onClick = { cnt[k] = cnt[k] + 1 }, label = { Text("$e ${cnt[k]}") }) }
+                      }
+                  }
+                  8 -> Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = hc(h, 0.6f, 0.35f))) {
+                      Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                          Row(verticalAlignment = Alignment.CenterVertically) { Text("☀", fontSize = 48.sp); Column(Modifier.padding(start = 12.dp)) { Text("${10 + r.nextInt(25)}\u00B0", fontSize = 44.sp, color = Color.White, fontWeight = FontWeight.Bold); Text("Partly sunny", color = Color.White, fontSize = 12.sp) } }
+                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                              listOf("Mon", "Tue", "Wed", "Thu").forEach { d -> Column(horizontalAlignment = Alignment.CenterHorizontally) { Text(d, color = Color.White, fontSize = 11.sp); Text(r.pick(listOf("☀", "☁", "🌧"))); Text("${10 + r.nextInt(20)}\u00B0", color = Color.White, fontSize = 12.sp) } }
+                          }
+                      }
+                  }
+                  else -> {
+                      var sel by remember { mutableStateOf(1 + r.nextInt(28)) }
+                      Column {
+                          Text("October", fontWeight = FontWeight.Bold)
+                          Row { "MTWTFSS".forEach { Text(it.toString(), Modifier.weight(1f), textAlign = TextAlign.Center, fontSize = 11.sp) } }
+                          for (week in 0 until 5) Row {
+                              for (d in 0 until 7) {
+                                  val day = week * 7 + d + 1
+                                  Box(Modifier.weight(1f).aspectRatio(1f).clip(CircleShape).background(if (day == sel) c else Color.Transparent).clickable(enabled = day <= 30) { sel = day }, contentAlignment = Alignment.Center) {
+                                      if (day <= 30) Text("$day", fontSize = 12.sp, color = if (day == sel) ink(c) else Color.Unspecified)
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Loading & skeletons
+          @Composable
+          fun LoadFam(i: Int) {
+              val r = rnd(i, 17)
+              val h = r.hue()
+              val c = hc(h)
+              val c2 = hc(h + 120f)
+              val t = rememberInfiniteTransition(label = "l$i")
+              when (i % 10) {
+                  0 -> {
+                      val b = shimmerBrush()
+                      repeat(3) {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Box(Modifier.size(44.dp).clip(CircleShape).background(b))
+                              Column(Modifier.padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                  Box(Modifier.width(160.dp).height(12.dp).clip(RoundedCornerShape(6.dp)).background(b))
+                                  Box(Modifier.width(100.dp).height(10.dp).clip(RoundedCornerShape(5.dp)).background(b))
+                              }
+                          }
+                      }
+                  }
+                  1 -> Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                      CircularProgressIndicator(color = c)
+                      CircularProgressIndicator(color = c2, strokeWidth = 6.dp)
+                      CircularProgressIndicator(Modifier.size(24.dp), color = hc(h + 200f), strokeWidth = 2.dp)
+                  }
+                  2 -> {
+                      LinearProgressIndicator(Modifier.fillMaxWidth(), color = c)
+                      LinearProgressIndicator(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape), color = c2, trackColor = c2.copy(alpha = 0.2f))
+                  }
+                  3 -> {
+                      val d by t.animateFloat(0f, 4f, infiniteRepeatable(tween(1600, easing = LinearEasing)), label = "d")
+                      Text("Loading" + ".".repeat(d.toInt().coerceIn(0, 3)), fontSize = 20.sp, color = c)
+                  }
+                  4 -> {
+                      val b = shimmerBrush()
+                      Card(Modifier.fillMaxWidth()) {
+                          Column {
+                              Box(Modifier.fillMaxWidth().height(100.dp).background(b))
+                              Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                  Box(Modifier.fillMaxWidth(0.7f).height(14.dp).clip(RoundedCornerShape(7.dp)).background(b))
+                                  Box(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)).background(b))
+                                  Box(Modifier.fillMaxWidth(0.5f).height(10.dp).clip(RoundedCornerShape(5.dp)).background(b))
+                              }
+                          }
+                      }
+                  }
+                  5 -> {
+                      val v by t.animateFloat(0f, 100f, infiniteRepeatable(tween(3000, easing = FastOutSlowInEasing)), label = "v")
+                      Text("${v.toInt()}%", fontSize = 44.sp, color = c, fontWeight = FontWeight.Bold)
+                      LinearProgressIndicator({ v / 100f }, Modifier.fillMaxWidth(), color = c)
+                  }
+                  6 -> {
+                      val s by t.animateFloat(0.85f, 1.1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "s")
+                      val a by t.animateFloat(0.3f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "a")
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Box(Modifier.size(56.dp).scale(s).alpha(a).background(c, CircleShape))
+                          Column(Modifier.padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Box(Modifier.width(140.dp).height(12.dp).alpha(a).background(c.copy(alpha = 0.5f), RoundedCornerShape(6.dp)))
+                              Box(Modifier.width(90.dp).height(10.dp).alpha(a).background(c.copy(alpha = 0.3f), RoundedCornerShape(5.dp)))
+                          }
+                      }
+                  }
+                  7 -> {
+                      val ys = List(3) { k -> t.animateFloat(0f, 8f, infiniteRepeatable(tween(400), RepeatMode.Reverse, StartOffset(k * 130)), label = "y$k") }
+                      Row(Modifier.clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 14.dp, vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                          for (k in 0 until 3) Box(Modifier.offset(y = (-ys[k].value).dp).size(8.dp).background(Color.Gray, CircleShape))
+                      }
+                  }
+                  8 -> {
+                      val p by t.animateFloat(0f, 1f, infiniteRepeatable(tween(4000, easing = LinearEasing)), label = "p")
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { Text("app-release.apk"); LinearProgressIndicator({ p }, Modifier.fillMaxWidth(), color = c); Text("${(p * 48).toInt()} / 48 MB", fontSize = 11.sp) }
+                          OutlinedButton(onClick = {}, Modifier.padding(start = 12.dp)) { Text("Cancel") }
+                      }
+                  }
+                  else -> {
+                      val s by t.animateFloat(0.9f, 1.15f, infiniteRepeatable(tween(1000, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "s")
+                      Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                          Box(Modifier.size(100.dp).scale(s).background(Brush.linearGradient(listOf(c, c2)), RoundedCornerShape(28.dp)), contentAlignment = Alignment.Center) { Text("V", color = Color.White, fontSize = 48.sp, fontWeight = FontWeight.Bold) }
+                          Text("Loading\u2026", fontSize = 12.sp)
+                      }
+                  }
+              }
+          }
+
+          // ---------------------------------------------------------------- Layout containers
+          @Composable
+          fun LayoutFam(i: Int) {
+              val r = rnd(i, 18)
+              val h = r.hue()
+              val c = hc(h)
+              val sh = r.shape()
+              when (i % 10) {
+                  0 -> Column(Modifier.fillMaxWidth().height(200.dp).clip(RoundedCornerShape(12.dp)).border(1.dp, c, RoundedCornerShape(12.dp))) {
+                      Box(Modifier.fillMaxWidth().height(40.dp).background(c), contentAlignment = Alignment.Center) { Text("Top bar", color = ink(c)) }
+                      Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("Content") }
+                      Box(Modifier.fillMaxWidth().height(40.dp).background(c.copy(alpha = 0.2f)), contentAlignment = Alignment.Center) { Text("Bottom bar") }
+                  }
+                  1 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Box(Modifier.weight(2f).height(100.dp).clip(sh).background(c)); Box(Modifier.weight(1f).height(100.dp).clip(sh).background(hc(h + 70f)))
+                      }
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Box(Modifier.weight(1f).height(60.dp).clip(sh).background(hc(h + 140f))); Box(Modifier.weight(2f).height(60.dp).clip(sh).background(hc(h + 210f)))
+                      }
+                  }
+                  2 -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      for (col in 0 until 2) Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          for (k in 0 until 4) Box(Modifier.fillMaxWidth().height((40 + r.nextInt(80)).dp).clip(RoundedCornerShape(12.dp)).background(hc(h + (col * 4 + k) * 30f)))
+                      }
+                  }
+                  3 -> LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                      items(8) { k -> Box(Modifier.size(width = 120.dp, height = 150.dp).clip(RoundedCornerShape(16.dp)).background(hc(h + k * 35f)), contentAlignment = Alignment.Center) { Text("${k + 1}", color = Color.White, fontSize = 24.sp) } }
+                  }
+                  4 -> Box(Modifier.fillMaxWidth().height(170.dp), contentAlignment = Alignment.Center) {
+                      for (k in 0 until 4) Box(Modifier.size(width = 200.dp, height = 120.dp).rotate((k - 1.5f) * 8f).offset(x = (k * 6).dp).clip(RoundedCornerShape(16.dp)).background(hc(h + k * 50f)))
+                  }
+                  5 -> Row(Modifier.fillMaxWidth().height(160.dp).clip(RoundedCornerShape(12.dp))) {
+                      Column(Modifier.width(80.dp).fillMaxHeight().background(c.copy(alpha = 0.15f)).padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          repeat(4) { Box(Modifier.fillMaxWidth().height(20.dp).clip(RoundedCornerShape(4.dp)).background(c.copy(alpha = 0.5f))) }
+                      }
+                      Column(Modifier.weight(1f).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Box(Modifier.fillMaxWidth().height(24.dp).background(c, RoundedCornerShape(6.dp)))
+                          Box(Modifier.fillMaxWidth().height(70.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp)))
+                      }
+                  }
+                  6 -> Box(Modifier.fillMaxWidth().height(180.dp)) {
+                      LazyColumn {
+                          for (g in 0 until 3) {
+                              stickyHeader { Text("Group ${'A' + g}", Modifier.fillMaxWidth().background(c).padding(8.dp), color = ink(c)) }
+                              items(4) { Text("Row $it", Modifier.padding(12.dp)) }
+                          }
+                      }
+                  }
+                  7 -> Column {
+                      Text("Section one"); HorizontalDivider()
+                      Text("Section two", Modifier.padding(vertical = 8.dp)); HorizontalDivider(thickness = 4.dp, color = c)
+                      Row(Modifier.height(32.dp).padding(top = 8.dp)) { Text("Left"); VerticalDivider(Modifier.padding(horizontal = 8.dp)); Text("Right") }
+                  }
+                  8 -> FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                      listOf("compose", "kotlin", "android", "material", "design", "ui", "motion", "theme", "layout", "state", "canvas", "preview").forEachIndexed { k, tag ->
+                          Box(Modifier.clip(CircleShape).border(1.dp, hc(h + k * 25f), CircleShape).padding(horizontal = 12.dp, vertical = 6.dp)) { Text("#$tag", fontSize = 12.sp, color = hc(h + k * 25f, 0.7f, 0.4f)) }
+                      }
+                  }
+                  else -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Box(Modifier.weight(1f).aspectRatio(16f / 9f).background(c)); Box(Modifier.weight(1f).aspectRatio(1f).background(hc(h + 100f))); Box(Modifier.weight(1f).aspectRatio(3f / 4f).background(hc(h + 200f)))
+                  }
+              }
+          }
+
+          private class Fam(val name: String, val count: Int, val body: @Composable (Int) -> Unit)
+
+          private val families: List<Fam> = listOf(
+              Fam("Palette", 8) { Palette(it) },
+              Fam("Button matrix", 8) { BtnMatrix(it) },
+              Fam("Gradient card", 8) { GradCard(it) },
+              Fam("Gradients", 8) { Gradient(it) },
+              Fam("Typography lab", 8) { Typo(it) },
+              Fam("Animation", 8) { Anim(it) },
+              Fam("Shape lab", 8) { ShapeLab(it) },
+              Fam("Controls themed", 8) { Ctl(it) },
+              Fam("Text fields themed", 8) { Field(it) },
+              Fam("Navigation", 10) { NavFam(it) },
+              Fam("Lists & rows", 10) { ListFam(it) },
+              Fam("Feedback & states", 10) { FeedFam(it) },
+              Fam("Charts & data", 10) { VizFam(it) },
+              Fam("Forms & screens", 10) { FormFam(it) },
+              Fam("Social & media", 10) { SocialFam(it) },
+              Fam("Loading & skeletons", 10) { LoadFam(it) },
+              Fam("Layout containers", 10) { LayoutFam(it) },
+          )
+
+          val bulkSections: List<Pair<String, @Composable () -> Unit>> =
+              families.flatMap { f ->
+                  (1..f.count).map { i ->
+                      val content: @Composable () -> Unit = { f.body(i) }
+                      "${f.name} $i" to content
+                  }
+              }
+          EOF
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-showcase-debug
+          path: app/build/outputs/apk/debug/*.apk
