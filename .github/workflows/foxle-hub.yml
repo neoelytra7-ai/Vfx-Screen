@@ -1,0 +1,610 @@
+name: Build Foxle Hub APK
+
+on:
+  push:
+    paths: ['.github/workflows/**']
+  workflow_dispatch:
+
+concurrency:
+  group: foxle-hub
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate project (heredoc)
+        run: |
+          set -e
+          D=hub
+          mkdir -p $D/app/src/main/java/app/foxl $D/app/src/main/assets $D/app/src/main/res/drawable
+
+          cat > $D/settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'FoxleHub'
+          include ':app'
+          EOF
+
+          cat > $D/build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > $D/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          android.nonTransitiveRClass=true
+          android.enableR8.fullMode=true
+          EOF
+
+          cat > $D/app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'app.foxl'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'app.foxl.hub'
+              minSdk 24
+              targetSdk 34
+              versionCode 1
+              versionName '1.0'
+            }
+            signingConfigs {
+              r {
+                storeFile file(System.getenv('KS') ?: 'ks.jks')
+                storePassword 'foxlhub'
+                keyAlias 'k'
+                keyPassword 'foxlhub'
+              }
+            }
+            buildTypes {
+              release {
+                minifyEnabled true
+                shrinkResources true
+                signingConfig signingConfigs.r
+                proguardFiles 'p.pro'
+              }
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+            lint { checkReleaseBuilds false; abortOnError false }
+          }
+          EOF
+
+          cat > $D/app/p.pro <<'EOF'
+          -keep class app.foxl.** { *; }
+          -keepattributes *Annotation*
+          -dontwarn **
+          EOF
+
+          cat > $D/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+            <application
+              android:label="Foxle Hub"
+              android:icon="@drawable/ic"
+              android:theme="@android:style/Theme.Material.NoActionBar"
+              android:usesCleartextTraffic="true"
+              android:requestLegacyExternalStorage="true"
+              android:allowBackup="false"
+              android:hardwareAccelerated="true">
+              <activity android:name=".MainActivity" android:exported="true"
+                android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode"
+                android:windowSoftInputMode="adjustResize">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+              <activity android:name=".P" android:exported="false"
+                android:documentLaunchMode="always"
+                android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode"
+                android:windowSoftInputMode="adjustResize"/>
+            </application>
+          </manifest>
+          EOF
+
+          cat > $D/app/src/main/java/app/foxl/P.java <<'EOF'
+          package app.foxl;
+
+          public class P extends MainActivity {}
+          EOF
+
+          cat > $D/app/src/main/java/app/foxl/MainActivity.java <<'EOF'
+          package app.foxl;
+
+          import android.app.Activity;
+          import android.app.ActivityManager;
+          import android.content.ClipData;
+          import android.content.Intent;
+          import android.database.Cursor;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.graphics.drawable.ColorDrawable;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.os.StatFs;
+          import android.provider.OpenableColumns;
+          import android.provider.Settings;
+          import android.util.Base64;
+          import android.webkit.*;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.*;
+          import java.util.*;
+          import java.util.zip.*;
+
+          public class MainActivity extends Activity {
+            WebView w;
+            File root, ext;
+            String pid, poly = "";
+            ValueCallback<Uri[]> fc;
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              root = new File(getFilesDir(), "projects");
+              root.mkdirs();
+              ext = Environment.getExternalStorageDirectory();
+              pid = getIntent().getStringExtra("p");
+              getWindow().setBackgroundDrawable(new ColorDrawable(Color.BLACK));
+              getWindow().setStatusBarColor(Color.BLACK);
+              getWindow().setNavigationBarColor(Color.BLACK);
+              try { poly = read(getAssets().open("poly.js")); } catch (Exception e) {}
+              w = new WebView(this);
+              w.setBackgroundColor(Color.BLACK);
+              setContentView(w);
+              WebSettings s = w.getSettings();
+              s.setJavaScriptEnabled(true);
+              s.setDomStorageEnabled(true);
+              s.setMediaPlaybackRequiresUserGesture(false);
+              s.setAllowFileAccess(false);
+              s.setAllowContentAccess(false);
+              s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+              w.addJavascriptInterface(new Host(), "Host");
+              w.setWebViewClient(new WebViewClient() {
+                @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                  return serve(r.getUrl());
+                }
+                @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                  Uri u = r.getUrl();
+                  String h = u.getHost();
+                  if (h != null && h.endsWith(".foxl")) return false;
+                  try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception e) {}
+                  return true;
+                }
+                @Override public void onPageStarted(WebView v, String u, Bitmap f) {
+                  v.evaluateJavascript(poly, null);
+                }
+                @Override public void onPageFinished(WebView v, String u) {
+                  v.evaluateJavascript(poly, null);
+                }
+              });
+              w.setWebChromeClient(new WebChromeClient() {
+                @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                  if (fc != null) fc.onReceiveValue(null);
+                  fc = cb;
+                  Intent i = new Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, p.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
+                  try { startActivityForResult(i, 8); } catch (Exception e) { fc = null; return false; }
+                  return true;
+                }
+                @Override public void onPermissionRequest(PermissionRequest r) { r.grant(r.getResources()); }
+              });
+              if (pid != null) {
+                try { setTaskDescription(new ActivityManager.TaskDescription(nm(new File(root, pid)))); } catch (Exception e) {}
+              }
+              w.loadUrl(pid == null ? "https://app.foxl/" : "https://p" + pid + ".foxl/");
+            }
+
+            @Override public void onBackPressed() {
+              if (w.canGoBack()) w.goBack(); else super.onBackPressed();
+            }
+
+            @Override protected void onDestroy() {
+              if (w != null) { w.destroy(); w = null; }
+              super.onDestroy();
+            }
+
+            @Override protected void onActivityResult(int rq, int rs, Intent d) {
+              if (rq == 8) {
+                if (fc != null) {
+                  Uri[] r = null;
+                  if (rs == RESULT_OK && d != null) {
+                    ClipData c = d.getClipData();
+                    if (c != null) {
+                      r = new Uri[c.getItemCount()];
+                      for (int i = 0; i < r.length; i++) r[i] = c.getItemAt(i).getUri();
+                    } else if (d.getData() != null) r = new Uri[]{d.getData()};
+                  }
+                  fc.onReceiveValue(r);
+                  fc = null;
+                }
+                return;
+              }
+              if (rq == 7 && rs == RESULT_OK && d != null) {
+                final List<Uri> L = new ArrayList<>();
+                ClipData c = d.getClipData();
+                if (c != null) for (int i = 0; i < c.getItemCount(); i++) L.add(c.getItemAt(i).getUri());
+                else if (d.getData() != null) L.add(d.getData());
+                new Thread(() -> {
+                  for (Uri u : L) try { imp(u); } catch (Exception e) {}
+                  runOnUiThread(() -> { if (w != null) w.evaluateJavascript("refresh()", null); });
+                }).start();
+              }
+            }
+
+            // ---------- helpers ----------
+            static String read(InputStream in) throws IOException {
+              ByteArrayOutputStream o = new ByteArrayOutputStream();
+              byte[] b = new byte[8192];
+              int n;
+              while ((n = in.read(b)) > 0) o.write(b, 0, n);
+              in.close();
+              return o.toString("UTF-8");
+            }
+            static void cp(InputStream in, File f, boolean close) throws IOException {
+              FileOutputStream o = new FileOutputStream(f);
+              byte[] b = new byte[16384];
+              int n;
+              while ((n = in.read(b)) > 0) o.write(b, 0, n);
+              o.close();
+              if (close) in.close();
+            }
+            static void wf(File f, String s) throws IOException {
+              try (FileOutputStream o = new FileOutputStream(f)) { o.write(s.getBytes("UTF-8")); }
+            }
+            static boolean del(File f) {
+              File[] a = f.listFiles();
+              if (a != null) for (File c : a) del(c);
+              return f.delete();
+            }
+            String nm(File d) {
+              try { return read(new FileInputStream(new File(d, ".name"))).trim(); } catch (Exception e) { return d.getName(); }
+            }
+            File safe(String p) throws IOException {
+              File f = new File(p).getCanonicalFile();
+              String r = ext.getCanonicalPath(), q = f.getPath();
+              if (!q.equals(r) && !q.startsWith(r + "/")) throw new SecurityException(p);
+              return f;
+            }
+
+            void unzip(InputStream in, File d) throws IOException {
+              ZipInputStream z = new ZipInputStream(in);
+              String base = d.getCanonicalPath() + File.separator;
+              ZipEntry e;
+              while ((e = z.getNextEntry()) != null) {
+                File f = new File(d, e.getName());
+                if (!f.getCanonicalPath().startsWith(base)) continue;
+                if (e.isDirectory()) f.mkdirs();
+                else { f.getParentFile().mkdirs(); cp(z, f, false); }
+              }
+              z.close();
+            }
+
+            void fix(File d) {
+              if (new File(d, "index.html").exists()) return;
+              File[] a = d.listFiles();
+              if (a == null) return;
+              if (a.length == 1 && a[0].isDirectory()) {
+                File[] b = a[0].listFiles();
+                if (b != null) for (File f : b) f.renameTo(new File(d, f.getName()));
+                a[0].delete();
+              }
+              if (!new File(d, "index.html").exists()) {
+                a = d.listFiles();
+                if (a != null) for (File f : a) if (f.getName().toLowerCase().endsWith(".html")) { f.renameTo(new File(d, "index.html")); break; }
+              }
+            }
+
+            void imp(Uri u) throws Exception {
+              String n = "app";
+              try (Cursor c = getContentResolver().query(u, null, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                  int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                  if (i >= 0) n = c.getString(i);
+                }
+              }
+              String lo = n.toLowerCase(), base = n.replaceAll("\\.[^.]*$", "");
+              String id = base.toLowerCase().replaceAll("[^a-z0-9]+", "-").replaceAll("^-|-$", "");
+              if (id.isEmpty()) id = "app";
+              boolean zip = lo.endsWith(".zip");
+              if (!zip && !lo.endsWith(".html") && !lo.endsWith(".htm")) return;
+              File d = new File(root, id);
+              if (d.exists()) del(d);
+              d.mkdirs();
+              InputStream in = getContentResolver().openInputStream(u);
+              if (zip) { unzip(in, d); in.close(); fix(d); }
+              else cp(in, new File(d, "index.html"), true);
+              wf(new File(d, ".name"), base);
+            }
+
+            static String mime(String p) {
+              String e = p.substring(p.lastIndexOf('.') + 1).toLowerCase();
+              switch (e) {
+                case "html": case "htm": return "text/html";
+                case "js": case "mjs": return "text/javascript";
+                case "css": return "text/css";
+                case "json": case "map": return "application/json";
+                case "svg": return "image/svg+xml";
+                case "png": return "image/png";
+                case "jpg": case "jpeg": return "image/jpeg";
+                case "gif": return "image/gif";
+                case "webp": return "image/webp";
+                case "ico": return "image/x-icon";
+                case "woff": return "font/woff";
+                case "woff2": return "font/woff2";
+                case "ttf": return "font/ttf";
+                case "mp3": return "audio/mpeg";
+                case "ogg": return "audio/ogg";
+                case "wav": return "audio/wav";
+                case "mp4": return "video/mp4";
+                case "webm": return "video/webm";
+                case "wasm": return "application/wasm";
+                case "txt": return "text/plain";
+                default: return "application/octet-stream";
+              }
+            }
+
+            // https://app.foxl/ = launcher (assets) | https://p<id>.foxl/ = project | /__fs/<abs path> = real storage
+            WebResourceResponse serve(Uri u) {
+              String h = u.getHost();
+              if (h == null || !h.endsWith(".foxl")) return null;
+              String p = u.getPath();
+              boolean app = h.equals("app.foxl");
+              if (p == null || p.equals("/")) p = app ? "/launcher.html" : "/index.html";
+              Map<String, String> hd = new HashMap<>();
+              hd.put("Access-Control-Allow-Origin", "*");
+              try {
+                InputStream in = null;
+                if (app) in = getAssets().open(p.substring(1));
+                else if (h.startsWith("p")) {
+                  if (p.startsWith("/__fs/")) {
+                    File f = safe(p.substring(5));
+                    if (f.isFile()) in = new FileInputStream(f);
+                  } else {
+                    File d = new File(root, h.substring(1, h.length() - 5));
+                    File f = new File(d, p);
+                    if (f.getCanonicalPath().startsWith(d.getCanonicalPath() + File.separator) && f.isFile()) in = new FileInputStream(f);
+                  }
+                }
+                if (in == null) return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found", hd, new ByteArrayInputStream(new byte[0]));
+                String m = mime(p);
+                String enc = (m.startsWith("text/") || m.equals("application/json") || m.equals("image/svg+xml")) ? "utf-8" : null;
+                return new WebResourceResponse(m, enc, 200, "OK", hd, in);
+              } catch (Exception e) {
+                return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found", hd, new ByteArrayInputStream(new byte[0]));
+              }
+            }
+
+            // ---------- JS bridge ----------
+            class Host {
+              // launcher
+              @JavascriptInterface public String list() {
+                JSONArray a = new JSONArray();
+                File[] f = root.listFiles();
+                if (f != null) {
+                  Arrays.sort(f, (x, y) -> Long.compare(y.lastModified(), x.lastModified()));
+                  for (File d : f) try {
+                    if (d.isDirectory()) a.put(new JSONObject().put("id", d.getName()).put("name", nm(d)));
+                  } catch (Exception e) {}
+                }
+                return a.toString();
+              }
+              @JavascriptInterface public void imp() {
+                runOnUiThread(() -> {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                  startActivityForResult(i, 7);
+                });
+              }
+              @JavascriptInterface public void run(String id) {
+                runOnUiThread(() -> startActivity(new Intent(MainActivity.this, P.class).putExtra("p", id)
+                  .addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK)));
+              }
+              @JavascriptInterface public void drop(String id) {
+                id = id.replaceAll("[^a-z0-9-]", "");
+                if (!id.isEmpty()) del(new File(root, id));
+              }
+              // permission
+              @JavascriptInterface public boolean perm() {
+                return Build.VERSION.SDK_INT >= 30 ? Environment.isExternalStorageManager()
+                  : checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE") == 0;
+              }
+              @JavascriptInterface public void ask() {
+                runOnUiThread(() -> {
+                  try {
+                    if (Build.VERSION.SDK_INT >= 30)
+                      startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName())));
+                    else requestPermissions(new String[]{"android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"}, 1);
+                  } catch (Exception e) {
+                    try { startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); } catch (Exception x) {}
+                  }
+                });
+              }
+              // real storage (dipakai polyfill showDirectoryPicker)
+              @JavascriptInterface public String root() { return ext.getPath(); }
+              @JavascriptInterface public String ls(String p) {
+                JSONArray a = new JSONArray();
+                try {
+                  File[] f = safe(p).listFiles();
+                  if (f != null) for (File c : f) a.put(new JSONObject().put("n", c.getName()).put("d", c.isDirectory()));
+                } catch (Exception e) {}
+                return a.toString();
+              }
+              @JavascriptInterface public boolean isd(String p) { try { return safe(p).isDirectory(); } catch (Exception e) { return false; } }
+              @JavascriptInterface public boolean isf(String p) { try { return safe(p).isFile(); } catch (Exception e) { return false; } }
+              @JavascriptInterface public double sz(String p) { try { return safe(p).length(); } catch (Exception e) { return 0; } }
+              @JavascriptInterface public double mt(String p) { try { return safe(p).lastModified(); } catch (Exception e) { return 0; } }
+              @JavascriptInterface public boolean mk(String p) { try { File f = safe(p); return f.isDirectory() || f.mkdirs(); } catch (Exception e) { return false; } }
+              @JavascriptInterface public boolean touch(String p) {
+                try { File f = safe(p); if (!f.exists()) { f.getParentFile().mkdirs(); return f.createNewFile(); } return true; } catch (Exception e) { return false; }
+              }
+              @JavascriptInterface public boolean rm(String p) { try { File f = safe(p); return !f.equals(ext) && del(f); } catch (Exception e) { return false; } }
+              @JavascriptInterface public void wr(String p, String b, boolean ap) {
+                try (FileOutputStream o = new FileOutputStream(safe(p), ap)) {
+                  if (!b.isEmpty()) o.write(Base64.decode(b, Base64.DEFAULT));
+                } catch (Exception e) {}
+              }
+              @JavascriptInterface public String disk() {
+                try {
+                  StatFs s = new StatFs(ext.getPath());
+                  return "{\"t\":" + s.getTotalBytes() + ",\"f\":" + s.getAvailableBytes() + "}";
+                } catch (Exception e) { return "{\"t\":1,\"f\":0}"; }
+              }
+            }
+          }
+          EOF
+
+          cat > $D/app/src/main/assets/poly.js <<'EOF'
+          (()=>{
+          if(window.__fx||!window.Host)return;window.__fx=1;
+          const H=Host,J=JSON.parse,E=(n,m)=>new DOMException(m||n,n);
+          const B=u=>{let s='';for(let i=0;i<u.length;i+=32768)s+=String.fromCharCode.apply(null,u.subarray(i,i+32768));return btoa(s)};
+          const U=p=>'/__fs'+p.split('/').map(encodeURIComponent).join('/');
+          const sink=p=>c=>{const u=c instanceof Uint8Array?c:c instanceof ArrayBuffer?new Uint8Array(c):ArrayBuffer.isView(c)?new Uint8Array(c.buffer,c.byteOffset,c.byteLength):new TextEncoder().encode(String(c));H.wr(p,B(u),true)};
+          class FH{
+           constructor(p,k){this.path=p;this.kind=k;this.name=p.split('/').pop()||'Storage'}
+           async*values(){for(const e of J(H.ls(this.path)))yield new FH(this.path+'/'+e.n,e.d?'directory':'file')}
+           async*entries(){for await(const h of this.values())yield[h.name,h]}
+           async*keys(){for await(const h of this.values())yield h.name}
+           [Symbol.asyncIterator](){return this.entries()}
+           async getDirectoryHandle(n,o){const p=this.path+'/'+n;if(o&&o.create)H.mk(p);else if(!H.isd(p))throw E('NotFoundError');return new FH(p,'directory')}
+           async getFileHandle(n,o){const p=this.path+'/'+n;if(o&&o.create)H.touch(p);else if(!H.isf(p))throw E('NotFoundError');return new FH(p,'file')}
+           async removeEntry(n){if(!H.rm(this.path+'/'+n))throw E('NotAllowedError')}
+           async isSameEntry(o){return o.path==this.path}
+           async queryPermission(){return H.perm()?'granted':'prompt'}
+           async requestPermission(){if(!H.perm())H.ask();return H.perm()?'granted':'denied'}
+           async getFile(){
+            const p=this.path,url=U(p),f=()=>fetch(url);
+            return{name:this.name,size:H.sz(p),lastModified:H.mt(p),type:'',
+             stream(){const t=new TransformStream();f().then(r=>r.body.pipeTo(t.writable)).catch(e=>t.writable.abort(e));return t.readable},
+             blob:()=>f().then(r=>r.blob()),arrayBuffer:()=>f().then(r=>r.arrayBuffer()),text:()=>f().then(r=>r.text())}
+           }
+           async createWritable(){
+            const p=this.path,s=sink(p);H.wr(p,'',false);
+            const ws=new WritableStream({write:s});ws.write=async d=>s(d);ws.close=async()=>{};return ws
+           }
+          }
+          window.showDirectoryPicker=async()=>{
+           if(!H.perm()){H.ask();throw E('NotAllowedError','Beri izin "Semua file" lalu tap lagi')}
+           return new FH(H.root(),'directory')
+          };
+          if(navigator.storage)navigator.storage.estimate=async()=>{const d=J(H.disk());return{usage:d.t-d.f,quota:d.t}};
+          })();
+          EOF
+
+          cat > $D/app/src/main/assets/launcher.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="id"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+          <title>Foxle Hub</title>
+          <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@700&family=VT323&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+          <style>
+          *{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+          html,body{height:100%;background:#000;color:#f0f0f0;font:22px/1.1 'VT323',monospace;overflow:hidden;user-select:none;-webkit-user-select:none}
+          img{image-rendering:pixelated}
+          body{display:flex;flex-direction:column}
+          #top{flex:none;background:linear-gradient(#5fb02f,#5fb02f) 0 0/100% 5px no-repeat,repeating-conic-gradient(#7a5230 0 25%,#6a4627 0 50%) 0 0/16px 16px;padding:calc(10px + env(safe-area-inset-top)) 12px 8px;border-bottom:4px solid #000;display:flex;align-items:center;gap:8px}
+          #top img{width:30px;height:30px}
+          h1{font:700 26px 'Pixelify Sans',monospace;text-shadow:3px 3px 0 #0006;flex:1}
+          #pm{background:#000;border:3px solid #000;box-shadow:inset 0 0 0 2px #555;padding:2px 8px;font-size:19px;color:#fcdb5a;font-family:inherit}
+          #pm.on{color:#7cff3a}
+          #g{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:12px 12px calc(12px + env(safe-area-inset-bottom));align-content:start;background:repeating-conic-gradient(#0b0f06 0 25%,#000 0 50%) 0 0/20px 20px}
+          .s{aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:6px;background:#4a3320;border:3px solid #000;box-shadow:inset 3px 3px 0 #8a5a2b,inset -3px -3px 0 #2a1a0c;transition:transform .15s cubic-bezier(.3,1.6,.5,1)}
+          .s:active{transform:scale(.9)}
+          .s img{width:56px;height:56px}
+          .s span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:20px;text-shadow:2px 2px 0 #000}
+          .add{background:#2b6b12;box-shadow:inset 3px 3px 0 #5fb02f,inset -3px -3px 0 #123a06}
+          .add b{font:700 44px 'Pixelify Sans',monospace;line-height:56px;text-shadow:3px 3px 0 #000}
+          #e{position:absolute;left:0;right:0;top:46%;text-align:center;color:#9a9a9a;font-size:24px;pointer-events:none}
+          </style></head><body>
+          <div id="top"><img id="lg" alt=""><h1>Foxle Hub</h1><button id="pm">Akses file</button></div>
+          <div id="g"></div>
+          <div id="e" hidden>Belum ada projek<br>Tap + untuk impor .html / .zip</div>
+          <script>
+          const $=s=>document.querySelector(s);
+          const pal=['#e8802a','#5fb02f','#4a7fd4','#d6403a','#9b59c9','#fcdb5a','#7cff3a','#e86fb0'];
+          const esc=s=>s.replace(/[&<>"]/g,c=>'&#'+c.charCodeAt(0)+';');
+          function px(g,pl){const c=document.createElement('canvas');c.width=c.height=10;const x=c.getContext('2d'),on=(i,y)=>pl[(g[y]||'')[i]];
+           x.fillStyle='#000';for(let y=-1;y<9;y++)for(let i=-1;i<9;i++)if(!on(i,y)&&(on(i-1,y)||on(i+1,y)||on(i,y-1)||on(i,y+1)))x.fillRect(i+1,y+1,1,1);
+           g.forEach((r,y)=>[...r].forEach((ch,i)=>{if(pl[ch]){x.fillStyle=pl[ch];x.fillRect(i+1,y+1,1,1)}}));return c.toDataURL()}
+          function av(n){let h=2166136261;for(const c of n){h^=c.charCodeAt(0);h=Math.imul(h,16777619)>>>0}
+           let r=h;const rnd=()=>((r=(Math.imul(r,1103515245)+12345)>>>0)/4294967296);
+           const g=[];for(let y=0;y<8;y++){let a='';for(let i=0;i<4;i++)a+=rnd()<.55?'c':'.';g.push(a+[...a].reverse().join(''))}
+           g[3]=g[3].replace(/^.(.*).$/,'.$1.');return px(g,{c:pal[h%8]})}
+          const FOX=["o......o","oo....oo","oooooooo","owkoowko","oooooooo","owwoowwo",".owwwwo.","..okko.."];
+          $('#lg').src=px(FOX,{o:'#e8802a',w:'#fff',k:'#000'});
+          let P=[];
+          function refresh(){try{P=JSON.parse(Host.list())}catch(e){P=[]}draw()}
+          function draw(){$('#g').innerHTML=P.map(p=>`<div class="s" data-id="${p.id}"><img src="${av(p.name)}" alt=""><span>${esc(p.name)}</span></div>`).join('')+`<div class="s add" id="add"><b>+</b><span>Impor</span></div>`;$('#e').hidden=P.length>0}
+          let lp,lf=0;const g=$('#g');
+          g.addEventListener('pointerdown',e=>{const s=e.target.closest('.s[data-id]');if(!s)return;lf=0;lp=setTimeout(()=>{lf=1;navigator.vibrate&&navigator.vibrate(15);if(confirm('Hapus "'+s.textContent+'"?')){Host.drop(s.dataset.id);refresh()}},600)});
+          ['pointerup','pointercancel','pointermove'].forEach(v=>g.addEventListener(v,()=>clearTimeout(lp)));
+          g.addEventListener('click',e=>{if(lf){lf=0;return}if(e.target.closest('#add'))return Host.imp();const s=e.target.closest('.s[data-id]');s&&Host.run(s.dataset.id)});
+          function stat(){const o=Host.perm();const b=$('#pm');b.textContent='Akses file: '+(o?'ON':'OFF');b.className=o?'on':''}
+          $('#pm').onclick=()=>{if(!Host.perm())Host.ask()};
+          addEventListener('focus',stat);document.addEventListener('visibilitychange',stat);
+          stat();refresh();
+          </script></body></html>
+          EOF
+
+          python3 - <<'PY'
+          g=["o......o","oo....oo","oooooooo","owkoowko","oooooooo","owwoowwo",".owwwwo.","..okko.."]
+          C={'o':'#e8802a','w':'#ffffff','k':'#000000'}
+          s='<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="12" android:viewportHeight="12">'
+          s+='<path android:fillColor="#7a5230" android:pathData="M0,0h12v12h-12z"/><path android:fillColor="#5fb02f" android:pathData="M0,0h12v1.5h-12z"/>'
+          for c,col in C.items():
+              d=''.join('M%d,%dh1v1h-1z'%(x+2,y+2) for y,r in enumerate(g) for x,ch in enumerate(r) if ch==c)
+              s+='<path android:fillColor="%s" android:pathData="%s"/>'%(col,d)
+          open('hub/app/src/main/res/drawable/ic.xml','w').write(s+'</vector>')
+          PY
+
+      - name: Keystore (cache, dibuat sekali)
+        uses: actions/cache@v4
+        with:
+          path: ks.jks
+          key: foxl-keystore-v1
+
+      - name: Buat keystore jika belum ada
+        run: |
+          [ -f ks.jks ] || keytool -genkeypair -keystore ks.jks -storepass foxlhub -keypass foxlhub \
+            -alias k -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=Foxle Hub"
+
+      - name: Build release APK
+        working-directory: hub
+        env:
+          KS: ${{ github.workspace }}/ks.jks
+        run: gradle assembleRelease --console=plain
+
+      - name: Rename
+        run: |
+          cp hub/app/build/outputs/apk/release/app-release.apk FoxleHub.apk
+          ls -l FoxleHub.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FoxleHub
+          path: FoxleHub.apk
+          if-no-files-found: error
