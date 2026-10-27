@@ -220,6 +220,9 @@ jobs:
           var icons := {}
           var mats := {}
           var busy := false
+          var shown_p := ""
+          var shown_h := 0
+          var last_load := 0
           var scan_t: Thread
           var job_t: Thread
           var done_n := 0
@@ -274,7 +277,7 @@ jobs:
           func _notification(what: int) -> void:
             if what == NOTIFICATION_WM_GO_BACK_REQUEST:
               back()
-            elif what == NOTIFICATION_APPLICATION_FOCUS_IN and ui != null:
+            elif what == NOTIFICATION_APPLICATION_FOCUS_IN and ui != null and cur != "" and Time.get_ticks_msec() - last_load > 1500:
               load_dir(cur)
 
           func _input(e: InputEvent) -> void:
@@ -840,7 +843,7 @@ jobs:
               l.add_theme_font_size_override("font_size", 96)
               l.modulate.a = 0.0
               hx.add_child(l)
-              create_tween().tween_property(l, "modulate:a", 1.0, 0.3).set_delay(0.15 + i * 0.12)
+              l.create_tween().tween_property(l, "modulate:a", 1.0, 0.3).set_delay(0.15 + i * 0.12)
             return r
 
           func skin() -> void:
@@ -916,6 +919,7 @@ jobs:
 
           func load_dir(p: String) -> void:
             cur = p
+            last_load = Time.get_ticks_msec()
             if scan_t != null and scan_t.is_started():
               scan_t.wait_to_finish()
             scan_t = Thread.new()
@@ -940,6 +944,11 @@ jobs:
           func _show(p: String, out: Array) -> void:
             if p != cur:
               return
+            if p == shown_p and out.hash() == shown_h:
+              sync_sel()
+              return
+            shown_p = p
+            shown_h = out.hash()
             ents = out
             sel.clear()
             limit = 400
@@ -1030,7 +1039,7 @@ jobs:
             style_row(i)
             if i < 12:
               r.modulate.a = 0.0
-              create_tween().tween_property(r, "modulate:a", 1.0, 0.18).set_delay(i * 0.02)
+              r.create_tween().tween_property(r, "modulate:a", 1.0, 0.18).set_delay(i * 0.02)
 
           func style_row(i: int) -> void:
             if i >= rows.size() or i >= vw.size():
