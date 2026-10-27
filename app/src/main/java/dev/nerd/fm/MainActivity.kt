@@ -75,6 +75,8 @@ class MainActivity : ComponentActivity() {
   val boot = remember { Boot() }
   var access by remember { mutableStateOf(hasAccess()) }
   LaunchedEffect(Ev.t) { access = hasAccess() }
+  val aura = Sk.f("aura.drift", 0f) > 0f
+  LaunchedEffect(aura) { while (true) { if (aura) Aura.tick(); delay(60000L) } }
   SideEffect {
     act.window.statusBarColor = Th.bg.toArgb(); act.window.navigationBarColor = Th.bg.toArgb()
     WindowCompat.getInsetsController(act.window, act.window.decorView).apply { isAppearanceLightStatusBars = Th.pal.light; isAppearanceLightNavigationBars = Th.pal.light }
@@ -125,13 +127,15 @@ class MainActivity : ComponentActivity() {
 
   LaunchedEffect(snack) { if (snack != null) { delay(if (snackAct != null) 5000L else 2400L); snack = null; snackAct = null } }
   fun toast(s: String) { snack = s; snackAct = null }
+  fun okNm(n: String) = n.isNotBlank() && '/' !in n && n.trim() != "." && n.trim() != ".."
   fun cheer(n: Int) { burst.emit(lt[0], lt[1].coerceAtLeast(200f), n, -1, cf.ac) }
   fun load(p: Pane, d: File, push: Boolean = true) {
     if (push && p.hist.lastOrNull() != d) { while (p.hist.size > p.hi + 1) p.hist.removeAt(p.hist.lastIndex); p.hist.add(d); p.hi = p.hist.lastIndex }
     p.job?.cancel()
     p.job = scope.launch {
       val l = withContext(Dispatchers.IO) { Fx.list(d, cf.hidden, cf.sort, cf.desc) }
-      p.sel = emptySet(); p.snap = Snap(d, l); boot.loaded++; cf.tabs = panes.joinToString("\n") { it.dir.path }
+      val ps = HashSet<String>(); if (p.sel.isNotEmpty() && p.snap.dir == d) l.forEach { ps.add(it.f.path) }
+      p.sel = if (ps.isEmpty()) emptySet() else p.sel.filterTo(HashSet<String>()) { it in ps }; p.snap = Snap(d, l); boot.loaded++; cf.tabs = panes.joinToString("\n") { it.dir.path }
     }
   }
   LaunchedEffect(rev, Ev.t, cf.sort, cf.desc, cf.hidden) { panes.toList().forEach { load(it, it.dir, false) } }
@@ -141,7 +145,7 @@ class MainActivity : ComponentActivity() {
     scope.launch {
       busy = msg
       val r = try { withContext(Dispatchers.IO) { work() } } catch (t: Throwable) { "✕ " + (t.message ?: t.javaClass.simpleName) }
-      busy = null; rev++
+      busy = null; panes.forEach { it.sel = emptySet() }; rev++
       val before = cf.level; cf.addXp(xp)
       if (r != null) { snack = r; snackAct = if (undo != null && !r.startsWith("✕")) ("UNDO" to undo) else null; if (!r.startsWith("✕")) cheer(10) }
       if (cf.level > before) { snack = "level up! Lv ${cf.level} ♡"; cheer(28) }
@@ -168,9 +172,9 @@ class MainActivity : ComponentActivity() {
     if (fs.isEmpty()) { toast("select first"); return }
     val mode = mutableIntStateOf(if (fs.any { it.path.startsWith(Trash.root.path) }) 1 else m0)
     dg = Dg("DELETE ${fs.size}?", "GO", {
-      val m = mode.intValue
-      bg(if (m == 0) "tidying away…" else "deleting…", fs.size * 2, if (m == 0) ({ bg("restoring…") { Trash.list().take(fs.size).forEach { Trash.restore(it) }; "restored ${fs.size}" } }) else null) {
-        for (f in fs) { if (m == 0) Trash.put(f) else if (m == 1) f.deleteRecursively() else Fx2.shred(f) }
+      val m = mode.intValue; val tr = java.util.concurrent.CopyOnWriteArrayList<File>()
+      bg(if (m == 0) "tidying away…" else "deleting…", fs.size * 2, if (m == 0) ({ bg("restoring…") { Trash.undo(tr); "restored ${tr.size}" } }) else null) {
+        for (f in fs) { if (m == 0) tr.add(Trash.put(f)) else if (m == 1) f.deleteRecursively() else Fx2.shred(f) }
         if (m == 0) "moved ${fs.size} to trash" else "deleted ${fs.size}"
       }
     }) {
@@ -308,7 +312,7 @@ class MainActivity : ComponentActivity() {
     dg = Dg("BATCH RENAME ${fs.size}", "APPLY", {
       bg("renaming…", 2) {
         var c = 0
-        fs.forEachIndexed { i, f -> val n = nn(f, i); if (n.isNotEmpty() && n != f.name && f.renameTo(File(f.parentFile, n))) c++ }
+        fs.forEachIndexed { i, f -> val n = nn(f, i); if (okNm(n) && n != f.name) { val t = File(f.parentFile, n); if (f.renameTo(if (t.exists()) Fx.uniq(t) else t)) c++ } }
         "renamed $c"
       }
     }) {
@@ -376,13 +380,14 @@ class MainActivity : ComponentActivity() {
   fun togg(p: Pane, e: E) { p.sel = if (e.f.path in p.sel) p.sel - e.f.path else p.sel + e.f.path; cheer(3) }
   fun tapE(p: Pane, e: E) { if (p.sel.isNotEmpty()) togg(p, e) else if (e.dir) load(p, e.f) else if (e.ex in Fx.IMG) { vf = e.f; sub = "img" } else fileMenu(e) }
   fun sb(vararg p: Pair<String, () -> Unit>): Subs = p.toList()
-  fun renameFile(f: File) { ask("RENAME", f.name) { n -> bg("renaming…") { if (n.isNotBlank() && !File(f.parentFile, n).exists()) { f.renameTo(File(f.parentFile, n)); null } else "✕ invalid or exists" } } }
-  fun newFolder(p: Pane = P) { val d = p.dir; ask("NEW FOLDER", "") { n -> bg("mkdir…") { File(d, n).mkdirs(); null } } }
-  fun newFile(p: Pane, def: String) { val d = p.dir; ask("NEW FILE", def) { n -> bg("touch…") { File(d, n).createNewFile(); null } } }
+  fun renameFile(f: File) { ask("RENAME", f.name) { n0 -> val n = n0.trim(); bg("renaming…") { val t = File(f.parentFile, n); if (!okNm(n)) "✕ invalid name" else if (n == f.name) null else if (t.exists()) "✕ already exists" else if (f.renameTo(t)) "renamed" else "✕ rename failed" } } }
+  fun newFolder(p: Pane = P) { val d = p.dir; ask("NEW FOLDER", "") { n0 -> val n = n0.trim(); bg("mkdir…") { val t = File(d, n); if (!okNm(n)) "✕ invalid name" else if (t.exists()) "✕ already exists" else if (t.mkdirs()) "created ${t.name}" else "✕ mkdir failed" } } }
+  fun newFile(p: Pane, def: String) { val d = p.dir; ask("NEW FILE", def) { n0 -> val n = n0.trim(); bg("touch…") { val t = File(d, n); if (!okNm(n)) "✕ invalid name" else if (t.exists()) "✕ already exists" else if (t.createNewFile()) "created ${t.name}" else "✕ create failed" } } }
   fun upDir(p: Pane) { val par = p.dir.parentFile; if (par != null) load(p, par) else toast("top of storage") }
   fun trashNow(fs: List<File>) {
     if (fs.isEmpty()) { toast("select first"); return }
-    bg("tidying away…", fs.size * 2, { bg("restoring…") { Trash.list().take(fs.size).forEach { Trash.restore(it) }; "restored ${fs.size}" } }) { fs.forEach { Trash.put(it) }; "moved ${fs.size} to trash" }
+    val tr = java.util.concurrent.CopyOnWriteArrayList<File>()
+    bg("tidying away…", fs.size * 2, { bg("restoring…") { Trash.undo(tr); "restored ${tr.size}" } }) { fs.forEach { tr.add(Trash.put(it)) }; "moved ${fs.size} to trash" }
   }
   fun zipNow(z: Boolean, level: Int, store: Boolean) {
     val fs = sf(P)

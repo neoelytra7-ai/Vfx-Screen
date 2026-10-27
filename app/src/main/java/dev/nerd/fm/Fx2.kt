@@ -48,10 +48,14 @@ object Thumbs {
 class TItem(val dir: File, val item: File, val orig: String)
 object Trash {
   val root: File get() = File(Environment.getExternalStorageDirectory(), ".nerdfm_trash")
-  fun put(f: File) {
-    val d = File(root, System.currentTimeMillis().toString() + "-" + (f.name.hashCode() and 0xffff))
+  fun put(f: File): File {
+    val b = System.currentTimeMillis().toString() + "-" + (f.name.hashCode() and 0xffff)
+    var d = File(root, b); var k = 0
+    while (d.exists()) d = File(root, b + "-" + (++k))
     d.mkdirs(); File(d, ".orig").writeText(f.parent ?: ""); Fx.mv(f, File(d, f.name))
+    return d
   }
+  fun undo(ds: List<File>) { val n = ds.map { it.name }.toSet(); list().filter { it.dir.name in n }.forEach { restore(it) } }
   fun list(): List<TItem> = (root.listFiles() ?: emptyArray()).mapNotNull { d ->
     val x = d.listFiles()?.firstOrNull { it.name != ".orig" }
     if (x == null) null else TItem(d, x, runCatching { File(d, ".orig").readText() }.getOrDefault(""))

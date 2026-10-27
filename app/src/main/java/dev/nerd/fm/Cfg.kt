@@ -100,8 +100,8 @@ class Cfg(ctx: Context) {
 
   val fx: Int get() = minOf(anim, Th.cap)
   private val lt: Boolean get() = Th.pal.light
-  val ac: Color get() = Color.hsv(hue.coerceIn(0f, 360f), sat.coerceIn(0f, 1f).let { if (lt) maxOf(it, .5f) else it }, if (lt) .86f else 1f)
-  val ac2: Color get() = Color.hsv((hue + 28f) % 360f, (sat.coerceIn(0f, 1f) * .9f).let { if (lt) maxOf(it, .45f) else it }, if (lt) .88f else 1f)
+  val ac: Color get() = Color.hsv((hue.coerceIn(0f, 360f) + Aura.deg * Sk.f("aura.drift", 0f) + 360f) % 360f, sat.coerceIn(0f, 1f).let { if (lt) maxOf(it, .5f) else it }, if (lt) .86f else 1f)
+  val ac2: Color get() = Color.hsv((hue + Aura.deg * Sk.f("aura.drift", 0f) + 388f) % 360f, (sat.coerceIn(0f, 1f) * .9f).let { if (lt) maxOf(it, .45f) else it }, if (lt) .88f else 1f)
   val bgc: Color get() = Th.bg
   val ff: FontFamily get() = when (font) { 0 -> fRound; 1 -> fCasual; 2 -> FontFamily.SansSerif; 3 -> FontFamily.Monospace; else -> FontFamily.Serif }
   val level: Int get() = sqrt(xp / 12.0).toInt() + 1

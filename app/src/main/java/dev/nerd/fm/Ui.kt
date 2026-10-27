@@ -58,6 +58,7 @@ import kotlin.random.Random
 val LCfg = staticCompositionLocalOf<Cfg> { error("cfg") }
 val LClock = staticCompositionLocalOf<State<Float>> { mutableStateOf(0f) }
 val LSlow = staticCompositionLocalOf<State<Float>> { mutableStateOf(0f) }
+val LMax = staticCompositionLocalOf { longArrayOf(1L, 1L) }
 private val Back = CubicBezierEasing(.34f, 1.56f, .64f, 1f)
 private val INK = Color(0xFF3B2A38)
 internal val HP = Path()
@@ -315,7 +316,7 @@ fun DrawScope.icoDraw(kind: Int, col: Color, dk: Color, face: Boolean, t: Float,
   val ck = LClock.current; val cf = LCfg.current; val ctx = LocalContext.current
   val kind = Fx.kind(e)
   val tone = Sk.f("icon.tone", 1f); val idle = Sk.f("icon.idle", 1f); val face = Sk.b("icon.face", true)
-  val hue = (cf.hue + floatArrayOf(0f, 12f, -22f, 28f, -38f, 44f, -12f, 20f, 0f)[kind] + 360f) % 360f
+  val hue = (cf.hue + Aura.deg * Sk.f("aura.drift", 0f) + floatArrayOf(0f, 12f, -22f, 28f, -38f, 44f, -12f, 20f, 0f)[kind] + 360f) % 360f
   val lt = Th.pal.light
   val bs = if (kind == 8) .12f else (if (lt) .55f else .5f) * tone
   val col = Color.hsv(hue, bs.coerceIn(0f, 1f), if (lt) .92f else 1f)
@@ -351,6 +352,13 @@ fun DrawScope.icoDraw(kind: Int, col: Color, dk: Color, face: Boolean, t: Float,
   val src = remember { MutableInteractionSource() }
   val prs = src.collectIsPressedAsState()
   val showSub = Sk.b("row.sub", true)
+  val lm = LMax.current; val ck = LClock.current
+  val rail = Sk.b("row.rail", true); val railH = Sk.f("row.railh", 2f)
+  val fr = if (!rail) 0f else if (e.dir) (if (lm[1] > 0L) sqrt(e.cnt.toFloat() / lm[1]) else 0f) else (if (lm[0] > 0L) sqrt(e.sz.toFloat() / lm[0]) else 0f)
+  val age = remember(e) { System.currentTimeMillis() - e.mt }
+  val fresh = if (e.dir || !Sk.b("row.ember", true)) 0f else (1f - age / 1209600000f).coerceIn(0f, 1f)
+  val just = age < 600000L
+  val vp = (cf.pad + Sk.f("row.pad", 0f)).coerceAtLeast(0f).dp
   val sub = remember(e, cf.cSize, cf.cDate, cf.cPerm) { buildList { if (e.dir) add(e.cnt.toString() + " items") else if (cf.cSize) add(Fx.sz(e.sz)); if (cf.cDate) add(Fx.dt(e.mt)); if (cf.cPerm) add(e.pm) }.joinToString(" · ") }
   Box {
     Row(Modifier.fillMaxWidth().padding(horizontal = 1.dp, vertical = 1.dp)
@@ -358,12 +366,23 @@ fun DrawScope.icoDraw(kind: Int, col: Color, dk: Color, face: Boolean, t: Float,
       .ed("row").clip(sh).background(if (sel) ac.copy(alpha = Sk.f("row.sel", .2f)) else Color.Transparent)
       .then(if (sel) Modifier.border(1.dp, ac.copy(alpha = .55f), sh) else Modifier)
       .clickable(src, LocalIndication.current) { tap() }
-      .padding(horizontal = 6.dp, vertical = (cf.pad + Sk.f("row.pad", 0f)).coerceAtLeast(0f).dp),
+      .drawBehind {
+        if (fr > .02f) {
+          val h = railH.dp.toPx(); val x0 = 10.dp.toPx(); val w = ((size.width - 2f * x0) * fr.coerceAtMost(1f)).coerceAtLeast(h)
+          drawRoundRect(Brush.horizontalGradient(listOf(cf.ac2.copy(alpha = .2f), ac.copy(alpha = .75f)), startX = x0, endX = x0 + w), Offset(x0, size.height - h - 1.dp.toPx()), Size(w, h), CornerRadius(h / 2f))
+        }
+      }
+      .padding(start = 6.dp, end = 6.dp, top = vp, bottom = vp + (if (rail) (railH + 1f).dp else 0.dp)),
       verticalAlignment = Alignment.CenterVertically) {
       Ico(e, Sk.f("row.icon", 30f).dp, sel, prs.value)
       Column(Modifier.weight(1f).padding(start = 8.dp)) {
         T(e.n, if (e.dir) ac else Th.fg, 13f, FontWeight.Medium)
         if (showSub && sub.isNotEmpty()) T(sub, Th.dim, 9f)
+      }
+      if (fresh > .02f) Canvas(Modifier.padding(end = 4.dp).size(10.dp)) {
+        val b = if (just && cf.fx > 0) 1f + .22f * sin(ck.value * 6f) else 1f
+        if (just) drawCircle(cf.ac2.copy(alpha = .22f), size.width * .5f * b)
+        drawCircle(cf.ac2.copy(alpha = .3f + .7f * fresh), size.width * .27f * b)
       }
       if (sel) Canvas(Modifier.size(16.dp)) { drawHeart(size.width / 2, size.height / 2, size.width * .3f, Color(0xFFFF6B9A)) }
     }
@@ -388,8 +407,9 @@ fun DrawScope.icoDraw(kind: Int, col: Color, dk: Color, face: Boolean, t: Float,
   var drag by remember { mutableStateOf(false) }
   val hp = LocalHapticFeedback.current; val cf = LCfg.current
   val list = s.items
+  val mx = remember(list) { longArrayOf(list.maxOfOrNull { it.sz } ?: 1L, list.maxOfOrNull { it.cnt.toLong() } ?: 1L) }
   fun idxAt(y: Float): Int = ls.layoutInfo.visibleItemsInfo.firstOrNull { y >= it.offset && y <= it.offset + it.size }?.index ?: -1
-  LazyColumn(Modifier.fillMaxSize().pointerInput(list) {
+  CompositionLocalProvider(LMax provides mx) { LazyColumn(Modifier.fillMaxSize().pointerInput(list) {
     var base = emptySet<String>(); var a = -1; var moved = false; var first = false
     detectDragGesturesAfterLongPress(
       onDragStart = { pos ->
@@ -405,10 +425,10 @@ fun DrawScope.icoDraw(kind: Int, col: Color, dk: Color, face: Boolean, t: Float,
   }, state = ls, userScrollEnabled = !drag) {
     items(count = list.size, key = { list[it].f.path }, contentType = { if (list[it].dir) 0 else 1 }) { i ->
       val e = list[i]
-      Rw(e, e.f.path in p.sel, { tap(e) }, qf == e.f.path, { quick(e) }) { qf = null }
+      Box(if (cf.fx > 0) Modifier.animateItem() else Modifier) { Rw(e, e.f.path in p.sel, { tap(e) }, qf == e.f.path, { quick(e) }) { qf = null } }
     }
     item(key = "foot") { FootRow(foot()) }
-  }
+  } }
 }
 
 @Composable fun Gc(e: E, sel: Boolean, tap: () -> Unit, lng: () -> Unit) {
@@ -480,7 +500,7 @@ fun DrawScope.icoDraw(kind: Int, col: Color, dk: Color, face: Boolean, t: Float,
       }, label = "nav", contentKey = { it.dir }) { s ->
         if (s.items.isEmpty()) Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) { Mochi(80.dp, 1); T("nothing here~ zzz", Th.dim); Spacer(Modifier.height(8.dp)); FootRow(foot()) }
         else if (cf.grid) LazyVerticalGrid(GridCells.Adaptive(78.dp), Modifier.fillMaxSize().nestedScroll(conn)) {
-          items(count = s.items.size, key = { s.items[it].f.path }) { i -> val e = s.items[i]; Gc(e, e.f.path in p.sel, { tap(e) }, { lng(e) }) }
+          items(count = s.items.size, key = { s.items[it].f.path }) { i -> val e = s.items[i]; Box(if (cf.fx > 0) Modifier.animateItem() else Modifier) { Gc(e, e.f.path in p.sel, { tap(e) }, { lng(e) }) } }
           item(span = { GridItemSpan(maxLineSpan) }) { FootRow(foot()) }
         }
         else ListBody(p, s, tap, quick, foot)

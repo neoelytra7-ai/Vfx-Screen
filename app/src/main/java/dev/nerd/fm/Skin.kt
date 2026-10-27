@@ -21,6 +21,11 @@ object Hub {
   var toast: (String) -> Unit = {}
 }
 
+object Aura {
+  var deg by mutableFloatStateOf(0f)
+  fun tick() { val c = java.util.Calendar.getInstance(); val h = c.get(java.util.Calendar.HOUR_OF_DAY) + c.get(java.util.Calendar.MINUTE) / 60f; deg = Math.round(kotlin.math.sin((h - 9f) / 24f * 6.2832f) * 40f).toFloat() }
+}
+
 object Sk {
   val m = mutableStateMapOf<String, Float>()
   private var cfg: Cfg? = null
@@ -60,13 +65,14 @@ val SCHEMA: Map<String, List<Tok>> = linkedMapOf(
   "nav" to listOf(Tok("nav.round", "round", 0f, 36f, 26f), Tok("nav.fill", "fill", 0f, .4f, .07f), Tok("nav.icon", "icon x", .6f, 1.6f, 1f),
     Tok("nav.labels", "labels", 0f, 1f, 0f, 1), Tok("nav.top", "on top", 0f, 1f, 0f, 1)),
   "row" to listOf(Tok("row.round", "round", 0f, 30f, 12f), Tok("row.pad", "pad +", -4f, 14f, 0f), Tok("row.icon", "icon px", 22f, 60f, 30f),
-    Tok("row.sel", "selected", 0f, .6f, .2f), Tok("row.sub", "subtitle", 0f, 1f, 1f, 1)),
+    Tok("row.sel", "selected", 0f, .6f, .2f), Tok("row.sub", "subtitle", 0f, 1f, 1f, 1),
+    Tok("row.rail", "weight rail", 0f, 1f, 1f, 1), Tok("row.railh", "rail px", 1f, 5f, 2f), Tok("row.ember", "freshness ember", 0f, 1f, 1f, 1)),
   "pane" to listOf(Tok("pane.round", "round", 0f, 36f, 16f), Tok("pane.fill", "fill", 0f, .3f, .035f), Tok("pane.border", "border", 0f, 5f, 1.5f), Tok("crumb.show", "breadcrumb", 0f, 1f, 1f, 1)),
   "tile" to listOf(Tok("tile.round", "round", 0f, 36f, 20f), Tok("tile.tint", "tint", 0f, .8f, .4f), Tok("tile.icon", "icon px", 24f, 64f, 40f)),
   "icon" to listOf(Tok("icon.face", "faces", 0f, 1f, 1f, 1), Tok("icon.idle", "idle anim", 0f, 2f, 1f), Tok("icon.tone", "saturation", 0f, 1.8f, 1f)),
   "mochi" to listOf(Tok("mochi.home", "home size", 60f, 180f, 104f), Tok("mochi.show", "show on home", 0f, 1f, 1f, 1)),
   "stor" to listOf(Tok("stor.show", "show bar", 0f, 1f, 1f, 1), Tok("stor.h", "height", 3f, 18f, 9f)),
-  "bg" to listOf(Tok("bg.grad", "gradient", 0f, 1f, 0f), Tok("bg.decor", "floaties", 0f, 1f, 0f, 1)),
+  "bg" to listOf(Tok("bg.grad", "gradient", 0f, 1f, 0f), Tok("bg.decor", "floaties", 0f, 1f, 0f, 1), Tok("aura.drift", "aura drift", 0f, 1f, 0f)),
   "dialog" to listOf(Tok("dlg.round", "round", 0f, 40f, 28f)),
   "motion" to listOf(Tok("tr.tab", "tab transition", 0f, 4f, 0f, 2, TRS), Tok("tr.dir", "folder transition", 0f, 4f, 0f, 2, TRS),
     Tok("tr.speed", "speed", .4f, 2.5f, 1f), Tok("tr.bounce", "bounce", 0f, 1.6f, .15f), Tok("tr.wipe", "wipe", 0f, 3f, 3f, 2, listOf("BUBBLES", "HEARTS", "SPARKLES", "OFF"))),
@@ -82,7 +88,10 @@ val TPLS = listOf(
   Tpl("COMPACT", 2, 2, mapOf("btn.padx" to 8f, "btn.pady" to 3f, "row.pad" to -3f, "row.icon" to 28f, "row.sub" to 0f, "stor.h" to 5f, "nav.labels" to 0f, "btn.text" to .9f)),
   Tpl("CHUNKY", 3, 0, mapOf("btn.round" to 14f, "btn.border" to 3f, "btn.padx" to 16f, "btn.pady" to 9f, "row.pad" to 8f, "row.icon" to 48f, "pane.border" to 3f, "nav.round" to 18f, "btn.text" to 1.15f)),
   Tpl("SAKURA TEA", 5, 0, mapOf("bg.grad" to .6f, "bg.decor" to 1f, "btn.round" to 24f, "tile.tint" to .5f)),
-  Tpl("NIGHT OWL", 4, 2, mapOf("bg.decor" to 1f, "fx.spark" to 5f, "tr.tab" to 3f, "tr.dir" to 2f))
+  Tpl("NIGHT OWL", 4, 2, mapOf("bg.decor" to 1f, "fx.spark" to 5f, "tr.tab" to 3f, "tr.dir" to 2f)),
+  Tpl("DATA INK", 1, 3, mapOf("row.rail" to 1f, "row.railh" to 3f, "row.ember" to 1f, "icon.face" to 0f, "icon.idle" to .3f, "row.icon" to 26f, "row.pad" to -2f, "row.round" to 4f, "btn.round" to 6f, "pane.round" to 8f, "pane.border" to 1f, "fx.spark" to 0f, "tr.tab" to 4f, "tr.dir" to 4f)),
+  Tpl("DUSK DRIFT", 4, 2, mapOf("aura.drift" to 1f, "bg.grad" to .7f, "bg.decor" to 1f, "tile.tint" to .5f, "btn.round" to 22f, "tr.bounce" to .6f)),
+  Tpl("ZEN", 2, 2, mapOf("row.rail" to 0f, "row.ember" to 0f, "icon.face" to 0f, "icon.idle" to 0f, "fx.spark" to 0f, "row.sub" to 0f, "row.pad" to 6f, "row.icon" to 32f, "pane.border" to 0f, "btn.border" to 0f, "btn.fill" to .1f, "tr.tab" to 4f, "tr.dir" to 4f, "tr.speed" to .8f))
 )
 
 fun applyTpl(cf: Cfg, t: Tpl) { Sk.resetAll(); Sk.put(t.m); cf.applyPreset(t.preset); cf.font = t.font }
