@@ -45,6 +45,11 @@ env:
   VERSION_NAME: 1.0.${{ github.run_number }}
   REQ_FLAGS: "--diffusion-model --llm --vae --tokenizer --backend --params-backend --cfg-scale --steps"
   COMMON_FLAGS: "--params-backend te=disk,diffusion=disk,vae=cpu"
+  DIT_VARIANT: ${{ inputs.dit_variant || 'q2k' }}
+  DIT_REPO: ${{ inputs.dit_variant == 'turbo_q4_0' && 'molbal/MOSS-Image-GGUF' || 'leejet/MOSS-Image-SFT-GGUF' }}
+  DIT_FILE: ${{ inputs.dit_variant == 'turbo_q4_0' && 'moss_image_sft_turbo-Q4_0.gguf' || 'MOSS-Image-SFT-Q2_K.gguf' }}
+  DIT_STEPS: ${{ inputs.dit_variant == 'turbo_q4_0' && '8' || '20' }}
+  DIT_CFG: ${{ inputs.dit_variant == 'turbo_q4_0' && '1.0' || '3.0' }}
 
 jobs:
   keepalive:
@@ -118,7 +123,7 @@ jobs:
             if [ -z "$V" ] || [ "$V" = "null" ]; then echo "::error::cannot resolve Hugging Face revision of $1"; exit 1; fi
             echo "$V"
           }
-          RD=$(rev leejet/MOSS-Image-SFT-GGUF)
+          RD=$(rev "$DIT_REPO")
           RT=$(rev unsloth/Qwen3.5-9B-GGUF)
           RV=$(rev Comfy-Org/MOSS-Image)
           RK=$(rev OpenMOSS-Team/MOSS-Image-Base)
@@ -225,11 +230,11 @@ jobs:
           set -e
           mkdir -p m
           dl() { curl -fL --retry 6 --retry-delay 5 --retry-all-errors -o "m/$1" "$2"; ls -l "m/$1"; }
-          dl MOSS-Image-SFT-Q2_K.gguf "https://huggingface.co/leejet/MOSS-Image-SFT-GGUF/resolve/$RD/MOSS-Image-SFT-Q2_K.gguf"
+          dl "$DIT_FILE" "https://huggingface.co/$DIT_REPO/resolve/$RD/$DIT_FILE"
           dl Qwen3.5-9B-UD-IQ2_XXS.gguf "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/$RT/Qwen3.5-9B-UD-IQ2_XXS.gguf"
           dl flux2-vae.safetensors "https://huggingface.co/Comfy-Org/MOSS-Image/resolve/$RV/vae/flux2-vae.safetensors"
           dl tokenizer.json "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base/resolve/$RK/tokenizer/tokenizer.json"
-          head -c 4 m/MOSS-Image-SFT-Q2_K.gguf | grep -q GGUF || { echo "::error::DiT is not a GGUF file"; exit 1; }
+          head -c 4 "m/$DIT_FILE" | grep -q GGUF || { echo "::error::DiT is not a GGUF file"; exit 1; }
           head -c 4 m/Qwen3.5-9B-UD-IQ2_XXS.gguf | grep -q GGUF || { echo "::error::LLM is not a GGUF file"; exit 1; }
           head -c 1 m/tokenizer.json | grep -q '{' || { echo "::error::tokenizer.json is not JSON"; exit 1; }
           df -h .
@@ -275,13 +280,13 @@ jobs:
           set -o pipefail
           T0=$(date +%s)
           /usr/bin/time -v -o time.txt ./sdcli-x86 \
-            --diffusion-model m/MOSS-Image-SFT-Q2_K.gguf \
+            --diffusion-model "m/$DIT_FILE" \
             --llm m/Qwen3.5-9B-UD-IQ2_XXS.gguf \
             --vae m/flux2-vae.safetensors \
             --tokenizer m/tokenizer.json \
             --backend cpu $COMMON_FLAGS $(cat proven_args.txt) \
             -p "a lighthouse on a cliff at dawn, volumetric light" \
-            -W 512 -H 512 --steps 2 --cfg-scale 3.0 -o smoke.png -v 2>&1 | tee smoke.log
+            -W 512 -H 512 --steps 2 --cfg-scale "$DIT_CFG" -o smoke.png -v 2>&1 | tee smoke.log
           SECS=$(( $(date +%s) - T0 ))
           KB=$(grep "Maximum resident" time.txt | awk '{print $NF}')
           MB=$(( KB / 1024 ))
@@ -380,7 +385,7 @@ jobs:
               return h.hexdigest()
 
           spec = [
-              ("dit", "MOSS-Image-SFT-Q2_K.gguf", "leejet/MOSS-Image-SFT-GGUF", os.environ["RD"], "MOSS-Image-SFT-Q2_K.gguf"),
+              ("dit", os.environ["DIT_FILE"], os.environ["DIT_REPO"], os.environ["RD"], os.environ["DIT_FILE"]),
               ("te", "Qwen3.5-9B-UD-IQ2_XXS.gguf", "unsloth/Qwen3.5-9B-GGUF", os.environ["RT"], "Qwen3.5-9B-UD-IQ2_XXS.gguf"),
               ("vae", "flux2-vae.safetensors", "Comfy-Org/MOSS-Image", os.environ["RV"], "vae/flux2-vae.safetensors"),
               ("tok", "tokenizer.json", "OpenMOSS-Team/MOSS-Image-Base", os.environ["RK"], "tokenizer/tokenizer.json"),
@@ -401,6 +406,8 @@ jobs:
               "required_flags": os.environ["REQ_FLAGS"].split(),
               "proven_flags": open("proven.txt").read().split(),
               "built_at": time.strftime("%Y-%m-%d", time.gmtime()),
+              "dit_variant": os.environ["DIT_VARIANT"],
+              "defaults": {"steps": int(os.environ["DIT_STEPS"]), "cfg": float(os.environ["DIT_CFG"])},
               "run_url": os.environ.get("RUN_URL", ""),
               "profiles": [
                   {"name": "GPU mode (OpenCL for the diffusion model, CPU text encoder)", "kind": "gpu", "flags": ["--backend", "te=cpu,vae=cpu"] + base},
@@ -1002,7 +1009,9 @@ jobs:
           import android.provider.OpenableColumns
           import android.text.SpannableStringBuilder
           import android.text.Spanned
+          import android.text.Editable
           import android.text.TextUtils
+          import android.text.TextWatcher
           import android.text.style.ForegroundColorSpan
           import android.view.Gravity
           import android.view.View
@@ -1097,6 +1106,19 @@ jobs:
               @Volatile private var perfTier = 0
               @Volatile private var curTier = 0
               private val tierNames = listOf("Balanced", "Fast", "Max")
+              @Volatile private var rootBoost = false
+              @Volatile private var rootActive = false
+              private var rootInfo = ""
+              private lateinit var cbRoot: CheckBox
+              private lateinit var workNote: TextView
+              private var defSteps = "20"
+              private var defCfg = "3.0"
+              private var variant = "q2k"
+              private var dotCount = 0
+              private var dotFirst = 0L
+              private var dotLast = 0L
+              private var dotLogged = false
+              private val dotRe = Regex("""^(\[[A-Z]\]\s*)?ggml:\s*\.*$""")
               private lateinit var segPerf: Seg
               private lateinit var perfNote: TextView
               @Volatile private var segTotal = 0
@@ -1377,6 +1399,12 @@ jobs:
                   peakRssMb = j.optLong("peak_rss_mb", 0L)
                   testInfo = j.optString("smoke")
                   builtAt = j.optString("built_at")
+                  variant = j.optString("dit_variant", "q2k")
+                  val dj = j.optJSONObject("defaults")
+                  if (dj != null) {
+                      defSteps = dj.optInt("steps", 20).toString()
+                      defCfg = dj.optDouble("cfg", 3.0).toString()
+                  }
                   val rq = j.getJSONArray("required_flags")
                   reqFlags = List(rq.length()) { i -> rq.getString(i) }
                   val pv = j.optJSONArray("proven_flags")
@@ -1515,7 +1543,7 @@ jobs:
                       }
                   }
                   compatView.text = sb
-                  cbFa.isEnabled = helpText.contains("--diffusion-fa")
+                  cbFa.isEnabled = helpText.contains("--flash-attn") || helpText.contains("--diffusion-fa")
                   cbFa.text = if (cbFa.isEnabled) "Flash attention (experimental, GPU only)" else "Flash attention (not in this engine)"
               }
 
@@ -1897,6 +1925,94 @@ jobs:
                   if (list.isNotEmpty()) thread { importUris(list) }
               }
 
+
+              // =====================================================================
+              //  root boost (Magisk): optional, every step is logged
+              // =====================================================================
+              private fun scriptText(name: String): String = assets.open(name).bufferedReader().use { it.readText() }
+
+              /** Runs a shell script as root by feeding it to `su` on stdin. */
+              private fun suScript(text: String, timeoutS: Long): Pair<Int, String> {
+                  return try {
+                      val pr = ProcessBuilder("su").redirectErrorStream(true).start()
+                      pr.outputStream.use { o -> o.write((text + "\nexit\n").toByteArray()) }
+                      val done = pr.waitFor(timeoutS, java.util.concurrent.TimeUnit.SECONDS)
+                      if (!done) {
+                          pr.destroyForcibly()
+                          Pair(-1, "timeout")
+                      } else {
+                          Pair(pr.exitValue(), pr.inputStream.bufferedReader().readText())
+                      }
+                  } catch (e: Exception) {
+                      Pair(-2, e.toString())
+                  }
+              }
+
+              private fun checkRoot(): Boolean {
+                  val r = suScript("id", 40)
+                  return r.first == 0 && r.second.contains("uid=0")
+              }
+
+              private fun bigCoreMask(): String {
+                  try {
+                      val freqs = ArrayList<Long>()
+                      var n = 0
+                      while (File("/sys/devices/system/cpu/cpu$n").exists()) {
+                          val f = File("/sys/devices/system/cpu/cpu$n/cpufreq/cpuinfo_max_freq")
+                          freqs.add(if (f.exists()) f.readText().trim().toLong() else 0L)
+                          n++
+                      }
+                      val mx = freqs.maxOrNull() ?: 0L
+                      if (mx > 0L) {
+                          var mask = 0L
+                          for ((i, f) in freqs.withIndex()) {
+                              if (f * 10 >= mx * 7) mask = mask or (1L shl i)
+                          }
+                          return java.lang.Long.toHexString(mask)
+                      }
+                  } catch (e: Exception) { }
+                  return "f0"
+              }
+
+              private fun rootPre() {
+                  val before = availMemMb()
+                  val r = suScript(scriptText("root_pre.sh"), 40)
+                  prefs.edit().putBoolean("root_dirty", true).apply()
+                  rootActive = true
+                  try { Thread.sleep(1500) } catch (e: InterruptedException) { }
+                  val after = availMemMb()
+                  val sb = StringBuilder()
+                  for (ln in r.second.split('\n')) {
+                      val t = ln.trim()
+                      if (t.isNotEmpty()) {
+                          sb.append(t).append("; ")
+                          log("root: $t")
+                      }
+                  }
+                  if (r.first != 0) logW("root pre-script exit code " + r.first)
+                  rootInfo = "free RAM $before -> $after MB | $sb"
+                  log("Root boost: free RAM $before \u2192 $after MB")
+              }
+
+              private fun rootPost() {
+                  val r = suScript(scriptText("root_post.sh"), 30)
+                  for (ln in r.second.split('\n')) {
+                      val t = ln.trim()
+                      if (t.isNotEmpty()) log("root: $t")
+                  }
+                  prefs.edit().putBoolean("root_dirty", false).apply()
+                  rootActive = false
+              }
+
+              private fun rootPin(pid: Int) {
+                  val mask = bigCoreMask()
+                  log("Root: pinning engine pid $pid to cores 0x$mask, nice -8, oom_score_adj -700")
+                  thread {
+                      val txt = scriptText("root_run.sh").replace("@PID@", pid.toString()).replace("@MASK@", mask)
+                      suScript(txt, 3L * 60 * 60)
+                  }
+              }
+
               // =====================================================================
               //  generate
               // =====================================================================
@@ -1916,8 +2032,8 @@ jobs:
                   val sd = seed.text.toString().trim().toLongOrNull() ?: (System.currentTimeMillis() % 1000000000L)
                   val th = (threads.text.toString().toIntOrNull() ?: 4).coerceIn(1, 8)
                   prefs.edit().putInt("size_i", segSize.selected).putInt("mode_i", segMode.selected)
-                      .putString("steps", st.toString()).putString("cfg", c.toString())
-                      .putString("threads", th.toString()).putString("prompt", text).putInt("perf_i", segPerf.selected).apply()
+                      .putString("steps_" + variant, st.toString()).putString("cfg_" + variant, c.toString())
+                      .putString("threads", th.toString()).putString("prompt", text).putInt("perf_j", segPerf.selected).apply()
                   val req = Req(text, size, st, c, sd, th, segMode.selected, cbFa.isChecked && cbFa.isEnabled, segPerf.selected)
                   thread { runGenerate(req) }
               }
@@ -1941,6 +2057,9 @@ jobs:
                   secIt = 0.0
                   openRunLog("generate")
                   acquireWake()
+                  if (rootBoost) {
+                      try { rootPre() } catch (e: Exception) { logW("Root boost failed: $e") }
+                  }
                   var produced = false
                   try {
                       preflight()
@@ -1991,11 +2110,19 @@ jobs:
                           logE("No mode produced an image. Use Share report for debugging.")
                       }
                   } catch (e: Exception) {
-                      logE("ERR: $e")
-                      hs = 3
-                      diagText = "Cause: unexpected app error: $e\nFix: tap Share report."
+                      if (cancel) {
+                          logW("Stopped.")
+                          hs = 0
+                      } else {
+                          logE("ERR: $e")
+                          hs = 3
+                          diagText = "Cause: unexpected app error: $e\nFix: tap Share report."
+                      }
                   } finally {
                       if (runEnd == 0L) runEnd = System.currentTimeMillis()
+                      if (rootActive) {
+                          try { rootPost() } catch (e: Exception) { logW("Root restore failed: $e") }
+                      }
                       releaseWake()
                       closeRunLog()
                       proc = null
@@ -2034,7 +2161,7 @@ jobs:
                   }
                   if (s > stage) {
                       stage = s
-                      addLog(1, 0, "stage \u2192 " + stageNames[s] + "  (trigger: " + line.take(110) + ")")
+                      addLog(1, 0, "stage \u2192 " + stageNames[s] + " at " + fmtDur((System.currentTimeMillis() - runStart) / 1000) + "  (trigger: " + line.take(110) + ")")
                   }
               }
 
@@ -2067,6 +2194,17 @@ jobs:
                   }
                   // weight-loading progress bars ("|####| 8/8 - 176MB/s"): activity only, never shown in the log
                   if (barRe.containsMatchIn(line)) { fileLog(line); return }
+                  if (dotRe.containsMatchIn(line)) {
+                      if (dotCount == 0) dotFirst = lastOutMs
+                      dotCount++
+                      dotLast = lastOutMs
+                      lastLine = "building OpenCL kernels \u00B7 " + dotCount
+                      return
+                  }
+                  if (dotCount > 0 && !dotLogged) {
+                      dotLogged = true
+                      addLog(1, 0, "OpenCL kernel build: " + dotCount + " dots over " + ((dotLast - dotFirst) / 1000) + " s")
+                  }
                   val l = line.lowercase(Locale.ROOT)
                   val sg = segRe.find(line)
                   if (sg != null) segTotal = sg.groupValues[1].toIntOrNull() ?: 0
@@ -2122,10 +2260,18 @@ jobs:
               private fun updatePerfNote() {
                   val ditMb = (files.firstOrNull { m -> m.id == "dit" }?.size ?: 0L) shr 20
                   perfNote.text = when (perfTier) {
-                      1 -> "Keeps the diffusion weights in RAM (~" + ditMb + " MB more) instead of re-reading them from disk on every pass. Falls back to Balanced if Android kills it."
-                      2 -> "Fast + flash attention on the GPU (if the engine has it). Highest RAM and GPU load; falls back automatically."
-                      else -> "Weights stream from disk: lowest RAM, slowest."
+                      1 -> "Experimental. Keeps the diffusion weights in RAM (~" + ditMb + " MB more). Can push the phone into memory pressure; only worth it if the GPU stat shows real load."
+                      2 -> "Experimental. Fast plus flash attention on the GPU. Highest RAM use; falls back automatically."
+                      else -> "Weights stream from disk: lowest RAM. Use this by default."
                   }
+              }
+
+              private fun updateWork() {
+                  val st = (steps.text.toString().toIntOrNull() ?: 20).coerceIn(1, 60)
+                  val c = cfg.text.toString().toDoubleOrNull() ?: 3.0
+                  val passes = if (Math.abs(c - 1.0) < 0.001) st else st * 2
+                  workNote.text = "Up to " + passes + " diffusion passes (" + st + " steps" +
+                      (if (passes != st) " \u00D7 2 while CFG is not 1" else ", no CFG pass") + "). Each pass is the slow part."
               }
 
               /** 0 = image made, 1 = failed (try next), 2 = stopped by you, 3 = killed for memory */
@@ -2142,6 +2288,8 @@ jobs:
                   gpuName = ""
                   blockLoads = 0
                   segTotal = 0
+                  dotCount = 0
+                  dotLogged = false
                   cpuPct = 0L
                   lastCpuTicks = -1L
                   lastCpuT = 0L
@@ -2165,7 +2313,10 @@ jobs:
                   if (hasFlag("--vae-tiling")) cmd.add("--vae-tiling")
                   if (hasFlag("--threads")) { cmd.add("--threads"); cmd.add(r.threads.toString()) }
                   if (hasFlag("--seed")) { cmd.add("--seed"); cmd.add(r.seed.toString()) }
-                  if ((r.fa || tier == 2) && p.kind == "gpu" && helpText.contains("--diffusion-fa")) cmd.add("--diffusion-fa")
+                  if ((r.fa || tier == 2) && p.kind == "gpu") {
+                      if (helpText.contains("--flash-attn")) { cmd.add("--flash-attn"); cmd.add("auto,diffusion=on") }
+                      else if (helpText.contains("--diffusion-fa")) cmd.add("--diffusion-fa")
+                  }
                   cmd.addAll(listOf("-p", r.prompt, "-W", r.size.toString(), "-H", r.size.toString(),
                       "--steps", r.steps.toString(), "--cfg-scale", r.cfg.toString(), "-o", out.absolutePath, "-v"))
                   log("RUN: " + cmd.joinToString(" "))
@@ -2176,7 +2327,12 @@ jobs:
                   val pr = pb.start()
                   proc = pr
                   enginePid = pidOf(pr)
-                  pumpLines(pr.inputStream) { ln -> onEngineLine(ln) }
+                  if (rootActive && enginePid > 0) rootPin(enginePid)
+                  try {
+                      pumpLines(pr.inputStream) { ln -> onEngineLine(ln) }
+                  } catch (e: java.io.IOException) {
+                      if (!cancel) logW("Engine output stream closed: $e")
+                  }
                   val code = pr.waitFor()
                   val secs = (System.currentTimeMillis() - t0) / 1000
                   val peak = rssPeak
@@ -2292,6 +2448,7 @@ jobs:
                       .append(" | blockLoads ").append(blockLoads).append(" seg ").append(segTotal)
                       .append(" | rss ").append(rssNow).append(" peak ").append(rssPeak).append(" MB | cpu ").append(cpuPct)
                       .append("% gpu ").append(gpuPct).append("%\n")
+                  sb.append("root boost: ").append(rootBoost).append(" | ").append(rootInfo).append('\n')
                   sb.append("\n-- engine help (backend/memory lines)\n")
                   for (ln in helpText.split('\n')) {
                       val q = ln.lowercase(Locale.ROOT)
@@ -2351,16 +2508,20 @@ jobs:
               }
 
               private fun hintText(silentS: Long): String {
-                  if (silentS < 25) return ""
+                  val runS = (System.currentTimeMillis() - runStart) / 1000
+                  val cpuBound = curKind == "gpu" && cpuPct >= 200 && gpuPct in 0..10 && runS > 30
+                  val cpuMsg = "Engine CPU " + cpuPct + "%, GPU " + gpuPct + "%: the heavy work is running on the CPU, so GPU mode is not accelerating this model. Expect it to be slow."
+                  if (silentS < 25) return if (cpuBound) cpuMsg else ""
                   val live = "engine CPU " + cpuPct + "%" + (if (gpuPct >= 0) ", GPU " + gpuPct + "%" else "")
                   val what = when {
                       stage <= 0 && diskRate >= 1 -> "Loading weights from storage ($diskRate MB/s)."
-                      stage <= 0 -> "No output and no disk reads: GPU kernels may be compiling (first run 1-3 min)."
+                      stage <= 0 -> "No output and no disk reads: GPU kernels may be building (first run 1-3 min)."
                       stage == 2 && stepNow == 0 -> "Waiting for the first sampling step (the slowest one)."
                       stage == 3 -> "Final compute; this engine prints nothing here."
                       else -> "Quiet."
                   }
                   val verdict = when {
+                      cpuBound -> " The heavy work is on the CPU, not the GPU, so it will be slow."
                       cpuPct >= 20 || gpuPct >= 10 || diskRate >= 1 -> " It is working."
                       gpuPct >= 0 -> " Looks idle; if this lasts over 2 min it may be stuck."
                       else -> " CPU is idle and GPU load is unreadable here, so it may still be computing on the GPU."
@@ -2444,6 +2605,7 @@ jobs:
                       var mt = if (k.isEmpty()) "" else k
                       if (gpuName.isNotEmpty()) mt += " \u00B7 " + gpuName
                       if (mt.isNotEmpty()) mt += " \u00B7 " + tierNames[curTier.coerceIn(0, 2)]
+                      if (rootActive) mt += " \u00B7 root"
                       if (attemptTotal > 1) mt += " \u00B7 try $attemptIdx/$attemptTotal"
                       if (mt.isNotEmpty() && !dling) {
                           heroMode.text = mt
@@ -2620,6 +2782,9 @@ jobs:
                   log("MossMini " + appVer + " | " + Build.MODEL + " | " + soc() + " | Android " + Build.VERSION.SDK_INT)
                   log("Log file: " + File(getExternalFilesDir(null) ?: filesDir, "last_run.log").absolutePath)
                   ui.post(tick)
+                  if (prefs.getBoolean("root_dirty", false)) {
+                      thread { try { rootPost() } catch (e: Exception) { } }
+                  }
                   thread { preflight() }
               }
 
@@ -2651,6 +2816,8 @@ jobs:
                   val meta = LinearLayout(this)
                   meta.orientation = LinearLayout.HORIZONTAL
                   meta.addView(chip(this, "sd.cpp " + sdCommit.take(7), Pal.info))
+                  meta.addView(chip(this, if (variant == "turbo_q4_0") "DiT Turbo Q4_0" else "DiT Q2_K", Pal.warn),
+                      LinearLayout.LayoutParams(wc, wc).apply { leftMargin = dp(8) })
                   val ci = chip(this, if (testInfo.startsWith("SKIPPED")) "CI test skipped" else "CI test passed", if (testInfo.startsWith("SKIPPED")) Pal.warn else Pal.g1)
                   meta.addView(ci, LinearLayout.LayoutParams(wc, wc).apply { leftMargin = dp(8) })
                   if (builtAt.isNotEmpty()) meta.addView(chip(this, builtAt, Pal.sub), LinearLayout.LayoutParams(wc, wc).apply { leftMargin = dp(8) })
@@ -2733,6 +2900,15 @@ jobs:
                   )
                   val exRow = LinearLayout(this)
                   exRow.orientation = LinearLayout.HORIZONTAL
+                  val quick = chip(this, "\u26A1 Quick test", Pal.warn)
+                  quick.setOnClickListener {
+                      segSize.select(0, false)
+                      steps.setText("4")
+                      cfg.setText("1.0")
+                      segPerf.select(0, true)
+                      log("Quick test preset: 256 px, 4 steps, CFG 1.0. For timing only; quality will be poor.")
+                  }
+                  exRow.addView(quick, LinearLayout.LayoutParams(wc, wc).apply { rightMargin = dp(8) })
                   for ((nm, txt) in exs) {
                       val c = chip(this, nm, Pal.info)
                       c.setOnClickListener { prompt.setText(txt) }
@@ -2754,7 +2930,7 @@ jobs:
                   cCreate.put(segRow, 14)
 
                   segPerf = Seg(this, listOf("Balanced", "Fast", "Max"))
-                  segPerf.select(prefs.getInt("perf_i", 0), false)
+                  segPerf.select(prefs.getInt("perf_j", 0), false)
                   perfTier = segPerf.selected
                   perfNote = tv(this, "", 11f, Pal.dim)
                   segPerf.onChange = { i ->
@@ -2766,8 +2942,8 @@ jobs:
                   cCreate.put(perfNote, 6)
                   updatePerfNote()
 
-                  steps = fieldView(this, "20", prefs.getString("steps", "20") ?: "20", numeric = true, decimal = false, compact = true)
-                  cfg = fieldView(this, "3.0", prefs.getString("cfg", "3.0") ?: "3.0", numeric = true, compact = true)
+                  steps = fieldView(this, "20", prefs.getString("steps_" + variant, defSteps) ?: defSteps, numeric = true, decimal = false, compact = true)
+                  cfg = fieldView(this, "3.0", prefs.getString("cfg_" + variant, defCfg) ?: defCfg, numeric = true, compact = true)
                   seed = fieldView(this, "random", "", numeric = true, decimal = false, compact = true)
                   threads = fieldView(this, "4", prefs.getString("threads", "4") ?: "4", numeric = true, decimal = false, compact = true)
                   val nums = LinearLayout(this)
@@ -2777,6 +2953,16 @@ jobs:
                   nums.putW(labeled(this, "Seed", seed), 1.3f, leftDp = 8)
                   nums.putW(labeled(this, "Threads", threads), 1f, leftDp = 8)
                   cCreate.put(nums, 12)
+                  workNote = tv(this, "", 11f, Pal.dim)
+                  cCreate.put(workNote, 6)
+                  val tw = object : TextWatcher {
+                      override fun afterTextChanged(s: Editable?) { updateWork() }
+                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
+                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
+                  }
+                  steps.addTextChangedListener(tw)
+                  cfg.addTextChangedListener(tw)
+                  updateWork()
 
                   cbFa = CheckBox(this)
                   cbFa.text = "Flash attention (experimental, GPU only)"
@@ -2784,6 +2970,32 @@ jobs:
                   cbFa.textSize = 12.5f
                   cbFa.buttonTintList = android.content.res.ColorStateList.valueOf(Pal.g1)
                   cCreate.put(cbFa, 8)
+
+                  cbRoot = CheckBox(this)
+                  cbRoot.text = "Root boost (Magisk): free RAM, pin big cores, max clocks"
+                  cbRoot.setTextColor(Pal.sub)
+                  cbRoot.textSize = 12.5f
+                  cbRoot.buttonTintList = android.content.res.ColorStateList.valueOf(Pal.g1)
+                  cbRoot.isChecked = prefs.getBoolean("root_boost", false)
+                  rootBoost = cbRoot.isChecked
+                  cbRoot.setOnCheckedChangeListener { _, v ->
+                      if (v) {
+                          thread {
+                              if (checkRoot()) {
+                                  rootBoost = true
+                                  prefs.edit().putBoolean("root_boost", true).apply()
+                                  log("Root access granted.")
+                              } else {
+                                  logE("Root not available or denied. Grant MossMini in Magisk and try again.")
+                                  ui.post { cbRoot.isChecked = false }
+                              }
+                          }
+                      } else {
+                          rootBoost = false
+                          prefs.edit().putBoolean("root_boost", false).apply()
+                      }
+                  }
+                  cCreate.put(cbRoot, 4)
 
                   btnGen = pill(this, "Generate", 0)
                   btnGen.setOnClickListener { onGenClick() }
@@ -2950,6 +3162,69 @@ jobs:
                   super.onDestroy()
               }
           }
+          EOF
+
+      - name: "Write root-boost scripts"
+        run: |
+          cat > app/src/main/assets/root_pre.sh <<'EOF'
+          #!/system/bin/sh
+          # MossMini root boost: runs only when you tick "Root boost". Saves a restore script first.
+          R=/data/local/tmp/mossmini_restore.sh
+          echo "#!/system/bin/sh" > $R
+          # 1) free RAM: kill cached background apps, defragment free memory
+          am kill-all >/dev/null 2>&1
+          echo 1 > /proc/sys/vm/compact_memory 2>/dev/null
+          # 2) less zram swapping while the engine runs
+          SW=$(cat /proc/sys/vm/swappiness 2>/dev/null)
+          if [ -n "$SW" ]; then
+            echo "echo $SW > /proc/sys/vm/swappiness" >> $R
+            echo 20 > /proc/sys/vm/swappiness 2>/dev/null
+            echo "swappiness: $SW -> $(cat /proc/sys/vm/swappiness)"
+          fi
+          # 3) CPU governors
+          for P in /sys/devices/system/cpu/cpufreq/policy*; do
+            [ -f $P/scaling_governor ] || continue
+            grep -qw performance $P/scaling_available_governors 2>/dev/null || continue
+            G=$(cat $P/scaling_governor)
+            echo "echo $G > $P/scaling_governor" >> $R
+            echo performance > $P/scaling_governor 2>/dev/null
+            echo "cpu $(basename $P): $G -> $(cat $P/scaling_governor)"
+          done
+          # 4) GPU governor (Adreno)
+          K=/sys/class/kgsl/kgsl-3d0/devfreq
+          if [ -f $K/governor ]; then
+            G=$(cat $K/governor)
+            echo "echo $G > $K/governor" >> $R
+            echo performance > $K/governor 2>/dev/null
+            echo "gpu governor: $G -> $(cat $K/governor)"
+          fi
+          chmod 755 $R
+          echo "restore script: $R"
+          EOF
+          cat > app/src/main/assets/root_run.sh <<'EOF'
+          #!/system/bin/sh
+          # MossMini root boost: protect and pin the engine process (PID and MASK are filled in by the app)
+          PID=@PID@
+          MASK=@MASK@
+          echo -700 > /proc/$PID/oom_score_adj 2>/dev/null
+          renice -n -8 -p $PID >/dev/null 2>&1
+          while [ -d /proc/$PID ]; do
+            for T in /proc/$PID/task/*; do
+              taskset -p $MASK ${T##*/} >/dev/null 2>&1
+            done
+            sleep 2
+          done
+          EOF
+          cat > app/src/main/assets/root_post.sh <<'EOF'
+          #!/system/bin/sh
+          R=/data/local/tmp/mossmini_restore.sh
+          if [ -f $R ]; then
+            sh $R
+            rm -f $R
+            echo "clocks and swappiness restored"
+          else
+            echo "nothing to restore"
+          fi
           EOF
 
       - name: Build signed release APK
