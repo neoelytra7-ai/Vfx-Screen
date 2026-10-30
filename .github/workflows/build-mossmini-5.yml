@@ -266,6 +266,7 @@ jobs:
           echo "$PF" > proven.txt
           echo "$PA" > proven_args.txt
           echo "proven optional flags:$PF"
+          { echo '### engine --help (backend / memory flags)'; echo '```'; grep -i -E 'backend|flash|segment|vram|offload|tiling|graph' help.txt | head -40; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           grep -qF -- "--diffusion-fa" help.txt && echo "flash attention exists (offered as experimental toggle, not CI-proven)" || true
 
       - name: "END-TO-END TEST: real 512x512 image with the app's exact flags (CPU mode)"
@@ -1040,7 +1041,7 @@ jobs:
               private class Attempt(val label: String, val code: Int, val secs: Long, val peakMb: Long, val note: String)
               private class Req(
                   val prompt: String, val size: Int, val steps: Int, val cfg: Double,
-                  val seed: Long, val threads: Int, val mode: Int, val fa: Boolean
+                  val seed: Long, val threads: Int, val mode: Int, val fa: Boolean, val tier: Int
               )
 
               private val ui = Handler(Looper.getMainLooper())
@@ -1092,6 +1093,21 @@ jobs:
               @Volatile private var sawOcl = false
               @Volatile private var gpuName = ""
               @Volatile private var failStage = 0
+              @Volatile private var blockLoads = 0
+              @Volatile private var perfTier = 0
+              @Volatile private var curTier = 0
+              private val tierNames = listOf("Balanced", "Fast", "Max")
+              private lateinit var segPerf: Seg
+              private lateinit var perfNote: TextView
+              @Volatile private var segTotal = 0
+              @Volatile private var cpuPct = 0L
+              @Volatile private var gpuPct = -1
+              private var lastCpuTicks = -1L
+              private var lastCpuT = 0L
+              private val barRe = Regex("""^\|[# ]*\|\s*\d+/\d+\s*-""")
+              private val adrenoRe = Regex("""Adreno\s*\(?TM\)?\s*\d+""")
+              private val segRe = Regex("""across (\d+) segments""")
+              private val decRe = Regex("""decoding\s+\d+\s+latent""")
               @Volatile private var diagText = ""
               @Volatile private var doneInfo = ""
               private val attempts = CopyOnWriteArrayList<Attempt>()
@@ -1137,7 +1153,7 @@ jobs:
               private lateinit var sRam: Stat
               private lateinit var sPeak: Stat
               private lateinit var sFree: Stat
-              private lateinit var sDisk: Stat
+              private lateinit var sCpu: Stat
               private lateinit var cCompat: Card
               private lateinit var compatView: TextView
               private lateinit var cFiles: Card
@@ -1314,11 +1330,12 @@ jobs:
                   return -1
               }
 
-              /** returns [rssMb, peakMb, readMb], -1 when unavailable */
+              /** returns [rssMb, peakMb, readMb, cpuTicks], -1 when unavailable */
               private fun readProc(pid: Int): LongArray {
                   var rss = -1L
                   var hwm = -1L
                   var rd = -1L
+                  var cpu = -1L
                   try {
                       File("/proc/$pid/status").forEachLine { ln ->
                           if (ln.startsWith("VmRSS:")) rss = ln.filter { c -> c.isDigit() }.toLong() / 1024
@@ -1330,7 +1347,28 @@ jobs:
                           if (ln.startsWith("read_bytes:")) rd = ln.substringAfter(':').trim().toLong() shr 20
                       }
                   } catch (e: Exception) { }
-                  return longArrayOf(rss, hwm, rd)
+                  try {
+                      val st = File("/proc/$pid/stat").readText()
+                      val parts = st.substring(st.lastIndexOf(')') + 2).split(' ')
+                      cpu = parts[11].toLong() + parts[12].toLong()
+                  } catch (e: Exception) { }
+                  return longArrayOf(rss, hwm, rd, cpu)
+              }
+
+              private fun readGpuPct(): Int {
+                  try {
+                      val t = File("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage").readText().trim()
+                      val d = t.filter { c -> c.isDigit() }
+                      if (d.isNotEmpty()) return d.toInt().coerceIn(0, 100)
+                  } catch (e: Exception) { }
+                  try {
+                      val p = File("/sys/class/kgsl/kgsl-3d0/gpubusy").readText().trim().split(' ').filter { x -> x.isNotEmpty() }
+                      if (p.size >= 2) {
+                          val tt = p[1].toLong()
+                          if (tt > 0) return (p[0].toLong() * 100 / tt).toInt().coerceIn(0, 100)
+                      }
+                  } catch (e: Exception) { }
+                  return -1
               }
 
               private fun loadManifest() {
@@ -1421,11 +1459,15 @@ jobs:
 
                   val avail = availMemMb()
                   val total = totalMemMb()
-                  val needRam = (peakRssMb * 1.15).toLong() + 200
-                  val ramText = "RAM: $avail MB free of $total MB \u00B7 needs ~$needRam MB (CI peak $peakRssMb MB)"
+                  val baseNeed = (peakRssMb * 1.15).toLong() + 200
+                  val ditMb = (files.firstOrNull { m -> m.id == "dit" }?.size ?: 0L) shr 20
+                  val extra = if (perfTier > 0) ditMb else 0L
+                  val needRam = baseNeed + extra
+                  val ramText = "RAM: $avail MB free of $total MB \u00B7 needs ~$needRam MB (CI peak $peakRssMb MB" +
+                      (if (extra > 0) " + $extra MB for " + tierNames[perfTier] else "") + ")"
                   when {
                       avail >= needRam -> item(0, ramText)
-                      avail * 100 >= needRam * 80 -> item(1, "$ramText \u00B7 tight, close other apps for safety")
+                      avail * 100 >= baseNeed * 80 -> item(1, ramText + (if (extra > 0) " \u00B7 tight for this tier; falls back to Balanced if killed" else " \u00B7 tight, close other apps for safety"))
                       ignoreRamNow -> item(1, "$ramText \u00B7 IGNORED by you, may crash")
                       else -> item(2, "$ramText \u00B7 close other apps, then Re-check")
                   }
@@ -1875,8 +1917,8 @@ jobs:
                   val th = (threads.text.toString().toIntOrNull() ?: 4).coerceIn(1, 8)
                   prefs.edit().putInt("size_i", segSize.selected).putInt("mode_i", segMode.selected)
                       .putString("steps", st.toString()).putString("cfg", c.toString())
-                      .putString("threads", th.toString()).putString("prompt", text).apply()
-                  val req = Req(text, size, st, c, sd, th, segMode.selected, cbFa.isChecked && cbFa.isEnabled)
+                      .putString("threads", th.toString()).putString("prompt", text).putInt("perf_i", segPerf.selected).apply()
+                  val req = Req(text, size, st, c, sd, th, segMode.selected, cbFa.isChecked && cbFa.isEnabled, segPerf.selected)
                   thread { runGenerate(req) }
               }
 
@@ -1920,19 +1962,27 @@ jobs:
                           return
                       }
                       log("Free RAM before start: " + availMemMb() + " MB of " + totalMemMb() + " MB | seed " + r.seed)
-                      for ((k, p) in order.withIndex()) {
+                      val plan = ArrayList<Pair<Prof, Int>>()
+                      for ((i0, p0) in order.withIndex()) {
+                          if (r.tier > 0 && i0 == 0) plan.add(Pair(p0, r.tier))
+                          plan.add(Pair(p0, 0))
+                      }
+                      for ((k, pt) in plan.withIndex()) {
                           if (cancel) break
                           attemptIdx = k + 1
-                          attemptTotal = order.size
-                          log("--- Try " + (k + 1) + "/" + order.size + ": " + p.name)
-                          val res = runOnce(p, r)
+                          attemptTotal = plan.size
+                          val p = pt.first
+                          val tier = pt.second
+                          log("--- Try " + (k + 1) + "/" + plan.size + ": " + p.name + " [" + tierNames[tier] + "]")
+                          val res = runOnce(p, r, tier)
                           if (res == 0) {
                               prefs.edit().putString("last_profile", p.name).apply()
                               produced = true
                               break
                           }
                           if (res == 2) break
-                          if (k < order.size - 1) logW("This mode did not produce an image. Trying the next mode.")
+                          if (res == 3 && tier == 0) break
+                          if (k < plan.size - 1) logW("That attempt did not produce an image. Trying the next one.")
                       }
                       hs = if (produced) 2 else if (cancel) 0 else 3
                       if (produced) diagText = ""
@@ -1974,15 +2024,24 @@ jobs:
                   if (acc.size() > 0) onLine(acc.toString("UTF-8"))
               }
 
-              private fun advanceStage(l: String) {
+              private fun advanceStage(l: String, line: String) {
                   val s = when {
-                      l.contains("save result") || l.contains("save_image") || l.contains("saved") -> 4
-                      l.contains("decoding") || l.contains("decode_first_stage") || l.contains("sampling completed") -> 3
+                      l.contains("save result") -> 4
+                      decRe.containsMatchIn(l) || l.contains("decode_first_stage") || l.contains("sampling completed") -> 3
                       l.contains("start sampling") || l.contains("sampling using") || l.contains("get_learned_condition completed") -> 2
                       l.contains("generating image") || l.contains("get_learned_condition") || l.contains("tokeniz") -> 1
                       else -> -1
                   }
-                  if (s > stage) stage = s
+                  if (s > stage) {
+                      stage = s
+                      addLog(1, 0, "stage \u2192 " + stageNames[s] + "  (trigger: " + line.take(110) + ")")
+                  }
+              }
+
+              private fun fileLog(s: String) {
+                  synchronized(logs) {
+                      try { runLog?.write(s + "\n") } catch (e: Exception) { }
+                  }
               }
 
               private fun onEngineLine(raw: String) {
@@ -2006,13 +2065,25 @@ jobs:
                           return
                       }
                   }
+                  // weight-loading progress bars ("|####| 8/8 - 176MB/s"): activity only, never shown in the log
+                  if (barRe.containsMatchIn(line)) { fileLog(line); return }
                   val l = line.lowercase(Locale.ROOT)
-                  advanceStage(l)
+                  val sg = segRe.find(line)
+                  if (sg != null) segTotal = sg.groupValues[1].toIntOrNull() ?: 0
+                  val loader = line.contains("model_loader.cpp") || line.contains("model_manager.cpp")
+                  if (loader) {
+                      if (line.contains("loading tensors completed")) blockLoads++
+                      lastLine = "streaming weights from disk \u00B7 " + blockLoads + " block loads" +
+                          (if (segTotal > 0) " (" + segTotal + " per pass)" else "")
+                      if (blockLoads > 3 && classify(line) <= 1) { fileLog(line); return }
+                  }
+                  advanceStage(l, line)
                   if (l.contains("opencl")) {
                       sawOcl = true
-                      if (l.contains("device")) gpuName = line.substringAfter("device:", line).trim().take(44)
+                      val gm = adrenoRe.find(line)
+                      if (gm != null) gpuName = gm.value
                   }
-                  lastLine = line
+                  if (!loader) lastLine = line
                   addLog(classify(line), 1, line)
               }
 
@@ -2045,8 +2116,22 @@ jobs:
                   }
               }
 
-              /** 0 = image made, 1 = failed (try next mode), 2 = stop everything */
-              private fun runOnce(p: Prof, r: Req): Int {
+              private fun tierFlags(p: Prof, tier: Int): List<String> =
+                  if (tier <= 0) p.flags else p.flags.map { f -> f.replace("diffusion=disk", "diffusion=cpu") }
+
+              private fun updatePerfNote() {
+                  val ditMb = (files.firstOrNull { m -> m.id == "dit" }?.size ?: 0L) shr 20
+                  perfNote.text = when (perfTier) {
+                      1 -> "Keeps the diffusion weights in RAM (~" + ditMb + " MB more) instead of re-reading them from disk on every pass. Falls back to Balanced if Android kills it."
+                      2 -> "Fast + flash attention on the GPU (if the engine has it). Highest RAM and GPU load; falls back automatically."
+                      else -> "Weights stream from disk: lowest RAM, slowest."
+                  }
+              }
+
+              /** 0 = image made, 1 = failed (try next), 2 = stopped by you, 3 = killed for memory */
+              private fun runOnce(p: Prof, r: Req, tier: Int): Int {
+                  val lbl = p.kind.uppercase(Locale.ROOT) + " \u00B7 " + tierNames[tier]
+                  curTier = tier
                   val out = File(cacheDir, "out.png")
                   out.delete()
                   stage = 0
@@ -2055,6 +2140,11 @@ jobs:
                   secIt = 0.0
                   sawOcl = false
                   gpuName = ""
+                  blockLoads = 0
+                  segTotal = 0
+                  cpuPct = 0L
+                  lastCpuTicks = -1L
+                  lastCpuT = 0L
                   curKind = p.kind
                   lastLine = "starting engine\u2026"
                   lastReadT = 0L
@@ -2071,11 +2161,11 @@ jobs:
                       cmd.add(flagFor(m.id))
                       cmd.add(fileOf(m).absolutePath)
                   }
-                  cmd.addAll(p.flags)
+                  cmd.addAll(tierFlags(p, tier))
                   if (hasFlag("--vae-tiling")) cmd.add("--vae-tiling")
                   if (hasFlag("--threads")) { cmd.add("--threads"); cmd.add(r.threads.toString()) }
                   if (hasFlag("--seed")) { cmd.add("--seed"); cmd.add(r.seed.toString()) }
-                  if (r.fa && p.kind == "gpu" && helpText.contains("--diffusion-fa")) cmd.add("--diffusion-fa")
+                  if ((r.fa || tier == 2) && p.kind == "gpu" && helpText.contains("--diffusion-fa")) cmd.add("--diffusion-fa")
                   cmd.addAll(listOf("-p", r.prompt, "-W", r.size.toString(), "-H", r.size.toString(),
                       "--steps", r.steps.toString(), "--cfg-scale", r.cfg.toString(), "-o", out.absolutePath, "-v"))
                   log("RUN: " + cmd.joinToString(" "))
@@ -2095,7 +2185,7 @@ jobs:
                   log("exit=" + code + " | " + secs + " s | engine peak RSS " + peak + " MB | free RAM " + availMemMb() + " MB")
 
                   if (cancel) {
-                      attempts.add(Attempt(p.name, code, secs, peak, "stopped by you"))
+                      attempts.add(Attempt(lbl, code, secs, peak, "stopped by you"))
                       logW("Stopped.")
                       return 2
                   }
@@ -2104,20 +2194,21 @@ jobs:
                       val d = diagnose(code, p, peak)
                       diagText = d
                       val firstLine = d.substringBefore('\n').removePrefix("Cause: ")
-                      attempts.add(Attempt(p.name, code, secs, peak, firstLine))
+                      attempts.add(Attempt(lbl, code, secs, peak, firstLine))
                       logE(d.replace('\n', ' '))
-                      return if (sig == 9) 2 else 1
+                      if (sig == 9 && tier > 0) logW("Out of memory at " + tierNames[tier] + ". Falling back to Balanced.")
+                      return if (sig == 9) 3 else 1
                   }
                   val bmp = BitmapFactory.decodeFile(out.absolutePath)
                   if (bmp == null) {
                       diagText = "Cause: the engine wrote an unreadable image.\nFix: tap Share report."
-                      attempts.add(Attempt(p.name, code, secs, peak, "unreadable image"))
+                      attempts.add(Attempt(lbl, code, secs, peak, "unreadable image"))
                       logE("Engine wrote an unreadable image.")
                       return 1
                   }
                   if (looksBlank(bmp)) {
                       diagText = "Cause: the image is blank/flat, so this mode did not really work.\nFix: try Engine = CPU or more steps."
-                      attempts.add(Attempt(p.name, code, secs, peak, "blank image"))
+                      attempts.add(Attempt(lbl, code, secs, peak, "blank image"))
                       logE("The image is blank/flat, so this mode did not really work.")
                       return 1
                   }
@@ -2126,7 +2217,7 @@ jobs:
                       note = "ok, but no OpenCL device was reported: it probably ran on CPU"
                       logW("GPU mode was requested but the engine never reported an OpenCL device. It likely fell back to CPU.")
                   }
-                  attempts.add(Attempt(p.name, code, secs, peak, note))
+                  attempts.add(Attempt(lbl, code, secs, peak, note))
                   doneInfo = r.size.toString() + "\u00D7" + r.size + " \u00B7 " + r.steps + " steps \u00B7 cfg " + r.cfg + " \u00B7 seed " + r.seed +
                       " \u00B7 " + p.kind.uppercase(Locale.ROOT) + " \u00B7 " + fmtDur(secs)
                   stage = 5
@@ -2196,6 +2287,17 @@ jobs:
                   sb.append("temp ").append(battTempC()).append(" C, thermal ").append(thermal()).append('\n')
                   sb.append("CI: ").append(testInfo).append('\n')
                   sb.append("proven flags: ").append(proven.joinToString(" ")).append('\n')
+                  sb.append("last run: stage ").append(stage).append(" step ").append(stepNow).append('/').append(stepTotal)
+                      .append(" | gpu ").append(gpuName.ifEmpty { "-" }).append(" openclSeen=").append(sawOcl)
+                      .append(" | blockLoads ").append(blockLoads).append(" seg ").append(segTotal)
+                      .append(" | rss ").append(rssNow).append(" peak ").append(rssPeak).append(" MB | cpu ").append(cpuPct)
+                      .append("% gpu ").append(gpuPct).append("%\n")
+                  sb.append("\n-- engine help (backend/memory lines)\n")
+                  for (ln in helpText.split('\n')) {
+                      val q = ln.lowercase(Locale.ROOT)
+                      if (q.contains("backend") || q.contains("flash") || q.contains("segment") || q.contains("vram") ||
+                          q.contains("offload") || q.contains("tiling") || q.contains("graph")) sb.append(ln.trim()).append('\n')
+                  }
                   sb.append("\n-- checks\n")
                   for (x in items) sb.append(listOf("[ok]", "[warn]", "[FAIL]", "[info]")[x.level.coerceIn(0, 3)]).append(' ').append(x.text).append('\n')
                   sb.append("\n-- attempts\n")
@@ -2203,6 +2305,8 @@ jobs:
                       .append(a.peakMb).append(" MB | ").append(a.note).append('\n')
                   if (diagText.isNotEmpty()) sb.append("\n-- diagnosis\n").append(diagText).append('\n')
                   val snap = synchronized(logs) { ArrayList(logs) }
+                  sb.append("\n-- stage transitions\n")
+                  for (e in snap.filter { e -> e.src == 0 && e.text.startsWith("stage") }) sb.append(e.text).append('\n')
                   sb.append("\n-- warnings and errors (last 40)\n")
                   for (e in snap.filter { e -> e.lvl >= 2 }.takeLast(40)) sb.append(e.text).append('\n')
                   sb.append("\n-- log tail (last 120 lines)\n")
@@ -2215,6 +2319,7 @@ jobs:
               //  rendering (UI thread only)
               // =====================================================================
               private fun sampleProc(now: Long) {
+                  gpuPct = readGpuPct()
                   val pid = enginePid
                   if (pid <= 0) return
                   val s = readProc(pid)
@@ -2236,14 +2341,31 @@ jobs:
                           }
                       }
                   }
+                  if (s[3] >= 0) {
+                      if (lastCpuT > 0L && now > lastCpuT && lastCpuTicks >= 0L) {
+                          cpuPct = ((s[3] - lastCpuTicks) * 1000L / (now - lastCpuT)).coerceAtLeast(0L)
+                      }
+                      lastCpuTicks = s[3]
+                      lastCpuT = now
+                  }
               }
 
-              private fun hintText(silentS: Long): String = when {
-                  silentS < 25 -> ""
-                  stage <= 0 && diskRate >= 1 -> "Loading weights from storage ($diskRate MB/s). Normal with 4 GB RAM."
-                  stage <= 0 -> "Quiet for ${silentS}s, no disk reads: GPU kernels may be compiling (first run can take 1-3 min)."
-                  stage == 2 && stepNow == 0 -> "First step is the slowest (kernel compile + weight paging). Wait for step 1."
-                  else -> "Quiet for ${silentS}s. Engine is still alive."
+              private fun hintText(silentS: Long): String {
+                  if (silentS < 25) return ""
+                  val live = "engine CPU " + cpuPct + "%" + (if (gpuPct >= 0) ", GPU " + gpuPct + "%" else "")
+                  val what = when {
+                      stage <= 0 && diskRate >= 1 -> "Loading weights from storage ($diskRate MB/s)."
+                      stage <= 0 -> "No output and no disk reads: GPU kernels may be compiling (first run 1-3 min)."
+                      stage == 2 && stepNow == 0 -> "Waiting for the first sampling step (the slowest one)."
+                      stage == 3 -> "Final compute; this engine prints nothing here."
+                      else -> "Quiet."
+                  }
+                  val verdict = when {
+                      cpuPct >= 20 || gpuPct >= 10 || diskRate >= 1 -> " It is working."
+                      gpuPct >= 0 -> " Looks idle; if this lasts over 2 min it may be stuck."
+                      else -> " CPU is idle and GPU load is unreadable here, so it may still be computing on the GPU."
+                  }
+                  return "Quiet for " + silentS + "s. " + what + " (" + live + ")" + verdict
               }
 
               private fun renderHero(now: Long, running: Boolean, dling: Boolean) {
@@ -2321,6 +2443,7 @@ jobs:
                       val k = curKind.uppercase(Locale.ROOT)
                       var mt = if (k.isEmpty()) "" else k
                       if (gpuName.isNotEmpty()) mt += " \u00B7 " + gpuName
+                      if (mt.isNotEmpty()) mt += " \u00B7 " + tierNames[curTier.coerceIn(0, 2)]
                       if (attemptTotal > 1) mt += " \u00B7 try $attemptIdx/$attemptTotal"
                       if (mt.isNotEmpty() && !dling) {
                           heroMode.text = mt
@@ -2379,7 +2502,7 @@ jobs:
                   val free = availMemMb()
                   sFree.value.text = if (free >= 0) free.toString() + "M" else "-"
                   sFree.value.setTextColor(if (free in 0..600) Pal.err else if (free in 0..1200) Pal.warn else Pal.text)
-                  sDisk.value.text = if (running) diskRate.toString() + "M/s" else "-"
+                  sCpu.value.text = if (running) (cpuPct.toString() + "%" + (if (gpuPct >= 0) "/" + gpuPct + "%" else "")) else "-"
 
                   // temperature chip
                   val tc = battTempC()
@@ -2574,9 +2697,9 @@ jobs:
                   sRam = Stat(this, "engine ram")
                   sPeak = Stat(this, "peak")
                   sFree = Stat(this, "free ram")
-                  sDisk = Stat(this, "disk read")
+                  sCpu = Stat(this, "cpu / gpu")
                   hero.put(statRow(this, sElapsed, sStep, sSpeed, sEta), 16)
-                  hero.put(statRow(this, sRam, sPeak, sFree, sDisk), 14)
+                  hero.put(statRow(this, sRam, sPeak, sFree, sCpu), 14)
                   heroHint = tv(this, "", 12f, Pal.warn)
                   heroHint.visibility = View.GONE
                   hero.put(heroHint, 12)
@@ -2629,6 +2752,19 @@ jobs:
                   segRow.putW(labeled(this, "Size (px)", segSize.view), 1f)
                   segRow.putW(labeled(this, "Engine", segMode.view), 1f, leftDp = 12)
                   cCreate.put(segRow, 14)
+
+                  segPerf = Seg(this, listOf("Balanced", "Fast", "Max"))
+                  segPerf.select(prefs.getInt("perf_i", 0), false)
+                  perfTier = segPerf.selected
+                  perfNote = tv(this, "", 11f, Pal.dim)
+                  segPerf.onChange = { i ->
+                      perfTier = i
+                      updatePerfNote()
+                      if (!busy) thread { preflight() }
+                  }
+                  cCreate.put(labeled(this, "Performance", segPerf.view), 12)
+                  cCreate.put(perfNote, 6)
+                  updatePerfNote()
 
                   steps = fieldView(this, "20", prefs.getString("steps", "20") ?: "20", numeric = true, decimal = false, compact = true)
                   cfg = fieldView(this, "3.0", prefs.getString("cfg", "3.0") ?: "3.0", numeric = true, compact = true)
