@@ -1,6 +1,6 @@
 # PhotoSeek: pencari foto pakai deskripsi visual (MobileCLIP2-S0, on-device)
 # Output: APK std (wajib) + APK gpu/LiteRT (eksperimental)
-# Taruh file ini di .github/workflows/build.yml di repo kosong, lalu Actions > Build APK > Run workflow.
+# Taruh file ini di .github/workflows/build.yml (repo boleh berisi file lain; project dibuat di subfolder photoseek/), lalu Actions > Build APK > Run workflow.
 name: Build APK
 
 on:
@@ -33,6 +33,8 @@ jobs:
       - name: Generate project via heredoc
         run: |
           set -euo pipefail
+          mkdir -p photoseek
+          cd photoseek
           mkdir -p app/src/main/assets app/src/main/kotlin/dev/photoseek app/src/std/kotlin/dev/photoseek app/src/gpu/kotlin/dev/photoseek
 
           cat > app/build.gradle.kts <<'PHOTOSEEK_EOF'
@@ -950,6 +952,7 @@ jobs:
           echo "Project digenerate:"; find . -name "*.kt" -o -name "*.kts" -o -name "*.xml" | grep -v build/ | sort
 
       - name: Download vocab BPE CLIP (untuk tokenizer teks)
+        working-directory: photoseek
         run: |
           curl -fsSL -o app/src/main/assets/bpe_simple_vocab_16e6.txt.gz \
             https://raw.githubusercontent.com/openai/CLIP/main/clip/bpe_simple_vocab_16e6.txt.gz
@@ -972,6 +975,7 @@ jobs:
 
       # 1) APK utama (ONNX Runtime + NNAPI + foreground service). Wajib sukses.
       - name: Build APK std
+        working-directory: photoseek
         run: |
           set -o pipefail
           gradle :app:assembleStdDebug --no-daemon --console=plain 2>&1 | tee build-std.log
@@ -979,6 +983,7 @@ jobs:
       # Kalau gagal: tampilkan HANYA pesan error Kotlin/Gradle (singkat), juga di tab Summary
       - name: Ringkasan error std
         if: failure()
+        working-directory: photoseek
         run: |
           {
             echo '### Error build std'
@@ -990,12 +995,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PhotoSeek-std-apk
-          path: app/build/outputs/apk/std/debug/app-std-debug.apk
+          path: photoseek/app/build/outputs/apk/std/debug/app-std-debug.apk
 
       # 2) Eksperimental: ONNX -> TFLite -> LiteRT GPU. Boleh gagal tanpa merusak APK utama.
       - name: Konversi vision encoder ONNX ke TFLite
         id: conv
         continue-on-error: true
+        working-directory: photoseek
         run: |
           set -e
           mkdir -p conv && cd conv
@@ -1009,6 +1015,7 @@ jobs:
       - name: Build APK gpu (LiteRT)
         if: steps.conv.outcome == 'success'
         continue-on-error: true
+        working-directory: photoseek
         run: |
           set -o pipefail
           gradle :app:assembleGpuDebug --no-daemon --console=plain 2>&1 | tee build-gpu.log || {
@@ -1019,5 +1026,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PhotoSeek-gpu-apk-experimental
-          path: app/build/outputs/apk/gpu/debug/app-gpu-debug.apk
+          path: photoseek/app/build/outputs/apk/gpu/debug/app-gpu-debug.apk
           if-no-files-found: ignore
