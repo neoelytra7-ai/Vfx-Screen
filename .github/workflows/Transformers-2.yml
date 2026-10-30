@@ -183,6 +183,7 @@ jobs:
           import android.content.Context;
           import android.graphics.*;
           import android.view.*;
+          import android.view.animation.LinearInterpolator;
 
           public class TransformView extends View {
             public interface Sheet { void y(float ty); }
