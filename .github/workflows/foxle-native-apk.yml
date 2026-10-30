@@ -1,0 +1,1325 @@
+# Foxle Native — APK full-native (NativeActivity + EGL/GLES2 + Foxle Engine). Tanpa Java, tanpa WebView.
+# Seluruh sumber ditulis lewat heredoc di langkah pertama; tidak butuh file lain di repo.
+name: Foxle Native APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tulis seluruh proyek (heredoc)
+        run: |
+          set -euo pipefail
+          mkdir -p app engine include tools tests
+          cat > AndroidManifest.xml <<'FOXLE_EOF_0'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.foxle.native">
+            <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+            <application android:label="Foxle" android:hasCode="false" android:extractNativeLibs="true" android:allowBackup="false" android:hardwareAccelerated="true">
+              <activity android:name="android.app.NativeActivity" android:label="Foxle" android:exported="true" android:launchMode="singleTask"
+                  android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+                <meta-data android:name="android.app.lib_name" android:value="foxle"/>
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          FOXLE_EOF_0
+          cat > CMakeLists.txt <<'FOXLE_EOF_1'
+          cmake_minimum_required(VERSION 3.18)
+          project(foxle C CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          set(GLUE ${ANDROID_NDK}/sources/android/native_app_glue)
+          add_library(foxle SHARED app/app.cpp engine/engine.cpp engine/jpeg_dc.cpp engine/exif_thumb.cpp engine/zip_index.cpp engine/android_fallback.cpp ${GLUE}/android_native_app_glue.c)
+          target_include_directories(foxle PRIVATE ${GLUE} include engine)
+          target_compile_options(foxle PRIVATE -O3 -Wall -Wno-unused-parameter -Wno-misleading-indentation)
+          set_target_properties(foxle PROPERTIES LINK_FLAGS "-u ANativeActivity_onCreate -Wl,--gc-sections -Wl,-z,max-page-size=16384")
+          target_link_libraries(foxle android log EGL GLESv2 jnigraphics)
+          FOXLE_EOF_1
+          cat > include/foxle_engine.h <<'FOXLE_EOF_2'
+          /* Foxle Engine — C ABI. Sama untuk NativeActivity, JNI tipis, atau WASM. Core tanpa dependensi Android. */
+          #ifndef FOXLE_ENGINE_H
+          #define FOXLE_ENGINE_H
+          #include <stddef.h>
+          #include <stdint.h>
+          #define FX_API __attribute__((visibility("default")))
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          enum { FX_OK = 0, FX_FALLBACK = 1, FX_ERR = -1 };
+          enum { FX_FMT_JPEG = 1, FX_FMT_RGBA8888 = 2 };
+          typedef struct { int fmt, w, h, orient, tier; uint8_t *data; size_t len; } fx_thumb; /* data: malloc, bebaskan fx_thumb_free */
+          /* Thumbnail bertingkat: tier1 = JPEG thumbnail di dalam EXIF (baca <=64KB, tanpa decode),
+             tier2 = decode DC-only 1/8 (tanpa IDCT/dequant AC), selain itu FX_FALLBACK (host pakai decoder platform). */
+          FX_API int  fx_thumb_make(const char *path, int target, fx_thumb *out);
+          FX_API void fx_thumb_free(fx_thumb *t);
+          /* Cache thumbnail on-disk append-only, indeks di memori. */
+          typedef struct fx_pack fx_pack;
+          FX_API fx_pack *fx_pack_open(const char *path);
+          FX_API void     fx_pack_close(fx_pack *p);
+          FX_API int      fx_pack_get(fx_pack *p, uint64_t key, fx_thumb *out);
+          FX_API int      fx_pack_put(fx_pack *p, uint64_t key, const fx_thumb *t);
+          FX_API uint64_t fx_key(const char *path, uint64_t size, uint64_t mtime_ns);
+          /* ZIP: baca central directory dari ujung file (tanpa ekstrak/inflate). cb dipanggil per entri; return jumlah entri atau -1. */
+          typedef void (*fx_zip_cb)(const char *name, size_t nlen, uint64_t usize, uint64_t csize, int method, void *ud);
+          FX_API int fx_zip_list(const char *path, fx_zip_cb cb, void *ud);
+          /* Khusus Android: decoder platform (AImageDecoder, API 30+) untuk PNG/WebP/HEIC/AVIF/JPEG progresif/JPEG kecil. */
+          #ifdef __ANDROID__
+          FX_API int fx_thumb_fallback(const char *path, int target, fx_thumb *out);
+          #endif
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          FOXLE_EOF_2
+          cat > engine/engine.cpp <<'FOXLE_EOF_3'
+          #include "foxle_engine.h"
+          #include "jpeg_dc.h"
+          #include <fcntl.h>
+          #include <sys/stat.h>
+          #include <unistd.h>
+          #include <algorithm>
+          #include <cstdlib>
+          #include <cstring>
+          #include <mutex>
+          #include <unordered_map>
+
+          namespace {
+          struct Buf {  // buffer per-thread dipakai ulang: tanpa malloc/memset di jalur panas
+            uint8_t *p = nullptr; size_t cap = 0;
+            uint8_t *reserve(size_t n) { if (n > cap) { p = (uint8_t *)realloc(p, cap = n + (n >> 3)); } return p; }
+            ~Buf() { free(p); }
+          };
+          bool pread_full(int fd, uint8_t *b, size_t n, off_t off) {
+            size_t g = 0;
+            while (g < n) { ssize_t r = pread(fd, b + g, n - g, off + (off_t)g); if (r <= 0) return false; g += (size_t)r; }
+            return true;
+          }
+          }  // namespace
+
+          extern "C" int fx_thumb_make(const char *path, int target, fx_thumb *o) {
+            memset(o, 0, sizeof *o);
+            int fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd < 0) return FX_ERR;
+            struct stat st;
+            if (fstat(fd, &st) || st.st_size < 4) { close(fd); return FX_ERR; }
+            size_t fs = (size_t)st.st_size;
+            static thread_local Buf buf;
+            size_t head = std::min<size_t>(fs, 65536 + 32);
+            uint8_t *b = buf.reserve(head);
+            int rc = FX_FALLBACK;
+            if (!pread_full(fd, b, head, 0)) { close(fd); return FX_ERR; }
+            if (b[0] != 0xFF || b[1] != 0xD8) { close(fd); return FX_FALLBACK; }  // bukan JPEG: serahkan ke decoder platform
+            ExifInfo ex; exif_parse(b, head, ex); o->orient = ex.orient;
+            if (ex.thumb) {  // TIER 1: thumbnail bawaan kamera, nol decode
+              int tw = 0, th = 0; bool base = false;
+              if (jpeg_probe(ex.thumb, ex.thumb_len, &tw, &th, &base) == JDC_OK && std::min(tw, th) * 5 >= target * 4) {
+                o->data = (uint8_t *)malloc(ex.thumb_len); memcpy(o->data, ex.thumb, ex.thumb_len);
+                o->len = ex.thumb_len; o->fmt = FX_FMT_JPEG; o->w = tw; o->h = th; o->tier = 1; close(fd); return FX_OK;
+              }
+            }
+            if (fs > ((size_t)256 << 20)) { close(fd); return FX_FALLBACK; }
+            if (fs > head) {  // baca sisa file sekali, berurutan
+              b = buf.reserve(fs);
+              if (!pread_full(fd, b + head, fs - head, (off_t)head)) { close(fd); return FX_ERR; }
+            }
+            close(fd);
+            int W = 0, H = 0; bool base = false;
+            if (jpeg_probe(b, fs, &W, &H, &base) != JDC_OK) return FX_ERR;
+            o->w = W; o->h = H;
+            int ow = (W + 7) / 8, oh = (H + 7) / 8;
+            if (!base || std::min(ow, oh) * 4 < target * 3) return FX_FALLBACK;  // terlalu kecil/progresif: butuh decoder skala lain
+            JdcImage img;
+            JdcStatus s = jpeg_dc_decode(b, fs, img);
+            if (s == JDC_FALLBACK) return FX_FALLBACK;
+            if (s != JDC_OK) return FX_ERR;
+            o->data = (uint8_t *)malloc((size_t)target * target * 4);
+            rgba_cover(img.rgba.data(), img.ow, img.oh, target, o->data);
+            o->len = (size_t)target * target * 4; o->fmt = FX_FMT_RGBA8888; o->w = target; o->h = target; o->tier = 2;
+            rc = FX_OK;
+            return rc;
+          }
+          extern "C" void fx_thumb_free(fx_thumb *t) { if (t) { free(t->data); t->data = nullptr; t->len = 0; } }
+
+          extern "C" uint64_t fx_key(const char *path, uint64_t size, uint64_t mtime_ns) {
+            uint64_t h = 1469598103934665603ull;
+            for (const char *p = path; *p; p++) { h ^= (uint8_t)*p; h *= 1099511628211ull; }
+            for (int i = 0; i < 8; i++) { h ^= (size >> (8 * i)) & 255; h *= 1099511628211ull; }
+            for (int i = 0; i < 8; i++) { h ^= (mtime_ns >> (8 * i)) & 255; h *= 1099511628211ull; }
+            return h;
+          }
+
+          // ---- pack: log append-only. Rekaman: key(8) len(4) w(2) h(2) fmt(1) orient(1) rsv(2) payload ----
+          struct PackEnt { uint64_t off; uint32_t len; uint16_t w, h; uint8_t fmt, orient; };
+          struct fx_pack { int fd = -1; std::mutex mu; std::unordered_map<uint64_t, PackEnt> idx; uint64_t end = 16; };
+          static const char PMAGIC[9] = "FXTP0001";
+
+          extern "C" fx_pack *fx_pack_open(const char *path) {
+            int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+            if (fd < 0) return nullptr;
+            struct stat st; if (fstat(fd, &st)) { close(fd); return nullptr; }
+            fx_pack *p = new fx_pack; p->fd = fd;
+            uint8_t hdr[16]; bool ok = st.st_size >= 16 && pread_full(fd, hdr, 16, 0) && !memcmp(hdr, PMAGIC, 8);
+            if (!ok) { if (ftruncate(fd, 0)) {} memset(hdr, 0, 16); memcpy(hdr, PMAGIC, 8); if (pwrite(fd, hdr, 16, 0) != 16) { close(fd); delete p; return nullptr; } return p; }
+            uint64_t off = 16, size = (uint64_t)st.st_size;
+            while (off + 20 <= size) {
+              uint8_t h[20]; if (!pread_full(fd, h, 20, (off_t)off)) break;
+              PackEnt e; uint64_t key; memcpy(&key, h, 8); memcpy(&e.len, h + 8, 4); memcpy(&e.w, h + 12, 2); memcpy(&e.h, h + 14, 2); e.fmt = h[16]; e.orient = h[17]; e.off = off;
+              if (off + 20 + e.len > size) break;  // ekor rusak (crash saat menulis): dipotong
+              p->idx[key] = e; off += 20 + e.len;
+            }
+            if (off < size && ftruncate(fd, (off_t)off)) {}
+            p->end = off; return p;
+          }
+          extern "C" void fx_pack_close(fx_pack *p) { if (p) { if (p->fd >= 0) close(p->fd); delete p; } }
+          extern "C" int fx_pack_get(fx_pack *p, uint64_t key, fx_thumb *o) {
+            memset(o, 0, sizeof *o); PackEnt e;
+            { std::lock_guard<std::mutex> g(p->mu); auto it = p->idx.find(key); if (it == p->idx.end()) return FX_FALLBACK; e = it->second; }
+            o->data = (uint8_t *)malloc(e.len ? e.len : 1);
+            if (!pread_full(p->fd, o->data, e.len, (off_t)(e.off + 20))) { free(o->data); o->data = nullptr; return FX_ERR; }
+            o->len = e.len; o->w = e.w; o->h = e.h; o->fmt = e.fmt; o->orient = e.orient; return FX_OK;
+          }
+          extern "C" int fx_pack_put(fx_pack *p, uint64_t key, const fx_thumb *t) {
+            size_t n = 20 + t->len; uint8_t *b = (uint8_t *)malloc(n);
+            uint32_t len = (uint32_t)t->len; uint16_t w = (uint16_t)t->w, h = (uint16_t)t->h; memset(b, 0, 20);
+            memcpy(b, &key, 8); memcpy(b + 8, &len, 4); memcpy(b + 12, &w, 2); memcpy(b + 14, &h, 2); b[16] = (uint8_t)t->fmt; b[17] = (uint8_t)t->orient; memcpy(b + 20, t->data, t->len);
+            std::lock_guard<std::mutex> g(p->mu);
+            size_t done = 0;
+            while (done < n) { ssize_t r = pwrite(p->fd, b + done, n - done, (off_t)(p->end + done)); if (r <= 0) { free(b); return FX_ERR; } done += (size_t)r; }
+            PackEnt e{p->end, len, w, h, (uint8_t)t->fmt, (uint8_t)t->orient}; p->idx[key] = e; p->end += n; free(b); return FX_OK;
+          }
+          FOXLE_EOF_3
+          cat > engine/jpeg_dc.cpp <<'FOXLE_EOF_4'
+          // JPEG baseline "DC-only": hasil 1/8 ukuran asli tanpa dequant AC, tanpa IDCT, tanpa upsample penuh.
+          // Simbol Huffman AC tetap dibaca (wajib untuk menggeser bitstream) tapi nilainya dibuang. Setara jpeglib scale 1/8.
+          #include "jpeg_dc.h"
+          #include <algorithm>
+          #include <cstring>
+          namespace {
+          struct Huff { uint16_t ac[1024]; uint16_t look[512]; int32_t maxc[18], minc[18]; int vp[18]; uint8_t val[256]; bool ok = false; };
+          struct Comp { int id = 0, h = 1, v = 1, tq = 0, td = 0, ta = 0, pw = 0, ph = 0, pred = 0, sw = 0, sh = 0; bool rf = false; std::vector<uint8_t> pl; };
+          bool build(Huff &h, const uint8_t *cnt, const uint8_t *sym, int total) {
+            memcpy(h.val, sym, total); memset(h.look, 0, sizeof h.look);
+            int code = 0, k = 0;
+            for (int l = 1; l <= 16; l++) {
+              h.vp[l] = k; h.minc[l] = code;
+              for (int j = 0; j < cnt[l - 1]; j++, k++, code++) {
+                if (code >= (1 << l)) return false;
+                if (l <= 9) { int base = code << (9 - l), n = 1 << (9 - l); for (int t = 0; t < n; t++) h.look[base + t] = (uint16_t)(l << 8 | h.val[k]); }
+              }
+              h.maxc[l] = cnt[l - 1] ? code - 1 : -1; code <<= 1;
+            }
+            memset(h.ac, 0, sizeof h.ac);  // tabel gabungan AC (10 bit): [0..3]=bit total, [4..8]=maju koefisien, [9]=EOB
+            k = 0; code = 0;
+            for (int l = 1; l <= 10; l++) {
+              for (int j = 0; j < cnt[l - 1]; j++, k++, code++) {
+                int rs = h.val[k], r = rs >> 4, sz = rs & 15, adv, eob = 0;
+                if (!sz) { if (rs == 0) { adv = 0; eob = 1; } else if (r == 15) adv = 16; else continue; } else adv = r + 1;
+                if (l + sz > 10) continue;
+                uint16_t e = (uint16_t)((l + sz) | adv << 4 | eob << 9);
+                int base = code << (10 - l), n2 = 1 << (10 - l);
+                for (int t = 0; t < n2; t++) h.ac[base + t] = e;
+              }
+              code <<= 1;
+            }
+            h.ok = true; return true;
+          }
+          struct Br {
+            const uint8_t *p, *e; uint64_t buf; int n; bool mk;
+            void init(const uint8_t *a, const uint8_t *b) { p = a; e = b; buf = 0; n = 0; mk = false; }
+            inline void fill() {
+              if (p + 8 <= e && !mk) {  // jalur cepat: 8 byte sekaligus bila tak ada 0xFF (marker/stuffing)
+                uint64_t w; memcpy(&w, p, 8); w = __builtin_bswap64(w);
+                uint64_t t = ~w;
+                if (!(((t - 0x0101010101010101ull) & ~t & 0x8080808080808080ull))) {
+                  int k = (64 - n) >> 3;  // jumlah byte utuh yang muat
+                  buf = (k == 8 ? 0 : buf << (8 * k)) | (w >> (64 - 8 * k)); p += k; n += 8 * k; return;
+                }
+              }
+              while (n <= 56) {
+                uint32_t b = 0;
+                if (p < e && !mk) { b = *p; if (b == 0xFF) { if (p + 1 < e && p[1] == 0) p += 2; else { mk = true; b = 0; } } else p++; }
+                buf = buf << 8 | b; n += 8;
+              }
+            }
+            inline uint32_t get(int s) { if (n < s) fill(); n -= s; return (uint32_t)(buf >> n) & ((1u << s) - 1); }
+            inline int dec(const Huff &h) {
+              if (n < 16) fill();
+              int e2 = h.look[(buf >> (n - 9)) & 511];
+              if (e2) { n -= e2 >> 8; return e2 & 255; }
+              for (int l = 10; l <= 16; l++) { int c = (int)((buf >> (n - l)) & ((1u << l) - 1)); if (h.maxc[l] >= 0 && c <= h.maxc[l]) { n -= l; return h.val[h.vp[l] + c - h.minc[l]]; } }
+              n -= 16; return -1;
+            }
+            bool restart() {
+              while (p + 1 < e) {
+                if (p[0] == 0xFF) { uint8_t c = p[1]; if (c >= 0xD0 && c <= 0xD7) { p += 2; buf = 0; n = 0; mk = false; return true; } if (c == 0 || c == 0xFF) { p += (c == 0 ? 2 : 1); continue; } return false; }
+                p++;
+              }
+              return false;
+            }
+          };
+          }  // namespace
+
+          JdcStatus jpeg_probe(const uint8_t *d, size_t n, int *w, int *h, bool *baseline) {
+            if (n < 4 || d[0] != 0xFF || d[1] != 0xD8) return JDC_ERROR;
+            size_t i = 2;
+            while (i + 4 <= n) {
+              if (d[i] != 0xFF) { i++; continue; }
+              uint8_t m = d[i + 1];
+              if (m == 0xFF) { i++; continue; }
+              if (m == 0 || m == 1 || (m >= 0xD0 && m <= 0xD8)) { i += 2; continue; }
+              if (m == 0xD9 || m == 0xDA) return JDC_ERROR;
+              size_t len = (size_t)d[i + 2] << 8 | d[i + 3];
+              if (len < 2 || i + 2 + len > n) return JDC_ERROR;
+              if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+                if (len < 8) return JDC_ERROR;
+                *h = d[i + 5] << 8 | d[i + 6]; *w = d[i + 7] << 8 | d[i + 8]; if (baseline) *baseline = (m == 0xC0 || m == 0xC1) && d[i + 4] == 8;
+                return *w > 0 && *h > 0 ? JDC_OK : JDC_ERROR;
+              }
+              i += 2 + len;
+            }
+            return JDC_ERROR;
+          }
+
+          JdcStatus jpeg_dc_decode(const uint8_t *d, size_t n, JdcImage &o) {
+            if (n < 4 || d[0] != 0xFF || d[1] != 0xD8) return JDC_ERROR;
+            static thread_local Huff hd[4], ha[4];
+            for (auto &x : hd) x.ok = false;
+            for (auto &x : ha) x.ok = false;
+            uint16_t qz[4][64] = {}; bool qok[4] = {false}; int W = 0, H = 0, nf = 0, ri = 0; Comp c[3]; bool sof = false; const uint8_t *scan = nullptr; int ns = 0;
+            size_t i = 2;
+            while (i + 4 <= n && !scan) {
+              if (d[i] != 0xFF) { i++; continue; }
+              uint8_t m = d[i + 1];
+              if (m == 0xFF) { i++; continue; }
+              if (m == 0 || m == 1 || (m >= 0xD0 && m <= 0xD8)) { i += 2; continue; }
+              if (m == 0xD9) return JDC_ERROR;
+              size_t len = (size_t)d[i + 2] << 8 | d[i + 3];
+              if (len < 2 || i + 2 + len > n) return JDC_ERROR;
+              const uint8_t *s = d + i + 4; size_t sl = len - 2;
+              if (m == 0xDB) {
+                while (sl > 0) { int pq = s[0] >> 4, tq = s[0] & 15; s++; sl--; size_t need = pq ? 128 : 64; if (tq > 3 || sl < need) return JDC_ERROR; for (int k = 0; k < 64; k++) qz[tq][k] = pq ? (uint16_t)(s[2 * k] << 8 | s[2 * k + 1]) : s[k]; qok[tq] = true; s += need; sl -= need; }
+              } else if (m == 0xC4) {
+                while (sl >= 17) { int tc = s[0] >> 4, th = s[0] & 15, tot = 0; for (int k = 1; k <= 16; k++) tot += s[k]; if (tot > 256 || sl < (size_t)17 + tot || th > 3 || tc > 1) return JDC_ERROR; if (!build(tc ? ha[th] : hd[th], s + 1, s + 17, tot)) return JDC_ERROR; s += 17 + tot; sl -= 17 + tot; }
+              } else if (m == 0xC0 || m == 0xC1) {
+                if (sl < 6 || s[0] != 8) return JDC_FALLBACK;
+                H = s[1] << 8 | s[2]; W = s[3] << 8 | s[4]; nf = s[5];
+                if (W <= 0 || H <= 0 || (nf != 1 && nf != 3) || sl < (size_t)6 + 3 * nf) return JDC_FALLBACK;
+                for (int k = 0; k < nf; k++) { c[k].id = s[6 + 3 * k]; c[k].h = s[7 + 3 * k] >> 4; c[k].v = s[7 + 3 * k] & 15; c[k].tq = s[8 + 3 * k]; if (!c[k].h || !c[k].v || c[k].h > 4 || c[k].v > 4 || c[k].tq > 3) return JDC_ERROR; }
+                sof = true;
+              } else if ((m >= 0xC2 && m <= 0xCF) && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+                return JDC_FALLBACK;  // progressive / lossless / arithmetic
+              } else if (m == 0xDD) {
+                if (sl >= 2) ri = s[0] << 8 | s[1];
+              } else if (m == 0xDA) {
+                if (!sof || sl < 1) return JDC_ERROR;
+                ns = s[0]; if (ns != nf || sl < (size_t)1 + 2 * ns + 3) return JDC_FALLBACK;  // scan non-interleaved => fallback
+                for (int k = 0; k < ns; k++) { int cs = s[1 + 2 * k], tt = s[2 + 2 * k], j = -1; for (int t = 0; t < nf; t++) if (c[t].id == cs) j = t; if (j < 0) return JDC_ERROR; c[j].td = tt >> 4; c[j].ta = tt & 15; if (c[j].td > 3 || c[j].ta > 3) return JDC_ERROR; }
+                scan = d + i + 2 + len;
+              }
+              i += 2 + len;
+            }
+            if (!scan) return JDC_ERROR;
+            int hmax = 1, vmax = 1, mcux, mcuy;
+            if (nf == 1) { mcux = (W + 7) / 8; mcuy = (H + 7) / 8; c[0].pw = mcux; c[0].ph = mcuy; }
+            else {
+              for (int k = 0; k < nf; k++) { hmax = std::max(hmax, c[k].h); vmax = std::max(vmax, c[k].v); }
+              mcux = (W + 8 * hmax - 1) / (8 * hmax); mcuy = (H + 8 * vmax - 1) / (8 * vmax);
+              for (int k = 0; k < nf; k++) { c[k].pw = mcux * c[k].h; c[k].ph = mcuy * c[k].v; }
+            }
+            for (int k = 0; k < nf; k++) {
+              c[k].rf = nf == 3 && k > 0 && c[k].h * 2 == hmax && c[k].v * 2 == vmax;  // chroma 4:2:0 -> 2x2 sampel/blok
+              c[k].sw = c[k].pw * (c[k].rf ? 2 : 1); c[k].sh = c[k].ph * (c[k].rf ? 2 : 1);
+              if (!qok[c[k].tq] || !hd[c[k].td].ok || !ha[c[k].ta].ok) return JDC_ERROR;
+              c[k].pl.assign((size_t)c[k].sw * c[k].sh, 128); c[k].pred = 0;
+            }
+            Br br; br.init(scan, d + n);
+            int cnt = 0; bool stop = false;
+            for (int my = 0; my < mcuy && !stop; my++) for (int mx = 0; mx < mcux && !stop; mx++) {
+              if (ri && cnt && cnt % ri == 0) { if (!br.restart()) { stop = true; break; } for (int k = 0; k < nf; k++) c[k].pred = 0; }
+              for (int k = 0; k < nf && !stop; k++) {
+                Comp &C = c[k]; int bh = nf == 1 ? 1 : C.h, bv = nf == 1 ? 1 : C.v; const Huff &DC = hd[C.td], &AC = ha[C.ta]; const uint16_t *Q = qz[C.tq];
+                for (int by = 0; by < bv && !stop; by++) for (int bx = 0; bx < bh; bx++) {
+                  int s = br.dec(DC);
+                  if (s < 0 || s > 11) { stop = true; break; }
+                  int diff = 0;
+                  if (s) { int v = (int)br.get(s); diff = v < (1 << (s - 1)) ? v - (1 << s) + 1 : v; }
+                  C.pred += diff;
+                  int dcq = C.pred * Q[0], kk = 1, cf[3] = {0, 0, 0};
+                  if (C.rf) {  // chroma 4:2:0: DC + 3 koefisien frekuensi terendah -> 2x2 sampel per blok (kualitas setara jpeglib)
+                    while (kk < 5) {
+                      int rs = br.dec(AC);
+                      if (rs < 0) { stop = true; break; }
+                      int r = rs >> 4, sz = rs & 15;
+                      if (!sz) { if (r == 15) { kk += 16; continue; } kk = 64; break; }
+                      kk += r; if (kk > 63) break;
+                      int vv = (int)br.get(sz); if (vv < (1 << (sz - 1))) vv -= (1 << sz) - 1;
+                      if (kk == 1) cf[0] = vv; else if (kk == 2) cf[1] = vv; else if (kk == 4) cf[2] = vv;
+                      kk++;
+                    }
+                    if (stop) break;
+                  }
+                  auto cb = [](int v) -> uint8_t { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); };
+                  if (!C.rf) C.pl[(size_t)(my * bv + by) * C.sw + mx * bh + bx] = cb(((dcq + 4) >> 3) + 128);
+                  else {
+                    float f10 = 0.11326f * cf[0] * Q[1], f01 = 0.11326f * cf[1] * Q[2], f11 = 0.10262f * cf[2] * Q[4], base = dcq * 0.125f + 128.5f;
+                    size_t o0 = (size_t)((my * bv + by) * 2) * C.sw + (size_t)(mx * bh + bx) * 2;
+                    C.pl[o0] = cb((int)(base + f10 + f01 + f11)); C.pl[o0 + 1] = cb((int)(base - f10 + f01 - f11));
+                    C.pl[o0 + C.sw] = cb((int)(base + f10 - f01 - f11)); C.pl[o0 + C.sw + 1] = cb((int)(base - f10 - f01 + f11));
+                  }
+                  for (; kk < 64;) {  // lewati sisa koefisien AC: satu lookup tabel gabungan per simbol
+                    if (br.n < 16) br.fill();
+                    unsigned fe = AC.ac[(br.buf >> (br.n - 10)) & 1023];
+                    if (fe) { br.n -= fe & 15; if (fe & 0x200) break; kk += (fe >> 4) & 31; continue; }
+                    int rs = br.dec(AC);
+                    if (rs < 0) { stop = true; break; }
+                    int r = rs >> 4, sz = rs & 15;
+                    if (!sz) { if (r == 15) { kk += 16; continue; } break; }
+                    kk += r + 1; if (br.n < sz) br.fill(); br.n -= sz;
+                  }
+                  if (stop) break;
+                }
+              }
+              cnt++;
+            }
+            int ow = (W + 7) / 8, oh = (H + 7) / 8;
+            o.w = W; o.h = H; o.ow = ow; o.oh = oh; o.rgba.resize((size_t)ow * oh * 4);
+            uint8_t *out = o.rgba.data();
+            if (nf == 1) {
+              for (int y = 0; y < oh; y++) for (int x = 0; x < ow; x++) { uint8_t g = c[0].pl[(size_t)y * c[0].sw + x]; uint8_t *p = out + ((size_t)y * ow + x) * 4; p[0] = p[1] = p[2] = g; p[3] = 255; }
+              return JDC_OK;
+            }
+            std::vector<int> xm[3]; for (int k = 0; k < 3; k++) { xm[k].resize(ow); for (int x = 0; x < ow; x++) xm[k][x] = c[k].rf ? x : x * c[k].h / hmax; }
+            for (int y = 0; y < oh; y++) {
+              auto rowp = [&](int k) { return &c[k].pl[(size_t)(c[k].rf ? y : y * c[k].v / vmax) * c[k].sw]; };
+              const uint8_t *r0 = rowp(0), *r1 = rowp(1), *r2 = rowp(2);
+              uint8_t *p = out + (size_t)y * ow * 4;
+              for (int x = 0; x < ow; x++, p += 4) {
+                int Y = r0[xm[0][x]], cb = r1[xm[1][x]] - 128, cr = r2[xm[2][x]] - 128;
+                int R = Y + ((91881 * cr + 32768) >> 16), G = Y - ((22554 * cb + 46802 * cr + 32768) >> 16), B = Y + ((116130 * cb + 32768) >> 16);
+                p[0] = (uint8_t)(R < 0 ? 0 : R > 255 ? 255 : R); p[1] = (uint8_t)(G < 0 ? 0 : G > 255 ? 255 : G); p[2] = (uint8_t)(B < 0 ? 0 : B > 255 ? 255 : B); p[3] = 255;
+              }
+            }
+            return JDC_OK;
+          }
+
+          void rgba_cover(const uint8_t *src, int sw, int sh, int S, uint8_t *dst) {
+            int side = std::min(sw, sh), x0 = (sw - side) / 2, y0 = (sh - side) / 2;
+            for (int dy = 0; dy < S; dy++) {
+              int ya = y0 + (int)((int64_t)dy * side / S), yb = y0 + std::max((int)((int64_t)dy * side / S) + 1, (int)((int64_t)(dy + 1) * side / S));
+              for (int dx = 0; dx < S; dx++) {
+                int xa = x0 + (int)((int64_t)dx * side / S), xb = x0 + std::max((int)((int64_t)dx * side / S) + 1, (int)((int64_t)(dx + 1) * side / S));
+                uint32_t a0 = 0, a1 = 0, a2 = 0, cnt = 0;
+                for (int y = ya; y < yb; y++) { const uint8_t *p = src + ((size_t)y * sw + xa) * 4; for (int x = xa; x < xb; x++, p += 4) { a0 += p[0]; a1 += p[1]; a2 += p[2]; cnt++; } }
+                uint8_t *o = dst + ((size_t)dy * S + dx) * 4; o[0] = (uint8_t)(a0 / cnt); o[1] = (uint8_t)(a1 / cnt); o[2] = (uint8_t)(a2 / cnt); o[3] = 255;
+              }
+            }
+          }
+          FOXLE_EOF_4
+          cat > engine/jpeg_dc.h <<'FOXLE_EOF_5'
+          #pragma once
+          #include <cstddef>
+          #include <cstdint>
+          #include <vector>
+          enum JdcStatus { JDC_OK = 0, JDC_FALLBACK = 1, JDC_ERROR = 2 };
+          struct JdcImage { int w = 0, h = 0, ow = 0, oh = 0; std::vector<uint8_t> rgba; };
+          JdcStatus jpeg_probe(const uint8_t *d, size_t n, int *w, int *h, bool *baseline);
+          JdcStatus jpeg_dc_decode(const uint8_t *d, size_t n, JdcImage &o);
+          struct ExifInfo { int orient = 1; const uint8_t *thumb = nullptr; size_t thumb_len = 0; };
+          bool exif_parse(const uint8_t *d, size_t n, ExifInfo &o);
+          void rgba_cover(const uint8_t *src, int sw, int sh, int S, uint8_t *dst);
+          FOXLE_EOF_5
+          cat > engine/exif_thumb.cpp <<'FOXLE_EOF_6'
+          #include "jpeg_dc.h"
+          #include <cstring>
+          static bool parse_tiff(const uint8_t *t, size_t n, ExifInfo &o) {
+            if (n < 8) return false;
+            bool le = t[0] == 'I';
+            if (!le && t[0] != 'M') return false;
+            auto r16 = [&](size_t p) -> uint32_t { return p + 2 > n ? 0 : le ? (uint32_t)(t[p] | t[p + 1] << 8) : (uint32_t)(t[p] << 8 | t[p + 1]); };
+            auto r32 = [&](size_t p) -> uint32_t { return p + 4 > n ? 0 : le ? (uint32_t)t[p] | (uint32_t)t[p + 1] << 8 | (uint32_t)t[p + 2] << 16 | (uint32_t)t[p + 3] << 24 : (uint32_t)t[p] << 24 | (uint32_t)t[p + 1] << 16 | (uint32_t)t[p + 2] << 8 | t[p + 3]; };
+            size_t ifd0 = r32(4);
+            if (ifd0 < 8 || ifd0 + 2 > n) return false;
+            uint32_t c0 = r16(ifd0);
+            for (uint32_t k = 0; k < c0 && ifd0 + 2 + 12 * (size_t)(k + 1) <= n; k++) {
+              size_t e = ifd0 + 2 + 12 * (size_t)k;
+              if (r16(e) == 0x0112) { uint32_t v = r16(e + 8); if (v >= 1 && v <= 8) o.orient = (int)v; }
+            }
+            size_t ifd1 = r32(ifd0 + 2 + 12 * (size_t)c0);
+            if (ifd1 < 8 || ifd1 + 2 > n) return true;
+            uint32_t c1 = r16(ifd1), off = 0, len = 0;
+            for (uint32_t k = 0; k < c1 && ifd1 + 2 + 12 * (size_t)(k + 1) <= n; k++) {
+              size_t e = ifd1 + 2 + 12 * (size_t)k; uint32_t tag = r16(e);
+              if (tag == 0x0201) off = r32(e + 8); else if (tag == 0x0202) len = r32(e + 8);
+            }
+            if (off && len >= 4 && (uint64_t)off + len <= n && t[off] == 0xFF && t[off + 1] == 0xD8) { o.thumb = t + off; o.thumb_len = len; }
+            return true;
+          }
+          bool exif_parse(const uint8_t *d, size_t n, ExifInfo &o) {
+            if (n < 4 || d[0] != 0xFF || d[1] != 0xD8) return false;
+            size_t i = 2;
+            while (i + 4 <= n) {
+              if (d[i] != 0xFF) { i++; continue; }
+              uint8_t m = d[i + 1];
+              if (m == 0xFF) { i++; continue; }
+              if (m == 0 || m == 1 || (m >= 0xD0 && m <= 0xD8)) { i += 2; continue; }
+              if (m == 0xD9 || m == 0xDA) break;
+              size_t len = (size_t)d[i + 2] << 8 | d[i + 3];
+              if (len < 2 || i + 2 + len > n) break;
+              if (m == 0xE1 && len >= 16 && !memcmp(d + i + 4, "Exif\0\0", 6)) return parse_tiff(d + i + 10, len - 8, o);
+              i += 2 + len;
+            }
+            return false;
+          }
+          FOXLE_EOF_6
+          cat > engine/zip_index.cpp <<'FOXLE_EOF_7'
+          // Indeks ZIP: EOCD -> central directory (termasuk ZIP64). Satu pread di ujung + satu pread central directory.
+          #include "foxle_engine.h"
+          #include <fcntl.h>
+          #include <sys/stat.h>
+          #include <unistd.h>
+          #include <cstring>
+          #include <vector>
+          static uint16_t r16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
+          static uint32_t r32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+          static uint64_t r64(const uint8_t *p) { return (uint64_t)r32(p) | (uint64_t)r32(p + 4) << 32; }
+          static bool rd(int fd, uint8_t *b, size_t n, uint64_t off) { size_t g = 0; while (g < n) { ssize_t r = pread(fd, b + g, n - g, (off_t)(off + g)); if (r <= 0) return false; g += (size_t)r; } return true; }
+          extern "C" int fx_zip_list(const char *path, fx_zip_cb cb, void *ud) {
+            int fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd < 0) return -1;
+            struct stat st; if (fstat(fd, &st) || st.st_size < 22) { close(fd); return -1; }
+            uint64_t fs = (uint64_t)st.st_size, tl = fs < 65557 ? fs : 65557;
+            std::vector<uint8_t> tail(tl);
+            if (!rd(fd, tail.data(), tl, fs - tl)) { close(fd); return -1; }
+            int64_t e = -1;
+            for (int64_t i = (int64_t)tl - 22; i >= 0; i--) if (r32(&tail[i]) == 0x06054b50) { e = i; break; }
+            if (e < 0) { close(fd); return -1; }
+            uint64_t cnt = r16(&tail[e + 10]), cdsz = r32(&tail[e + 12]), cdoff = r32(&tail[e + 16]);
+            if ((cnt == 0xFFFF || cdsz == 0xFFFFFFFFu || cdoff == 0xFFFFFFFFu) && e >= 20 && r32(&tail[e - 20]) == 0x07064b50) {
+              uint64_t z64 = r64(&tail[e - 20 + 8]); uint8_t z[56];
+              if (rd(fd, z, 56, z64) && r32(z) == 0x06064b50) { cnt = r64(z + 32); cdsz = r64(z + 40); cdoff = r64(z + 48); }
+            }
+            if (cdsz > ((uint64_t)256 << 20) || cdoff + cdsz > fs) { close(fd); return -1; }
+            std::vector<uint8_t> cd(cdsz);
+            if (cdsz && !rd(fd, cd.data(), cdsz, cdoff)) { close(fd); return -1; }
+            close(fd);
+            size_t p = 0; int n = 0;
+            while (p + 46 <= cd.size() && r32(&cd[p]) == 0x02014b50) {
+              int method = r16(&cd[p + 10]); uint64_t cs = r32(&cd[p + 20]), us = r32(&cd[p + 24]);
+              size_t nl = r16(&cd[p + 28]), el = r16(&cd[p + 30]), cl = r16(&cd[p + 32]);
+              if (p + 46 + nl + el + cl > cd.size()) break;
+              const uint8_t *x = &cd[p + 46 + nl]; size_t xl = el;
+              while (xl >= 4) {  // extra field ZIP64 (id 0x0001): usize, csize bila bernilai 0xFFFFFFFF
+                uint16_t id = r16(x), sz = r16(x + 2); if ((size_t)sz + 4 > xl) break;
+                if (id == 1) { size_t q = 4; if (us == 0xFFFFFFFFu && q + 8 <= (size_t)sz + 4) { us = r64(x + q); q += 8; } if (cs == 0xFFFFFFFFu && q + 8 <= (size_t)sz + 4) { cs = r64(x + q); } }
+                x += 4 + sz; xl -= 4 + (size_t)sz;
+              }
+              cb((const char *)&cd[p + 46], nl, us, cs, method, ud); n++;
+              p += 46 + nl + el + cl;
+            }
+            return n;
+          }
+          FOXLE_EOF_7
+          cat > engine/android_fallback.cpp <<'FOXLE_EOF_8'
+          // Hanya dikompilasi di Android (NDK r21+, minSdk 30). BELUM DIUJI di perangkat — diuji lewat build CI + HP.
+          #ifdef __ANDROID__
+          #include <android/bitmap.h>
+          #include <android/imagedecoder.h>
+          #include <fcntl.h>
+          #include <unistd.h>
+          #include <algorithm>
+          #include <cstdlib>
+          #include <cstring>
+          #include "foxle_engine.h"
+          #include "jpeg_dc.h"
+          extern "C" int fx_thumb_fallback(const char *path, int target, fx_thumb *o) {
+            memset(o, 0, sizeof *o);
+            int fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd < 0) return FX_ERR;
+            AImageDecoder *d = nullptr;
+            if (AImageDecoder_createFromFd(fd, &d) != ANDROID_IMAGE_DECODER_SUCCESS) { close(fd); return FX_ERR; }
+            const AImageDecoderHeaderInfo *hi = AImageDecoder_getHeaderInfo(d);
+            int w = AImageDecoderHeaderInfo_getWidth(hi), h = AImageDecoderHeaderInfo_getHeight(hi), tw = w, th = h;
+            if (std::min(w, h) > target) { float sc = (float)target / std::min(w, h); tw = std::max(1, (int)(w * sc + .5f)); th = std::max(1, (int)(h * sc + .5f)); AImageDecoder_setTargetSize(d, tw, th); }
+            AImageDecoder_setAndroidBitmapFormat(d, ANDROID_BITMAP_FORMAT_RGBA_8888);
+            size_t stride = AImageDecoder_getMinimumStride(d);
+            uint8_t *px = (uint8_t *)malloc(stride * th);
+            int rc = FX_ERR;
+            if (px && AImageDecoder_decodeImage(d, px, stride, stride * th) == ANDROID_IMAGE_DECODER_SUCCESS) {
+              // rata stride -> rapat, lalu crop-tengah ke target x target
+              uint8_t *tight = (uint8_t *)malloc((size_t)tw * th * 4);
+              for (int y = 0; y < th; y++) memcpy(tight + (size_t)y * tw * 4, px + (size_t)y * stride, (size_t)tw * 4);
+              o->data = (uint8_t *)malloc((size_t)target * target * 4);
+              rgba_cover(tight, tw, th, target, o->data);
+              free(tight); o->len = (size_t)target * target * 4; o->fmt = FX_FMT_RGBA8888; o->w = o->h = target; o->tier = 3; rc = FX_OK;
+            }
+            free(px); AImageDecoder_delete(d); close(fd); return rc;
+          }
+          #endif
+          FOXLE_EOF_8
+          cat > app/app.cpp <<'FOXLE_EOF_9'
+          // Foxle Native — NativeActivity + EGL/GLES2 + Foxle Engine. Tanpa Java, tanpa WebView, render sesuai kebutuhan (idle = 0% CPU).
+          #include <android_native_app_glue.h>
+          #include <android/log.h>
+          #include <android/imagedecoder.h>
+          #include <android/bitmap.h>
+          #include <android/data_space.h>
+          #include <EGL/egl.h>
+          #include <GLES2/gl2.h>
+          #include <jni.h>
+          #include <dirent.h>
+          #include <fcntl.h>
+          #include <strings.h>
+          #include <sys/stat.h>
+          #include <time.h>
+          #include <unistd.h>
+          #include <algorithm>
+          #include <atomic>
+          #include <cmath>
+          #include <condition_variable>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <deque>
+          #include <mutex>
+          #include <string>
+          #include <thread>
+          #include <unordered_map>
+          #include <unordered_set>
+          #include <vector>
+          #include "foxle_engine.h"
+          #include "jpeg_dc.h"
+
+          // 1 bila AImageDecoder sudah menerapkan orientasi EXIF sendiri (jika foto vertikal tampil terbalik, balik nilai ini).
+          #define DECODER_APPLIES_ORIENTATION 0
+          #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "foxle", __VA_ARGS__)
+
+          typedef uint32_t u32;
+          static inline u32 RGB(int r, int g, int b, int a = 255) { return (u32)a << 24 | (u32)b << 16 | (u32)g << 8 | (u32)r; }
+          static const u32 BG = RGB(0, 0, 0), SF = RGB(13, 13, 13), LN = RGB(38, 38, 38), TX = RGB(242, 242, 242), MU = RGB(143, 143, 143), AC = RGB(95, 176, 47),
+                           YL = RGB(252, 219, 90), BLU = RGB(154, 212, 255), RD = RGB(214, 64, 58), ORG = RGB(255, 179, 71), DIM = RGB(0, 0, 0, 205);
+          static double nowS() { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+
+          // ---------- font piksel 5x7 (ASCII 32..126), kolom-mayor, bit0 = baris atas ----------
+          static const uint8_t F5[95 * 5] = {
+          0x00,0x00,0x00,0x00,0x00, 0x00,0x00,0x5F,0x00,0x00, 0x00,0x07,0x00,0x07,0x00, 0x14,0x7F,0x14,0x7F,0x14, 0x24,0x2A,0x7F,0x2A,0x12, 0x23,0x13,0x08,0x64,0x62, 0x36,0x49,0x55,0x22,0x50, 0x00,0x05,0x03,0x00,0x00,
+          0x00,0x1C,0x22,0x41,0x00, 0x00,0x41,0x22,0x1C,0x00, 0x08,0x2A,0x1C,0x2A,0x08, 0x08,0x08,0x3E,0x08,0x08, 0x00,0x50,0x30,0x00,0x00, 0x08,0x08,0x08,0x08,0x08, 0x00,0x60,0x60,0x00,0x00, 0x20,0x10,0x08,0x04,0x02,
+          0x3E,0x51,0x49,0x45,0x3E, 0x00,0x42,0x7F,0x40,0x00, 0x42,0x61,0x51,0x49,0x46, 0x21,0x41,0x45,0x4B,0x31, 0x18,0x14,0x12,0x7F,0x10, 0x27,0x45,0x45,0x45,0x39, 0x3C,0x4A,0x49,0x49,0x30, 0x01,0x71,0x09,0x05,0x03,
+          0x36,0x49,0x49,0x49,0x36, 0x06,0x49,0x49,0x29,0x1E, 0x00,0x36,0x36,0x00,0x00, 0x00,0x56,0x36,0x00,0x00, 0x00,0x08,0x14,0x22,0x41, 0x14,0x14,0x14,0x14,0x14, 0x41,0x22,0x14,0x08,0x00, 0x02,0x01,0x51,0x09,0x06,
+          0x32,0x49,0x79,0x41,0x3E, 0x7E,0x11,0x11,0x11,0x7E, 0x7F,0x49,0x49,0x49,0x36, 0x3E,0x41,0x41,0x41,0x22, 0x7F,0x41,0x41,0x22,0x1C, 0x7F,0x49,0x49,0x49,0x41, 0x7F,0x09,0x09,0x01,0x01, 0x3E,0x41,0x41,0x51,0x32,
+          0x7F,0x08,0x08,0x08,0x7F, 0x00,0x41,0x7F,0x41,0x00, 0x20,0x40,0x41,0x3F,0x01, 0x7F,0x08,0x14,0x22,0x41, 0x7F,0x40,0x40,0x40,0x40, 0x7F,0x02,0x04,0x02,0x7F, 0x7F,0x04,0x08,0x10,0x7F, 0x3E,0x41,0x41,0x41,0x3E,
+          0x7F,0x09,0x09,0x09,0x06, 0x3E,0x41,0x51,0x21,0x5E, 0x7F,0x09,0x19,0x29,0x46, 0x46,0x49,0x49,0x49,0x31, 0x01,0x01,0x7F,0x01,0x01, 0x3F,0x40,0x40,0x40,0x3F, 0x1F,0x20,0x40,0x20,0x1F, 0x7F,0x20,0x18,0x20,0x7F,
+          0x63,0x14,0x08,0x14,0x63, 0x03,0x04,0x78,0x04,0x03, 0x61,0x51,0x49,0x45,0x43, 0x00,0x00,0x7F,0x41,0x41, 0x02,0x04,0x08,0x10,0x20, 0x41,0x41,0x7F,0x00,0x00, 0x04,0x02,0x01,0x02,0x04, 0x40,0x40,0x40,0x40,0x40,
+          0x00,0x01,0x02,0x04,0x00, 0x20,0x54,0x54,0x54,0x78, 0x7F,0x48,0x44,0x44,0x38, 0x38,0x44,0x44,0x44,0x20, 0x38,0x44,0x44,0x48,0x7F, 0x38,0x54,0x54,0x54,0x18, 0x08,0x7E,0x09,0x01,0x02, 0x08,0x14,0x54,0x54,0x3C,
+          0x7F,0x08,0x04,0x04,0x78, 0x00,0x44,0x7D,0x40,0x00, 0x20,0x40,0x44,0x3D,0x00, 0x00,0x7F,0x10,0x28,0x44, 0x00,0x41,0x7F,0x40,0x00, 0x7C,0x04,0x18,0x04,0x78, 0x7C,0x08,0x04,0x04,0x78, 0x38,0x44,0x44,0x44,0x38,
+          0x7C,0x14,0x14,0x14,0x08, 0x08,0x14,0x14,0x18,0x7C, 0x7C,0x08,0x04,0x04,0x08, 0x48,0x54,0x54,0x54,0x20, 0x04,0x3F,0x44,0x40,0x20, 0x3C,0x40,0x40,0x20,0x7C, 0x1C,0x20,0x40,0x20,0x1C, 0x3C,0x40,0x30,0x40,0x3C,
+          0x44,0x28,0x10,0x28,0x44, 0x0C,0x50,0x50,0x50,0x3C, 0x44,0x64,0x54,0x4C,0x44, 0x00,0x08,0x36,0x41,0x00, 0x00,0x00,0x7F,0x00,0x00, 0x00,0x41,0x36,0x08,0x00, 0x02,0x01,0x02,0x04,0x02};
+
+          // ---------- GL ----------
+          struct Vtx { float x, y, u, v; u32 c; };
+          struct Gfx { GLuint prog = 0, font = 0, atlas = 0, cur = 0; GLint aP = 0, aT = 0, aC = 0, uS = 0; std::vector<Vtx> vb; float W = 0, H = 0; } g;
+          static const char *VSH = "attribute vec2 p;attribute vec2 t;attribute vec4 c;uniform vec2 s;varying vec2 vt;varying vec4 vc;void main(){gl_Position=vec4(p.x/s.x*2.0-1.0,1.0-p.y/s.y*2.0,0.0,1.0);vt=t;vc=c;}";
+          static const char *FSH = "precision mediump float;uniform sampler2D tx;varying vec2 vt;varying vec4 vc;void main(){gl_FragColor=texture2D(tx,vt)*vc;}";
+          static GLuint mkTex(int w, int h, const void *px, bool linear) {
+            GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, linear ? GL_LINEAR : GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px); return t;
+          }
+          static GLuint mkShader(GLenum ty, const char *src) {
+            GLuint s = glCreateShader(ty); glShaderSource(s, 1, &src, nullptr); glCompileShader(s);
+            GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok); if (!ok) { char b[512]; glGetShaderInfoLog(s, 512, nullptr, b); LOG("shader: %s", b); } return s;
+          }
+          static void flushGfx() {
+            if (g.vb.empty()) return;
+            glBindTexture(GL_TEXTURE_2D, g.cur);
+            glVertexAttribPointer(g.aP, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), &g.vb[0].x); glVertexAttribPointer(g.aT, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), &g.vb[0].u);
+            glVertexAttribPointer(g.aC, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vtx), &g.vb[0].c);
+            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g.vb.size()); g.vb.clear();
+          }
+          static void quadUV(GLuint tex, float x, float y, float w, float h, const float *uv, u32 c) {  // uv: TL,TR,BR,BL
+            if (tex != g.cur) { flushGfx(); g.cur = tex; }
+            Vtx a{x, y, uv[0], uv[1], c}, b{x + w, y, uv[2], uv[3], c}, d{x + w, y + h, uv[4], uv[5], c}, e{x, y + h, uv[6], uv[7], c};
+            g.vb.push_back(a); g.vb.push_back(b); g.vb.push_back(d); g.vb.push_back(a); g.vb.push_back(d); g.vb.push_back(e);
+          }
+          static const float SOLID[8] = {(120 + 2) / 128.f, (40 + 2) / 48.f, (120 + 6) / 128.f, (40 + 2) / 48.f, (120 + 6) / 128.f, (40 + 6) / 48.f, (120 + 2) / 128.f, (40 + 6) / 48.f};
+          static void rect(float x, float y, float w, float h, u32 c) { if (w > 0 && h > 0) quadUV(g.font, x, y, w, h, SOLID, c); }
+          static void buildFont() {
+            std::vector<u32> px(128 * 48, 0);
+            for (int i = 0; i < 95; i++) { int cx = i % 16, cy = i / 16; for (int c = 0; c < 5; c++) for (int r = 0; r < 7; r++) if ((F5[i * 5 + c] >> r) & 1) px[(cy * 8 + r) * 128 + cx * 8 + c] = 0xFFFFFFFFu; }
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) px[(40 + y) * 128 + 120 + x] = 0xFFFFFFFFu;
+            g.font = mkTex(128, 48, px.data(), false);
+          }
+          static float text(float x, float y, const char *s, int S, u32 col, float maxw = 1e9f) {
+            std::vector<unsigned char> cs;
+            for (const unsigned char *p = (const unsigned char *)s; *p; p++) { if (*p < 0x80) cs.push_back(*p >= 32 && *p < 127 ? *p : '?'); else if (*p >= 0xC0) cs.push_back('?'); }
+            float adv = 6.f * S; int maxc = (int)(maxw / adv), n = (int)cs.size(); bool tr = n > maxc; if (tr) n = std::max(0, maxc);
+            for (int i = 0; i < n; i++) {
+              int ch = cs[i]; if (tr && i >= n - 2) ch = '.'; if (ch == ' ') continue;
+              int gi = ch - 32, cx = gi % 16, cy = gi / 16; float u0 = (cx * 8) / 128.f, u1 = (cx * 8 + 5) / 128.f, v0 = (cy * 8) / 48.f, v1 = (cy * 8 + 7) / 48.f;
+              float uv[8] = {u0, v0, u1, v0, u1, v1, u0, v1}; quadUV(g.font, x + i * adv, y, 5.f * S, 7.f * S, uv, col);
+            }
+            return n * adv;
+          }
+
+          // ---------- data ----------
+          enum { K_OTHER, K_IMG, K_VID, K_AUD, K_TXT, K_ZIP };
+          struct Entry { std::string name; bool dir = false; uint64_t size = 0; int64_t mt = 0; int kind = K_OTHER; uint64_t key = 0; };
+          static int kindOf(const std::string &n) {
+            size_t p = n.rfind('.'); if (p == std::string::npos) return K_OTHER;
+            std::string e = n.substr(p + 1); for (auto &c : e) c = (char)tolower((unsigned char)c);
+            static const char *I[] = {"jpg", "jpeg", "jfif", "png", "webp", "gif", "bmp", "heic", "heif", "avif", "dng"}, *V[] = {"mp4", "mkv", "webm", "mov", "avi", "3gp", "m4v"}, *A_[] = {"mp3", "m4a", "aac", "flac", "ogg", "wav", "opus"},
+                       *T[] = {"txt", "md", "log", "json", "xml", "csv", "yml", "yaml", "ini", "cfg", "html", "htm", "css", "js", "c", "cpp", "h", "java", "kt", "py", "sh", "toml", "srt"}, *Z[] = {"zip", "apk", "jar", "cbz", "epub"};
+            for (auto s : I) if (e == s) return K_IMG; for (auto s : V) if (e == s) return K_VID; for (auto s : A_) if (e == s) return K_AUD;
+            for (auto s : T) if (e == s) return K_TXT; for (auto s : Z) if (e == s) return K_ZIP; return K_OTHER;
+          }
+          struct Scroller {
+            float pos = 0, vel = 0, maxp = 0; bool drag = false;
+            void clamp() { pos = std::max(0.f, std::min(pos, maxp)); }
+            void step(float dt) { if (drag) return; if (std::fabs(vel) > 25.f) { pos += vel * dt; vel *= std::exp(-4.2f * dt); if (pos <= 0 || pos >= maxp) vel = 0; clamp(); } else vel = 0; }
+            bool moving() const { return drag || std::fabs(vel) > 25.f; }
+          };
+          struct Job { int type = 0; std::string path; uint64_t key = 0; int a = 0; };
+          struct Res { int type = 0; uint64_t key = 0; int w = 0, h = 0, orient = 1; bool ok = false; std::vector<u32> px; };
+          struct VTex { GLuint t = 0; int w = 0, h = 0, orient = 1; double use = 0; };
+          struct Slot { uint64_t key = 0; int orient = 1; double use = 0; };
+
+          struct App {
+            android_app *a = nullptr; ALooper *lp = nullptr; fx_pack *pack = nullptr;
+            EGLDisplay dpy = EGL_NO_DISPLAY; EGLSurface surf = EGL_NO_SURFACE; EGLContext ctx = EGL_NO_CONTEXT;
+            bool win = false, perm = false, grid = false, exitArmed = false; std::atomic<bool> dirty{true};
+            float dens = 440, dp = 2.75f; int sw = 0, sh = 0; bool land = false;
+            std::string path, root = "/storage/emulated/0", toastMsg; double toastUntil = 0, lastBack = 0, exitT = 0, frameT = 0, lastFrame = 0;
+            std::vector<Entry> ents; Scroller sc; std::unordered_map<std::string, float> saved;
+            // viewer
+            int vmode = 0;  // 0 tidak ada, 1 gambar, 2 baris (teks/zip)
+            std::vector<int> imgs; int cur = 0; float vscale = 1, vox = 0, voy = 0, dragdx = 0; std::vector<std::string> lines; std::string vtitle; Scroller vsc;
+            int maxTex = 2048;
+          } A;
+          static std::deque<Job> jq; static std::vector<Res> rq; static std::mutex jm, rmx; static std::condition_variable jcv; static std::atomic<bool> quitW{false}; static std::vector<std::thread> workers;
+          static Slot slots[256]; static std::unordered_map<uint64_t, int> slotOf; static std::unordered_set<uint64_t> pend, failed;
+          static std::unordered_map<uint64_t, VTex> VT; static std::unordered_set<uint64_t> vpend;
+
+          // ---------- decode (thread worker) ----------
+          static bool decDec(AImageDecoder *d, int maxDim, int &w, int &h, std::vector<u32> &out) {
+            const AImageDecoderHeaderInfo *hi = AImageDecoder_getHeaderInfo(d);
+            int W = AImageDecoderHeaderInfo_getWidth(hi), H = AImageDecoderHeaderInfo_getHeight(hi); w = W; h = H;
+            int m = std::max(W, H);
+            if (m > maxDim) { float s = (float)maxDim / m; w = std::max(1, (int)(W * s + .5f)); h = std::max(1, (int)(H * s + .5f)); if (AImageDecoder_setTargetSize(d, w, h) != ANDROID_IMAGE_DECODER_SUCCESS) { w = W; h = H; } }
+            AImageDecoder_setAndroidBitmapFormat(d, ANDROID_BITMAP_FORMAT_RGBA_8888);
+            size_t stride = AImageDecoder_getMinimumStride(d); if (stride != (size_t)w * 4) return false;
+            out.resize((size_t)w * h);
+            return AImageDecoder_decodeImage(d, out.data(), stride, stride * h) == ANDROID_IMAGE_DECODER_SUCCESS;
+          }
+          static bool decMem(const uint8_t *b, size_t n, int maxDim, int &w, int &h, std::vector<u32> &out) {
+            AImageDecoder *d = nullptr; if (AImageDecoder_createFromBuffer(b, n, &d) != ANDROID_IMAGE_DECODER_SUCCESS) return false;
+            bool ok = decDec(d, maxDim, w, h, out); AImageDecoder_delete(d); return ok;
+          }
+          static int readOrient(const std::string &p) {
+            int fd = open(p.c_str(), O_RDONLY | O_CLOEXEC); if (fd < 0) return 1;
+            static thread_local uint8_t b[65568]; ssize_t n = pread(fd, b, sizeof b, 0); close(fd);
+            ExifInfo ex; if (n > 4) exif_parse(b, (size_t)n, ex); return ex.orient;
+          }
+          static bool encWebp(const std::vector<u32> &px, std::vector<uint8_t> &out) {
+            AndroidBitmapInfo bi; memset(&bi, 0, sizeof bi); bi.width = 128; bi.height = 128; bi.stride = 512; bi.format = ANDROID_BITMAP_FORMAT_RGBA_8888; out.clear();
+            return AndroidBitmap_compress(&bi, ADATASPACE_SRGB, px.data(), ANDROID_BITMAP_COMPRESS_FORMAT_WEBP_LOSSY, 72, &out,
+                                          [](void *ud, const void *d, size_t n) -> bool { auto *o = (std::vector<uint8_t> *)ud; o->insert(o->end(), (const uint8_t *)d, (const uint8_t *)d + n); return true; }) == ANDROID_BITMAP_RESULT_SUCCESS;
+          }
+          static void coverTo(const std::vector<u32> &src, int w, int h, std::vector<u32> &dst) { dst.resize(128 * 128); rgba_cover((const uint8_t *)src.data(), w, h, 128, (uint8_t *)dst.data()); }
+          static void packRaw(uint64_t key, const std::vector<u32> &px, int orient, int tier) {
+            std::vector<uint8_t> enc; if (!encWebp(px, enc)) return;
+            fx_thumb t; memset(&t, 0, sizeof t); t.fmt = FX_FMT_JPEG; t.w = t.h = 128; t.orient = orient; t.tier = tier; t.data = enc.data(); t.len = enc.size(); fx_pack_put(A.pack, key, &t);
+          }
+          static void doThumb(const Job &j, Res &r) {
+            fx_thumb t; std::vector<u32> raw; int ow = 0, oh = 0; r.w = r.h = 128;
+            if (fx_pack_get(A.pack, j.key, &t) == FX_OK) {  // cache
+              if (decMem(t.data, t.len, 128, ow, oh, raw)) { coverTo(raw, ow, oh, r.px); r.orient = t.orient; r.ok = true; }
+              fx_thumb_free(&t); if (r.ok) return;
+            }
+            int rc = fx_thumb_make(j.path.c_str(), 128, &t);
+            if (rc == FX_OK && t.fmt == FX_FMT_JPEG) {  // tier 1: thumbnail EXIF
+              if (decMem(t.data, t.len, 128, ow, oh, raw)) { coverTo(raw, ow, oh, r.px); r.orient = t.orient; r.ok = true; fx_pack_put(A.pack, j.key, &t); }
+              fx_thumb_free(&t); return;
+            }
+            if (rc == FX_OK) {  // tier 2: DC-only
+              r.px.assign((u32 *)t.data, (u32 *)t.data + 128 * 128); r.orient = t.orient; r.ok = true; packRaw(j.key, r.px, r.orient, 2); fx_thumb_free(&t); return;
+            }
+            if (rc == FX_FALLBACK && fx_thumb_fallback(j.path.c_str(), 128, &t) == FX_OK) {  // tier 3: decoder platform
+              r.px.assign((u32 *)t.data, (u32 *)t.data + 128 * 128); r.orient = DECODER_APPLIES_ORIENTATION ? 1 : readOrient(j.path); r.ok = true; packRaw(j.key, r.px, r.orient, 3); fx_thumb_free(&t);
+            }
+          }
+          static void doImage(const Job &j, Res &r) {
+            int fd = open(j.path.c_str(), O_RDONLY | O_CLOEXEC); if (fd < 0) return;
+            AImageDecoder *d = nullptr;
+            if (AImageDecoder_createFromFd(fd, &d) == ANDROID_IMAGE_DECODER_SUCCESS) { r.ok = decDec(d, j.a, r.w, r.h, r.px); AImageDecoder_delete(d); }
+            close(fd); r.orient = DECODER_APPLIES_ORIENTATION ? 1 : readOrient(j.path);
+          }
+          static void workerLoop() {
+            for (;;) {
+              Job j;
+              { std::unique_lock<std::mutex> l(jm); jcv.wait(l, [] { return quitW.load() || !jq.empty(); }); if (quitW) return; j = std::move(jq.front()); jq.pop_front(); }
+              Res r; r.type = j.type; r.key = j.key;
+              if (j.type == 0) doThumb(j, r); else doImage(j, r);
+              { std::lock_guard<std::mutex> l(rmx); rq.push_back(std::move(r)); }
+              A.dirty = true; if (A.lp) ALooper_wake(A.lp);
+            }
+          }
+          static void pushJob(const Job &j, bool front) { { std::lock_guard<std::mutex> l(jm); if (front) jq.push_front(j); else jq.push_back(j); } jcv.notify_one(); }
+
+          // ---------- JNI: izin "Akses semua file" (satu-satunya titik Java, sekali saat awal) ----------
+          static JNIEnv *jenv() { JNIEnv *e = nullptr; A.a->activity->vm->AttachCurrentThread(&e, nullptr); return e; }
+          static bool hasAllFiles() {
+            JNIEnv *e = jenv(); if (!e) return false;
+            jclass c = e->FindClass("android/os/Environment"); jmethodID m = c ? e->GetStaticMethodID(c, "isExternalStorageManager", "()Z") : nullptr;
+            bool r = m && e->CallStaticBooleanMethod(c, m); if (e->ExceptionCheck()) e->ExceptionClear(); return r;
+          }
+          static bool startSettings(JNIEnv *e, const char *action, bool withPkg) {
+            jclass uc = e->FindClass("android/net/Uri"); jclass ic = e->FindClass("android/content/Intent"); if (!uc || !ic) return false;
+            jobject uri = nullptr;
+            if (withPkg) { jmethodID pm = e->GetStaticMethodID(uc, "parse", "(Ljava/lang/String;)Landroid/net/Uri;"); jstring s = e->NewStringUTF("package:com.foxle.native"); uri = e->CallStaticObjectMethod(uc, pm, s); }
+            jmethodID ct = e->GetMethodID(ic, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V"); jstring act = e->NewStringUTF(action);
+            jobject in = e->NewObject(ic, ct, act, uri);
+            jclass ac = e->GetObjectClass(A.a->activity->clazz); jmethodID sa = e->GetMethodID(ac, "startActivity", "(Landroid/content/Intent;)V");
+            e->CallVoidMethod(A.a->activity->clazz, sa, in);
+            if (e->ExceptionCheck()) { e->ExceptionClear(); return false; } return true;
+          }
+          static void requestAllFiles() {
+            JNIEnv *e = jenv(); if (!e) return;
+            if (!startSettings(e, "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION", true)) startSettings(e, "android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION", false);
+          }
+
+          // ---------- direktori ----------
+          static std::string joinP(const std::string &a, const std::string &b) { return a.back() == '/' ? a + b : a + "/" + b; }
+          static std::string parentP(const std::string &p) { size_t i = p.rfind('/'); return i == 0 || i == std::string::npos ? "/" : p.substr(0, i); }
+          static void toast(const std::string &m) { A.toastMsg = m; A.toastUntil = nowS() + 2.0; A.dirty = true; }
+          static void loadDir(const std::string &p) {
+            A.path = p; A.ents.clear();
+            DIR *d = opendir(p.c_str());
+            if (d) {
+              while (dirent *e = readdir(d)) {
+                if (e->d_name[0] == '.' && (!e->d_name[1] || (e->d_name[1] == '.' && !e->d_name[2]))) continue;
+                Entry en; en.name = e->d_name; struct stat st; std::string fp = joinP(p, en.name);
+                if (stat(fp.c_str(), &st) != 0) continue;
+                en.dir = S_ISDIR(st.st_mode); en.size = (uint64_t)st.st_size; en.mt = (int64_t)st.st_mtime;
+                en.kind = en.dir ? K_OTHER : kindOf(en.name); en.key = fx_key(fp.c_str(), en.size, (uint64_t)en.mt * 1000000000ull);
+                A.ents.push_back(std::move(en));
+              }
+              closedir(d);
+            }
+            std::sort(A.ents.begin(), A.ents.end(), [](const Entry &a, const Entry &b) { if (a.dir != b.dir) return a.dir; return strcasecmp(a.name.c_str(), b.name.c_str()) < 0; });
+            { std::lock_guard<std::mutex> l(jm); jq.clear(); } pend.clear();
+            A.dirty = true;
+          }
+          static void navigate(const std::string &p) {
+            A.saved[A.path] = A.sc.pos; loadDir(p); auto it = A.saved.find(p); A.sc.pos = it != A.saved.end() ? it->second : 0; A.sc.vel = 0; A.sc.drag = false;
+          }
+          static std::string humanSize(uint64_t s) {
+            char b[32]; if (s < 1024) snprintf(b, sizeof b, "%llu B", (unsigned long long)s); else if (s < 1048576) snprintf(b, sizeof b, "%.1f KB", s / 1024.0);
+            else if (s < 1073741824ull) snprintf(b, sizeof b, "%.1f MB", s / 1048576.0); else snprintf(b, sizeof b, "%.2f GB", s / 1073741824.0); return b;
+          }
+
+          // ---------- thumbnail atlas & hasil worker ----------
+          static int allocSlot(uint64_t key) {
+            int best = 0; double bu = 1e300;
+            for (int i = 0; i < 256; i++) { if (!slots[i].key) { best = i; bu = -1; break; } if (slots[i].use < bu) { bu = slots[i].use; best = i; } }
+            if (slots[best].key) slotOf.erase(slots[best].key);
+            slots[best].key = key; slotOf[key] = best; return best;
+          }
+          static int thumbSlot(const Entry &e, const std::string &full) {
+            auto it = slotOf.find(e.key); if (it != slotOf.end()) { slots[it->second].use = A.frameT; return it->second; }
+            if (!pend.count(e.key) && !failed.count(e.key)) {
+              pend.insert(e.key); Job j; j.type = 0; j.path = full; j.key = e.key; pushJob(j, true);
+              std::lock_guard<std::mutex> l(jm); if (jq.size() > 600) { pend.erase(jq.back().key); jq.pop_back(); }
+            }
+            return -1;
+          }
+          static void handleResults() {
+            std::vector<Res> v; { std::lock_guard<std::mutex> l(rmx); v.swap(rq); }
+            size_t i = 0; int up = 0;
+            for (; i < v.size() && up < 3; i++) {
+              Res &r = v[i];
+              if (r.type == 0) {
+                pend.erase(r.key); if (!r.ok) { failed.insert(r.key); continue; }
+                int s = allocSlot(r.key); slots[s].orient = r.orient; slots[s].use = A.frameT;
+                glBindTexture(GL_TEXTURE_2D, g.atlas); glTexSubImage2D(GL_TEXTURE_2D, 0, (s % 16) * 128, (s / 16) * 128, 128, 128, GL_RGBA, GL_UNSIGNED_BYTE, r.px.data()); up++;
+              } else {
+                vpend.erase(r.key); if (!r.ok) continue;
+                VTex t; t.t = mkTex(r.w, r.h, r.px.data(), true); t.w = r.w; t.h = r.h; t.orient = r.orient; t.use = A.frameT;
+                auto old = VT.find(r.key); if (old != VT.end()) glDeleteTextures(1, &old->second.t); VT[r.key] = t; up++;
+                while (VT.size() > 5) { auto ev = VT.begin(); for (auto it = VT.begin(); it != VT.end(); ++it) if (it->second.use < ev->second.use) ev = it; glDeleteTextures(1, &ev->second.t); VT.erase(ev); }
+              }
+            }
+            if (i < v.size()) { std::lock_guard<std::mutex> l(rmx); rq.insert(rq.begin(), std::make_move_iterator(v.begin() + i), std::make_move_iterator(v.end())); A.dirty = true; }
+          }
+          // UV per orientasi EXIF (hanya rotasi): urutan sudut tampilan TL,TR,BR,BL -> sudut sumber
+          static void orientUV(int o, float u0, float v0, float u1, float v1, float *uv) {
+            float TL[2] = {u0, v0}, TR[2] = {u1, v0}, BR[2] = {u1, v1}, BL[2] = {u0, v1}; const float *c[4];
+            if (o == 6) { c[0] = BL; c[1] = TL; c[2] = TR; c[3] = BR; } else if (o == 3) { c[0] = BR; c[1] = BL; c[2] = TL; c[3] = TR; }
+            else if (o == 8) { c[0] = TR; c[1] = BR; c[2] = BL; c[3] = TL; } else { c[0] = TL; c[1] = TR; c[2] = BR; c[3] = BL; }
+            for (int i = 0; i < 4; i++) { uv[i * 2] = c[i][0]; uv[i * 2 + 1] = c[i][1]; }
+          }
+          static void drawThumb(int s, float x, float y, float w, float h) {
+            float u0 = (s % 16) * 128 / 2048.f, v0 = (s / 16) * 128 / 2048.f, u1 = u0 + 128 / 2048.f, v1 = v0 + 128 / 2048.f, uv[8];
+            orientUV(slots[s].orient, u0 + .0005f, v0 + .0005f, u1 - .0005f, v1 - .0005f, uv); quadUV(g.atlas, x, y, w, h, uv, RGB(255, 255, 255));
+          }
+
+          // ---------- layout & gambar ----------
+          struct Lay { float hdr = 0, rowH = 0, pad = 0, cell = 0; int S1 = 3, S2 = 2, cols = 3; } L;
+          static void layout() {
+            A.dp = A.dens / 160.f; A.land = A.sw > A.sh; L.S1 = std::max(2, (int)(A.dp * 1.1f + .5f)); L.S2 = std::max(2, L.S1 - 1);
+            L.hdr = (A.land ? 44.f : 52.f) * A.dp; L.rowH = 48.f * A.dp; L.pad = 8.f * A.dp; L.cols = std::max(3, (int)(A.sw / (110.f * A.dp))); L.cell = (float)A.sw / L.cols;
+          }
+          static void btnRect(int which, float &x, float &y, float &s) {  // 0 = keluar (paling kanan, terjangkau jempol kanan), 1 = grid/daftar
+            s = L.hdr - 10.f * A.dp; y = 5.f * A.dp; x = A.sw - (5.f * A.dp + s) * (which + 1);
+          }
+          static void boxBtn(float x, float y, float s, u32 fill, u32 border) { rect(x, y, s, s, border); rect(x + 2, y + 2, s - 4, s - 4, fill); }
+          static void ctext(float cx, float y, const char *s, int S, u32 col) { text(cx - strlen(s) * 6.f * S / 2.f, y, s, S, col); }
+          static void drawIcon(const Entry &e, float x, float y, float s) {
+            if (e.dir) { rect(x + s * .08f, y + s * .2f, s * .4f, s * .16f, YL); rect(x + s * .08f, y + s * .32f, s * .84f, s * .5f, YL); return; }
+            u32 c = e.kind == K_IMG ? BLU : e.kind == K_VID ? RD : e.kind == K_AUD ? YL : e.kind == K_TXT ? TX : e.kind == K_ZIP ? ORG : MU;
+            rect(x + s * .2f, y + s * .1f, s * .6f, s * .8f, c); rect(x + s * .56f, y + s * .1f, s * .24f, s * .22f, SF);
+          }
+          static void drawRow(int i, float y) {
+            const Entry &e = A.ents[i]; std::string full = joinP(A.path, e.name); float W = (float)A.sw, ib = L.rowH - 12.f * A.dp, ix = L.pad + 6.f * A.dp, iy = y + (L.rowH - ib) / 2;
+            rect(L.pad / 2, y + 2, W - L.pad, L.rowH - 4, LN); rect(L.pad / 2 + 2, y + 4, W - L.pad - 4, L.rowH - 8, SF);
+            if (e.dir) rect(L.pad / 2 + 2, y + 4, 4, L.rowH - 8, AC);
+            rect(ix - 2, iy - 2, ib + 4, ib + 4, LN); rect(ix, iy, ib, ib, BG);
+            int s = e.kind == K_IMG ? thumbSlot(e, full) : -1; if (s >= 0) drawThumb(s, ix, iy, ib, ib); else drawIcon(e, ix, iy, ib);
+            float tx = ix + ib + L.pad, mw = W - tx - L.pad, th = 7.f * L.S1 + 4 + 7.f * L.S2, ty = y + (L.rowH - th) / 2;
+            text(tx, ty, e.name.c_str(), L.S1, TX, mw); text(tx, ty + 7.f * L.S1 + 4, e.dir ? "folder" : humanSize(e.size).c_str(), L.S2, MU, mw);
+          }
+          static void drawCell(int i, float x, float y) {
+            const Entry &e = A.ents[i]; std::string full = joinP(A.path, e.name); float c = L.cell, lh = 7.f * L.S2 + 8;
+            rect(x + 2, y + 2, c - 4, c - 4, LN); rect(x + 4, y + 4, c - 8, c - 8, SF);
+            int s = e.kind == K_IMG ? thumbSlot(e, full) : -1;
+            if (s >= 0) drawThumb(s, x + 4, y + 4, c - 8, c - 8); else drawIcon(e, x + c * .25f, y + c * .15f, c * .5f);
+            if (e.dir) rect(x + 4, y + 4, c - 8, 4, AC);
+            rect(x + 4, y + c - 4 - lh, c - 8, lh, DIM); text(x + 8, y + c - 4 - lh + 4, e.name.c_str(), L.S2, TX, c - 16);
+          }
+          static void drawList() {
+            float top = L.hdr, vh = A.sh - top; int n = (int)A.ents.size();
+            if (!A.grid) {
+              A.sc.maxp = std::max(0.f, n * L.rowH - vh); A.sc.clamp();
+              int f = std::max(0, (int)(A.sc.pos / L.rowH)), l = std::min(n - 1, (int)((A.sc.pos + vh) / L.rowH));
+              for (int i = f; i <= l; i++) drawRow(i, top + i * L.rowH - A.sc.pos);
+            } else {
+              int rows = (n + L.cols - 1) / L.cols; A.sc.maxp = std::max(0.f, rows * L.cell - vh); A.sc.clamp();
+              int f = std::max(0, (int)(A.sc.pos / L.cell)), l = std::min(rows - 1, (int)((A.sc.pos + vh) / L.cell));
+              for (int r = f; r <= l; r++) for (int c = 0; c < L.cols; c++) { int i = r * L.cols + c; if (i < n) drawCell(i, c * L.cell, top + r * L.cell - A.sc.pos); }
+            }
+            if (n == 0) ctext(A.sw / 2.f, top + 40.f * A.dp, "KOSONG", L.S1, MU);
+          }
+          static void drawHeader() {
+            float W = (float)A.sw; rect(0, 0, W, L.hdr, BG); rect(0, L.hdr - 2, W, 2, AC);
+            float gx, gy, gs, ex, ey, es; btnRect(1, gx, gy, gs); btnRect(0, ex, ey, es);
+            std::string rel = A.path.compare(0, A.root.size(), A.root) == 0 ? "Storage" + A.path.substr(A.root.size()) : A.path;
+            int maxc = std::max(4, (int)((gx - 2 * L.pad) / (6.f * L.S1))); if ((int)rel.size() > maxc) rel = ".." + rel.substr(rel.size() - (maxc - 2));
+            text(L.pad, (L.hdr - 7.f * L.S1) / 2, rel.c_str(), L.S1, AC);
+            boxBtn(gx, gy, gs, SF, LN);
+            if (A.grid) { for (int i = 0; i < 3; i++) rect(gx + gs * .22f, gy + gs * (.26f + i * .22f), gs * .56f, gs * .1f, TX); }
+            else { float q = gs * .24f; for (int r = 0; r < 2; r++) for (int c = 0; c < 2; c++) rect(gx + gs * .2f + c * (q + gs * .12f), gy + gs * .2f + r * (q + gs * .12f), q, q, TX); }
+            boxBtn(ex, ey, es, A.exitArmed ? RD : SF, RD); ctext(ex + es / 2, ey + (es - 7.f * L.S1) / 2, "X", L.S1, TX);
+          }
+          static void permBtn(float &x, float &y, float &w, float &h) { w = std::min(A.sw - 2 * L.pad, 300.f * A.dp); h = 56.f * A.dp; x = (A.sw - w) / 2; y = A.sh / 2.f + 30.f * A.dp; }
+          static void drawPerm() {
+            float cx = A.sw / 2.f, y = A.sh / 2.f - 80.f * A.dp;
+            ctext(cx, y, "FOXLE BUTUH AKSES", L.S1 + 1, AC); ctext(cx, y + 12.f * L.S1 + 8, "SEMUA FILE", L.S1 + 1, AC);
+            ctext(cx, y + 26.f * L.S1 + 8, "Aktifkan lalu kembali ke sini", L.S2, MU);
+            float bx, by, bw, bh; permBtn(bx, by, bw, bh); boxBtn(bx, by, bw, SF, AC); rect(bx, by, bw, 2, AC); rect(bx + 2, by + 2, bw - 4, bh - 4, SF);
+            ctext(cx, by + (bh - 7.f * L.S1) / 2, "BERI AKSES", L.S1, AC);
+          }
+          static void drawToast() {
+            if (A.frameT >= A.toastUntil) return;
+            float tw = A.toastMsg.size() * 6.f * L.S2 + 2 * L.pad, h = 7.f * L.S2 + 2 * L.pad; tw = std::min(tw, (float)A.sw - 2 * L.pad);
+            float x = (A.sw - tw) / 2, y = A.sh - h - 24.f * A.dp; rect(x, y, tw, h, LN); rect(x + 2, y + 2, tw - 4, h - 4, SF); rect(x + 2, y + 2, 6, h - 4, AC);
+            text(x + L.pad + 6, y + L.pad, A.toastMsg.c_str(), L.S2, TX, tw - 2 * L.pad - 6);
+          }
+
+          // ---------- viewer ----------
+          static uint64_t imgKey(int k) { int n = (int)A.imgs.size(); const Entry &e = A.ents[A.imgs[((k % n) + n) % n]]; return std::hash<std::string>()(joinP(A.path, e.name)); }
+          static void reqImage(int k) {
+            int n = (int)A.imgs.size(); if (!n) return; uint64_t key = imgKey(k); if (VT.count(key) || vpend.count(key)) return;
+            const Entry &e = A.ents[A.imgs[((k % n) + n) % n]]; vpend.insert(key); Job j; j.type = 1; j.path = joinP(A.path, e.name); j.key = key; j.a = std::min(A.maxTex, 2560); pushJob(j, true);
+          }
+          static void openImage(int idx) {
+            A.imgs.clear(); int cur = 0; for (int i = 0; i < (int)A.ents.size(); i++) if (A.ents[i].kind == K_IMG) { if (i == idx) cur = (int)A.imgs.size(); A.imgs.push_back(i); }
+            A.cur = cur; A.vmode = 1; A.vscale = 1; A.vox = A.voy = A.dragdx = 0; reqImage(cur + 1); reqImage(cur - 1); reqImage(cur);
+            static bool hint = false; if (!hint && A.imgs.size() > 1) { hint = true; toast("Tap sisi kiri/kanan = foto lain"); }
+          }
+          static void stepImage(int d) {
+            int n = (int)A.imgs.size(); if (n < 2) return; A.cur = ((A.cur + d) % n + n) % n; A.vscale = 1; A.vox = A.voy = A.dragdx = 0; reqImage(A.cur + d); reqImage(A.cur);
+          }
+          static void clampPan() {
+            int n = (int)A.imgs.size(); if (!n) return; auto it = VT.find(imgKey(A.cur)); float iw = (float)A.sw, ih = (float)A.sh;
+            if (it != VT.end()) { bool sw = it->second.orient == 6 || it->second.orient == 8; iw = (float)(sw ? it->second.h : it->second.w); ih = (float)(sw ? it->second.w : it->second.h); }
+            float fs = std::min(A.sw / iw, A.sh / ih), mx = std::max(0.f, (iw * fs * A.vscale - A.sw) / 2), my = std::max(0.f, (ih * fs * A.vscale - A.sh) / 2);
+            A.vox = std::max(-mx, std::min(mx, A.vox)); A.voy = std::max(-my, std::min(my, A.voy));
+          }
+          static void drawViewer() {
+            float W = (float)A.sw, H = (float)A.sh;
+            if (A.vmode == 1) {
+              int n = (int)A.imgs.size(); const Entry &e = A.ents[A.imgs[A.cur]]; auto it = VT.find(imgKey(A.cur)); clampPan();
+              if (it != VT.end()) {
+                VTex &t = it->second; t.use = A.frameT; bool sw = t.orient == 6 || t.orient == 8; float iw = (float)(sw ? t.h : t.w), ih = (float)(sw ? t.w : t.h);
+                float fs = std::min(W / iw, H / ih), dw = iw * fs * A.vscale, dh = ih * fs * A.vscale, cx = W / 2 + A.vox + A.dragdx, cy = H / 2 + A.voy; float uv[8]; orientUV(t.orient, 0, 0, 1, 1, uv);
+                quadUV(t.t, cx - dw / 2, cy - dh / 2, dw, dh, uv, RGB(255, 255, 255));
+              } else {
+                auto s = slotOf.find(e.key);
+                if (s != slotOf.end()) { float m = std::min(W, H) * .8f; drawThumb(s->second, (W - m) / 2, (H - m) / 2, m, m); }
+                ctext(W / 2, H / 2 - 4.f * L.S1, "MEMUAT...", L.S1, MU);
+              }
+              char b[32]; snprintf(b, sizeof b, "%d/%d  ", A.cur + 1, n); std::string t = std::string(b) + e.name;
+              rect(0, 0, W, 7.f * L.S2 + 2 * L.pad, DIM); text(L.pad, L.pad, t.c_str(), L.S2, TX, W - 2 * L.pad);
+            } else if (A.vmode == 2) {
+              int S = L.S2 + 1 > 3 ? 3 : L.S2 + 1; float lh = 9.f * S, top = 7.f * L.S2 + 2 * L.pad + 4, vh = H - top; int n = (int)A.lines.size();
+              A.vsc.maxp = std::max(0.f, n * lh - vh + lh); A.vsc.clamp();
+              int f = std::max(0, (int)(A.vsc.pos / lh)), l = std::min(n - 1, (int)((A.vsc.pos + vh) / lh));
+              for (int i = f; i <= l; i++) text(L.pad, top + i * lh - A.vsc.pos, A.lines[i].c_str(), S, TX, W - 2 * L.pad);
+              rect(0, 0, W, top, BG); rect(0, top - 2, W, 2, AC); text(L.pad, L.pad, A.vtitle.c_str(), L.S2, AC, W - 2 * L.pad);
+            }
+          }
+          static void zcb(const char *nm, size_t nl, uint64_t us, uint64_t, int, void *ud) { ((std::vector<std::string> *)ud)->push_back(humanSize(us) + "  " + std::string(nm, nl)); }
+          static void openLines(const std::string &full, const Entry &e) {
+            A.lines.clear(); A.vtitle = e.name;
+            if (e.kind == K_ZIP) { int n = fx_zip_list(full.c_str(), zcb, &A.lines); if (n < 0) { toast("Arsip tidak terbaca"); return; } A.lines.insert(A.lines.begin(), std::to_string(n) + " entri"); }
+            else {
+              FILE *f = fopen(full.c_str(), "rb"); if (!f) { toast("Gagal membuka"); return; }
+              std::string buf(512 * 1024, '\0'); size_t n = fread(&buf[0], 1, buf.size(), f); fclose(f); buf.resize(n);
+              size_t p = 0; while (p <= buf.size() && A.lines.size() < 50000) {
+                size_t q = buf.find('\n', p); if (q == std::string::npos) q = buf.size(); std::string ln = buf.substr(p, std::min<size_t>(q - p, 400));
+                std::string o; for (char c : ln) { if (c == '\t') o += "    "; else if (c != '\r') o += c; } A.lines.push_back(o); p = q + 1;
+              }
+            }
+            A.vmode = 2; A.vsc = Scroller();
+          }
+          static void openEntry(int i) {
+            const Entry &e = A.ents[i]; std::string full = joinP(A.path, e.name);
+            if (e.dir) { navigate(full); return; }
+            switch (e.kind) { case K_IMG: openImage(i); break; case K_TXT: case K_ZIP: openLines(full, e); break; default: toast("Belum ada viewer native untuk jenis ini"); }
+          }
+          static void handleBack() {
+            A.dirty = true; if (A.vmode) { A.vmode = 0; return; } if (!A.perm) return;
+            if (A.path != A.root && A.path.size() > 1) { double t = nowS(); bool dbl = t - A.lastBack < 0.75; A.lastBack = t; if (dbl) { navigate(A.root); toast("Direktori awal"); } else navigate(parentP(A.path)); return; }
+            A.lastBack = 0; toast("Sudah di direktori awal. Keluar: tap X 2x");
+          }
+
+          // ---------- input ----------
+          struct Touch { bool down = false, moved = false, pinch = false; float x0 = 0, y0 = 0, lx = 0, ly = 0, pd = 1, ps = 1, tapx = 0, tapy = 0; double t0 = 0, lastTap = 0, st[8] = {0}; float sp[8] = {0}; int ns = 0; } T;
+          static void sample(double t, float p) {
+            if (T.ns < 8) { T.st[T.ns] = t; T.sp[T.ns] = p; T.ns++; } else { memmove(T.st, T.st + 1, 7 * sizeof(double)); memmove(T.sp, T.sp + 1, 7 * sizeof(float)); T.st[7] = t; T.sp[7] = p; }
+          }
+          static float velocity(double t, float p) {
+            for (int i = 0; i < T.ns; i++) if (t - T.st[i] < 0.12) { double dt = t - T.st[i]; if (dt < 0.01) return 0; return (float)((p - T.sp[i]) / dt); }
+            return 0;
+          }
+          static bool inBox(float px, float py, float x, float y, float s) { return px >= x && px <= x + s && py >= y && py <= y + s; }
+          static void onTap(float x, float y, double t) {
+            if (!A.perm) { float bx, by, bw, bh; permBtn(bx, by, bw, bh); if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) requestAllFiles(); return; }
+            if (A.vmode == 1) {
+              int n = (int)A.imgs.size(); float fx = x / A.sw;
+              if (A.vscale < 1.05f && n > 1 && (fx < .28f || fx > .72f)) { stepImage(fx > .5f ? 1 : -1); return; }
+              if (t - T.lastTap < .32 && std::hypot(x - T.tapx, y - T.tapy) < 40 * A.dp) {
+                T.lastTap = 0; if (A.vscale > 1.05f) { A.vscale = 1; A.vox = A.voy = 0; } else { A.vscale = 2.5f; A.vox = (A.sw / 2.f - x) * 1.5f; A.voy = (A.sh / 2.f - y) * 1.5f; clampPan(); }
+              } else { T.lastTap = t; T.tapx = x; T.tapy = y; }
+              return;
+            }
+            if (A.vmode == 2) return;
+            if (y < L.hdr) {
+              float bx, by, bs; btnRect(0, bx, by, bs);
+              if (inBox(x, y, bx, by, bs)) {  // keluar: harus 2x tap
+                double n = nowS(); if (A.exitArmed && n - A.exitT < 1.8) ANativeActivity_finish(A.a->activity); else { A.exitArmed = true; A.exitT = n; toast("Tap X sekali lagi untuk keluar"); } return;
+              }
+              btnRect(1, bx, by, bs); if (inBox(x, y, bx, by, bs)) { A.grid = !A.grid; A.sc.pos = 0; A.sc.vel = 0; } return;
+            }
+            int n = (int)A.ents.size(), idx = -1;
+            if (!A.grid) idx = (int)((y - L.hdr + A.sc.pos) / L.rowH); else { int r = (int)((y - L.hdr + A.sc.pos) / L.cell), c = std::min(L.cols - 1, (int)(x / L.cell)); idx = r * L.cols + c; }
+            if (idx >= 0 && idx < n) openEntry(idx);
+          }
+          static void onTouch(AInputEvent *ev) {
+            int act = AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK, n = (int)AMotionEvent_getPointerCount(ev);
+            float x = AMotionEvent_getX(ev, 0), y = AMotionEvent_getY(ev, 0); double t = AMotionEvent_getEventTime(ev) * 1e-9;
+            Scroller *S_ = A.vmode == 2 ? &A.vsc : &A.sc;
+            if (act == AMOTION_EVENT_ACTION_DOWN) { T.down = true; T.moved = false; T.pinch = false; T.x0 = T.lx = x; T.y0 = T.ly = y; T.t0 = t; T.ns = 0; S_->vel = 0; S_->drag = false; return; }
+            if (!T.down) return;
+            if (A.vmode == 1 && n >= 2) {
+              float d = std::hypot(AMotionEvent_getX(ev, 1) - x, AMotionEvent_getY(ev, 1) - y);
+              if (!T.pinch) { T.pinch = true; T.pd = std::max(d, 1.f); T.ps = A.vscale; } else A.vscale = std::max(1.f, std::min(8.f, T.ps * d / T.pd));
+              T.moved = true; clampPan(); return;
+            }
+            if (T.pinch) { if (act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_CANCEL) { T.down = false; T.pinch = false; } T.lx = x; T.ly = y; return; }
+            if (act == AMOTION_EVENT_ACTION_MOVE) {
+              float dx = x - T.lx, dy = y - T.ly; if (!T.moved && std::hypot(x - T.x0, y - T.y0) > 10 * A.dp) T.moved = true;
+              if (T.moved) {
+                if (A.vmode == 1) { if (A.vscale > 1.02f) { A.vox += dx; A.voy += dy; clampPan(); } else A.dragdx = x - T.x0; }
+                else { S_->drag = true; S_->pos -= dy; S_->clamp(); sample(t, S_->pos); }
+              }
+              T.lx = x; T.ly = y; return;
+            }
+            if (act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_CANCEL) {
+              T.down = false;
+              if (!T.moved && act == AMOTION_EVENT_ACTION_UP) onTap(x, y, t);
+              else if (T.moved) {
+                if (A.vmode == 1) { if (A.vscale <= 1.02f && std::fabs(x - T.x0) > A.sw * .2f) stepImage(x < T.x0 ? 1 : -1); A.dragdx = 0; }
+                else { S_->drag = false; S_->vel = velocity(t, S_->pos); }
+              }
+            }
+          }
+          static int32_t onInput(android_app *, AInputEvent *ev) {
+            int ty = AInputEvent_getType(ev);
+            if (ty == AINPUT_EVENT_TYPE_KEY) {
+              if (AKeyEvent_getKeyCode(ev) == AKEYCODE_BACK) { if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_UP) handleBack(); A.dirty = true; return 1; }
+              return 0;
+            }
+            if (ty == AINPUT_EVENT_TYPE_MOTION) { onTouch(ev); A.dirty = true; return 1; }
+            return 0;
+          }
+
+          // ---------- EGL / siklus hidup ----------
+          static bool initGL() {
+            A.dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY); eglInitialize(A.dpy, nullptr, nullptr);
+            const EGLint ca[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE};
+            EGLConfig cfg; EGLint n = 0, fmt = 0; if (!eglChooseConfig(A.dpy, ca, &cfg, 1, &n) || n < 1) return false;
+            eglGetConfigAttrib(A.dpy, cfg, EGL_NATIVE_VISUAL_ID, &fmt); ANativeWindow_setBuffersGeometry(A.a->window, 0, 0, fmt);
+            A.surf = eglCreateWindowSurface(A.dpy, cfg, A.a->window, nullptr);
+            const EGLint cx[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE}; A.ctx = eglCreateContext(A.dpy, cfg, EGL_NO_CONTEXT, cx);
+            if (!eglMakeCurrent(A.dpy, A.surf, A.surf, A.ctx)) return false; eglSwapInterval(A.dpy, 1);
+            GLuint vs = mkShader(GL_VERTEX_SHADER, VSH), fs = mkShader(GL_FRAGMENT_SHADER, FSH); g.prog = glCreateProgram();
+            glAttachShader(g.prog, vs); glAttachShader(g.prog, fs); glBindAttribLocation(g.prog, 0, "p"); glBindAttribLocation(g.prog, 1, "t"); glBindAttribLocation(g.prog, 2, "c"); glLinkProgram(g.prog);
+            g.aP = 0; g.aT = 1; g.aC = 2; g.uS = glGetUniformLocation(g.prog, "s"); glUseProgram(g.prog); glUniform1i(glGetUniformLocation(g.prog, "tx"), 0);
+            glEnableVertexAttribArray(0); glEnableVertexAttribArray(1); glEnableVertexAttribArray(2); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glActiveTexture(GL_TEXTURE0);
+            buildFont(); g.atlas = mkTex(2048, 2048, nullptr, true); GLint mt = 2048; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mt); A.maxTex = mt; g.cur = 0; g.vb.reserve(60000);
+            return true;
+          }
+          static void termGL() {
+            if (A.dpy != EGL_NO_DISPLAY) {
+              eglMakeCurrent(A.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+              if (A.ctx != EGL_NO_CONTEXT) eglDestroyContext(A.dpy, A.ctx); if (A.surf != EGL_NO_SURFACE) eglDestroySurface(A.dpy, A.surf); eglTerminate(A.dpy);
+            }
+            A.dpy = EGL_NO_DISPLAY; A.ctx = EGL_NO_CONTEXT; A.surf = EGL_NO_SURFACE; g.font = g.atlas = g.prog = 0;  // objek GL ikut hilang bersama context
+            slotOf.clear(); for (auto &s : slots) s = Slot(); VT.clear(); pend.clear(); vpend.clear(); { std::lock_guard<std::mutex> l(jm); jq.clear(); }
+          }
+          static void recheckPerm() { bool p = hasAllFiles(); if (p && !A.perm) { A.perm = true; loadDir(A.root); } else if (!p) A.perm = false; A.dirty = true; }
+          static void frame() {
+            if (!A.win || A.surf == EGL_NO_SURFACE) return;
+            A.dirty = false; EGLint w = 0, h = 0; eglQuerySurface(A.dpy, A.surf, EGL_WIDTH, &w); eglQuerySurface(A.dpy, A.surf, EGL_HEIGHT, &h);
+            A.sw = w; A.sh = h; g.W = (float)w; g.H = (float)h; layout();
+            A.frameT = nowS(); float dt = A.lastFrame > 0 ? (float)std::min(0.05, A.frameT - A.lastFrame) : 0.016f; A.lastFrame = A.frameT;
+            handleResults(); A.sc.step(dt); A.vsc.step(dt); if (A.exitArmed && A.frameT - A.exitT > 1.8) A.exitArmed = false;
+            glViewport(0, 0, w, h); glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT); glUseProgram(g.prog); glUniform2f(g.uS, (float)w, (float)h); g.cur = 0; g.vb.clear();
+            if (!A.perm) drawPerm(); else if (A.vmode) drawViewer(); else { drawList(); drawHeader(); }
+            drawToast(); flushGfx(); eglSwapBuffers(A.dpy, A.surf);
+            if (A.sc.moving() || A.vsc.moving() || A.frameT < A.toastUntil || A.exitArmed || (A.vmode == 1 && A.dragdx != 0.f)) A.dirty = true;
+          }
+          static void onCmd(android_app *app, int32_t cmd) {
+            switch (cmd) {
+              case APP_CMD_INIT_WINDOW: if (app->window && initGL()) A.win = true; A.dirty = true; break;
+              case APP_CMD_TERM_WINDOW: termGL(); A.win = false; break;
+              case APP_CMD_GAINED_FOCUS: case APP_CMD_RESUME: recheckPerm(); break;
+              case APP_CMD_CONFIG_CHANGED: case APP_CMD_WINDOW_RESIZED: A.dirty = true; break;
+              default: break;
+            }
+          }
+          extern "C" void android_main(android_app *app) {
+            A.a = app; app->onAppCmd = onCmd; app->onInputEvent = onInput; A.lp = ALooper_forThread();
+            int d = AConfiguration_getDensity(app->config); A.dens = (d > 0 && d < 0xfffe) ? (float)d : 440.f;
+            std::string pk = std::string(app->activity->internalDataPath ? app->activity->internalDataPath : "/data/local/tmp") + "/thumbs.pack"; A.pack = fx_pack_open(pk.c_str());
+            A.path = A.root; for (int i = 0; i < 2; i++) workers.emplace_back(workerLoop);
+            recheckPerm();
+            while (!app->destroyRequested) {
+              int timeout = (A.win && A.dirty) ? 0 : -1;
+              for (;;) {
+                int ev = 0; android_poll_source *src = nullptr; int id = ALooper_pollOnce(timeout, nullptr, &ev, (void **)&src);
+                if (id >= 0) { if (src) src->process(app, src); timeout = 0; if (app->destroyRequested) break; continue; }
+                break;
+              }
+              if (app->destroyRequested) break;
+              if (A.win && A.dirty) frame();
+            }
+            quitW = true; jcv.notify_all(); for (auto &t : workers) t.join(); fx_pack_close(A.pack); termGL();
+          }
+          FOXLE_EOF_9
+          cat > tools/fxcli.cpp <<'FOXLE_EOF_10'
+          #include "foxle_engine.h"
+          #include "jpeg_dc.h"
+          #include <dirent.h>
+          #include <chrono>
+          #include <cstdio>
+          #include <cstring>
+          #include <string>
+          #include <vector>
+          using Clk = std::chrono::steady_clock;
+          static double ms(Clk::time_point a, Clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); }
+          static bool readf(const char *p, std::vector<uint8_t> &v) { FILE *f = fopen(p, "rb"); if (!f) return false; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET); v.resize(n); bool ok = fread(v.data(), 1, n, f) == (size_t)n; fclose(f); return ok; }
+          int main(int argc, char **argv) {
+            if (argc >= 5 && !strcmp(argv[1], "thumb")) {
+              fx_thumb t; int rc = fx_thumb_make(argv[2], atoi(argv[3]), &t);
+              printf("rc=%d tier=%d fmt=%d w=%d h=%d orient=%d len=%zu\n", rc, t.tier, t.fmt, t.w, t.h, t.orient, t.len);
+              if (rc == 0) { FILE *f = fopen(argv[4], "wb"); fwrite(t.data, 1, t.len, f); fclose(f); }
+              fx_thumb_free(&t); return rc;
+            }
+            if (argc >= 4 && !strcmp(argv[1], "dc")) {
+              std::vector<uint8_t> v; if (!readf(argv[2], v)) return 9; JdcImage im; JdcStatus s = jpeg_dc_decode(v.data(), v.size(), im);
+              printf("status=%d ow=%d oh=%d\n", (int)s, im.ow, im.oh); if (s == JDC_OK) { FILE *f = fopen(argv[3], "wb"); fwrite(im.rgba.data(), 1, im.rgba.size(), f); fclose(f); } return (int)s;
+            }
+            if (argc >= 4 && !strcmp(argv[1], "bench")) {  // bench <file> <target> <iters>
+              int target = atoi(argv[3]), it = argc > 4 ? atoi(argv[4]) : 20; std::vector<uint8_t> v; readf(argv[2], v);
+              fx_thumb t; fx_thumb_make(argv[2], target, &t); int tier = t.tier; fx_thumb_free(&t);
+              auto a = Clk::now(); for (int i = 0; i < it; i++) { fx_thumb_make(argv[2], target, &t); fx_thumb_free(&t); } auto b = Clk::now();
+              printf("engine tier%d (open+read+decode+resize): %.3f ms/img\n", tier, ms(a, b) / it);
+              JdcImage im; a = Clk::now(); for (int i = 0; i < it; i++) jpeg_dc_decode(v.data(), v.size(), im); b = Clk::now();
+              printf("jpeg_dc_decode only (RAM): %.3f ms/img  (%.0f MB/s entropy data)\n", ms(a, b) / it, v.size() / 1048576.0 / (ms(a, b) / it / 1000));
+              return 0;
+            }
+            if (argc >= 3 && !strcmp(argv[1], "pack")) {  // pack <file.pack>
+              remove(argv[2]); fx_pack *p = fx_pack_open(argv[2]); uint8_t d[1000]; for (int i = 0; i < 1000; i++) d[i] = (uint8_t)(i * 7);
+              for (uint64_t k = 1; k <= 2000; k++) { fx_thumb t{2, 160, 120, 6, 2, d, (size_t)(100 + k % 900)}; if (fx_pack_put(p, k, &t)) return 2; }
+              fx_pack_close(p); p = fx_pack_open(argv[2]); int bad = 0;
+              auto a = Clk::now();
+              for (uint64_t k = 1; k <= 2000; k++) { fx_thumb g; if (fx_pack_get(p, k, &g) || g.len != 100 + k % 900 || g.w != 160 || g.orient != 6 || memcmp(g.data, d, g.len)) bad++; fx_thumb_free(&g); }
+              auto b = Clk::now(); fx_thumb g; int miss = fx_pack_get(p, 99999, &g);
+              printf("pack: 2000 records, reopen+index ok, bad=%d, miss_rc=%d, get=%.2f us/rec\n", bad, miss, ms(a, b) * 1000 / 2000);
+              fx_pack_close(p); return bad || miss != FX_FALLBACK;
+            }
+            if (argc >= 3 && !strcmp(argv[1], "zip")) {
+              int n = fx_zip_list(argv[2], [](const char *nm, size_t nl, uint64_t us, uint64_t cs, int m, void *) { printf("%llu %llu %d %.*s\n", (unsigned long long)us, (unsigned long long)cs, m, (int)nl, nm); }, nullptr);
+              fprintf(stderr, "n=%d\n", n); return n < 0;
+            }
+            fprintf(stderr, "usage: fxcli thumb|dc|bench|pack ...\n"); return 1;
+          }
+          FOXLE_EOF_10
+          cat > tests/run_tests.py <<'FOXLE_EOF_11'
+          #!/usr/bin/env python3
+          """Uji engine: akurasi DC-only vs jpeglib (Pillow draft 1/8), jalur fallback, tier EXIF, pack cache, benchmark.
+          Pakai: python3 tests/run_tests.py /path/ke/fxcli"""
+          import io, os, struct, subprocess, sys, time
+          import numpy as np
+          from PIL import Image
+          CLI = sys.argv[1] if len(sys.argv) > 1 else "/tmp/fxcli"
+          D = "/tmp/fx_samples"; os.makedirs(D, exist_ok=True)
+          rng = np.random.default_rng(7)
+
+          def photo(w, h):
+              g = rng.random((h // 64 + 2, w // 64 + 2, 3)).astype(np.float32)
+              big = np.array(Image.fromarray((g * 255).astype(np.uint8)).resize((w, h), Image.BICUBIC)).astype(np.float32)
+              yy, xx = np.mgrid[0:h, 0:w]
+              tex = 18 * np.sin(xx / 5.0)[..., None] * np.cos(yy / 7.0)[..., None] + rng.normal(0, 5, (h, w, 3))
+              return Image.fromarray(np.clip(big + tex, 0, 255).astype(np.uint8))
+
+          def exif_with_thumb(img, orient=6):
+              t = io.BytesIO(); img.resize((160, 120)).save(t, "JPEG", quality=85); tb = t.getvalue()
+              tiff = b"II*\x00" + struct.pack("<I", 8)
+              tiff += struct.pack("<H", 1) + struct.pack("<HHII", 0x0112, 3, 1, orient) + struct.pack("<I", 26)
+              tiff += struct.pack("<H", 2) + struct.pack("<HHII", 0x0201, 4, 1, 56) + struct.pack("<HHII", 0x0202, 4, 1, len(tb)) + struct.pack("<I", 0)
+              assert len(tiff) == 56
+              return b"Exif\x00\x00" + tiff + tb, tb
+
+          def run(*a):
+              p = subprocess.run([CLI, *map(str, a)], capture_output=True, text=True); return p.returncode, p.stdout.strip()
+
+          W, H = 4000, 3000
+          base = photo(W, H)
+          S = {}
+          S["420"] = ("photo_420.jpg", dict(quality=90, subsampling=2))
+          S["444"] = ("photo_444.jpg", dict(quality=90, subsampling=0))
+          S["422"] = ("photo_422.jpg", dict(quality=90, subsampling=1))
+          S["gray"] = ("photo_gray.jpg", dict(quality=90))
+          S["odd"] = ("photo_odd.jpg", dict(quality=85, subsampling=2))
+          for k, (f, kw) in S.items():
+              im = base.convert("L") if k == "gray" else base.crop((0, 0, 3999, 2999)) if k == "odd" else base
+              im.save(f"{D}/{f}", "JPEG", **kw)
+          try:
+              base.save(f"{D}/photo_rst.jpg", "JPEG", quality=90, subsampling=2, restart_marker_rows=2); S["rst"] = ("photo_rst.jpg", {})
+          except Exception as e:
+              print("  (restart marker tidak didukung Pillow ini, dilewati:", e, ")")
+          base.save(f"{D}/photo_prog.jpg", "JPEG", quality=90, progressive=True)
+          base.resize((800, 600)).save(f"{D}/small.jpg", "JPEG", quality=90)
+          base.resize((800, 600)).save(f"{D}/pic.png")
+          ex, tb = exif_with_thumb(base); base.save(f"{D}/photo_exif.jpg", "JPEG", quality=90, exif=ex)
+          open(f"{D}/thumb_expected.jpg", "wb").write(tb)
+
+          ok = True
+          def check(name, cond, info=""):
+              global ok; ok &= bool(cond); print(("PASS " if cond else "FAIL ") + name + ("  " + info if info else ""))
+
+          print("== 1. Akurasi DC-only vs jpeglib scale 1/8 (Pillow draft) ==")
+          for k, (f, _) in S.items():
+              rc, out = run("dc", f"{D}/{f}", "/tmp/dc.rgba")
+              ow, oh = map(int, [out.split("ow=")[1].split()[0], out.split("oh=")[1].split()[0]])
+              mine = np.fromfile("/tmp/dc.rgba", np.uint8).reshape(oh, ow, 4)[..., :3].astype(int)
+              im = Image.open(f"{D}/{f}"); full = im.convert("RGB"); W0, H0 = full.size
+              im = Image.open(f"{D}/{f}"); im.draft("RGB", (W0 // 8, H0 // 8)); ref = np.array(im.convert("RGB")).astype(int)
+              gt = np.array(full.reduce(8)).astype(int)
+              if ref.shape[:2] != mine.shape[:2]: check(f"dc {k}", False, f"ukuran beda {ref.shape} vs {mine.shape}"); continue
+              d = np.abs(ref - mine); h2 = min(gt.shape[0], mine.shape[0]); w2 = min(gt.shape[1], mine.shape[1])
+              e_me = np.abs(gt[:h2, :w2] - mine[:h2, :w2]).mean(); e_lj = np.abs(gt[:h2, :w2] - ref[:h2, :w2]).mean()
+              check(f"dc {k:5s} {ow}x{oh}", d.mean() < 1.5 or e_me <= e_lj * 1.25, f"vs jpeglib: mean={d.mean():.3f} max={d.max()} | error vs kebenaran: engine={e_me:.2f} jpeglib={e_lj:.2f}")
+
+          print("== 2. Jalur fallback & tier ==")
+          rc, out = run("dc", f"{D}/photo_prog.jpg", "/tmp/x"); check("progressive -> FALLBACK", rc == 1, out)
+          rc, out = run("thumb", f"{D}/small.jpg", 128, "/tmp/x"); check("jpeg kecil -> FALLBACK", rc == 1, out)
+          rc, out = run("thumb", f"{D}/pic.png", 128, "/tmp/x"); check("png -> FALLBACK ke decoder platform", rc == 1, out)
+          rc, out = run("thumb", f"{D}/photo_420.jpg", 128, "/tmp/t.rgba"); check("tier2 (tanpa EXIF)", rc == 0 and "tier=2" in out, out)
+          rc, out = run("thumb", f"{D}/photo_exif.jpg", 128, "/tmp/t.jpg")
+          check("tier1 EXIF", rc == 0 and "tier=1" in out and "orient=6" in out, out)
+          check("tier1 byte identik dgn thumbnail tertanam", open("/tmp/t.jpg", "rb").read() == tb)
+          rc, out = run("thumb", f"{D}/photo_exif.jpg", 256, "/tmp/t2.rgba"); check("target 256 > thumb 160 -> naik ke tier2", rc == 0 and "tier=2" in out, out)
+          rc, out = run("pack", "/tmp/t.pack"); check("pack cache roundtrip + reopen", rc == 0, out)
+
+          import zipfile
+          zp = f"{D}/t.zip"
+          with zipfile.ZipFile(zp, "w") as z:
+              z.writestr("a.txt", "hello" * 100, zipfile.ZIP_DEFLATED); z.writestr("dir/b.bin", os.urandom(5000), zipfile.ZIP_STORED); z.writestr("uni_\u00e9.txt", "x", zipfile.ZIP_DEFLATED)
+          ref = [f"{i.file_size} {i.compress_size} {8 if i.compress_type == 8 else 0} {i.filename}" for i in zipfile.ZipFile(zp).infolist()]
+          got = subprocess.run([CLI, "zip", zp], capture_output=True, text=True).stdout.strip().split("\n")
+          check("zip index == zipfile (nama, ukuran, kompresi)", got == ref, f"{len(got)} entri")
+          print("== 3. Benchmark (1 core x86 sandbox, 4000x3000, target 128; angka ARM beda) ==")
+          for f in ["photo_420.jpg", "photo_exif.jpg"]:
+              sz = os.path.getsize(f"{D}/{f}") / 1e6; print(f"-- {f} ({sz:.1f} MB)"); print(run("bench", f"{D}/{f}", 128, 30)[1])
+          im_path = f"{D}/photo_420.jpg"; n = 30; t0 = time.perf_counter()
+          for _ in range(n):
+              im = Image.open(im_path); im.draft("RGB", (500, 375)); im.load()
+          pil = (time.perf_counter() - t0) * 1000 / n
+          print(f"Pillow draft 1/8 (libjpeg-turbo, referensi): {pil:.3f} ms/img")
+          print("\nHASIL:", "SEMUA LULUS" if ok else "ADA YANG GAGAL"); sys.exit(0 if ok else 1)
+          FOXLE_EOF_11
+      - name: Uji engine di host (akurasi, fallback, EXIF, ZIP, cache, benchmark)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          pip install --quiet pillow numpy
+          g++ -std=c++17 -O3 -Iinclude -Iengine engine/engine.cpp engine/jpeg_dc.cpp engine/exif_thumb.cpp engine/zip_index.cpp tools/fxcli.cpp -o fxcli -pthread
+          python3 tests/run_tests.py ./fxcli
+      - name: Build libfoxle.so (NDK, arm64-v8a)
+        run: |
+          set -euo pipefail
+          echo "NDK=$ANDROID_NDK_HOME"
+          cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+          ls -l build/libfoxle.so
+      - name: Paketkan APK (aapt2, zipalign, apksigner)
+        run: |
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          PLAT=$(ls -d "$ANDROID_HOME"/platforms/android-* | sort -V | tail -1)
+          echo "build-tools=$BT platform=$PLAT"
+          "$BT/aapt2" link -o base.apk -I "$PLAT/android.jar" --manifest AndroidManifest.xml \
+            --min-sdk-version 30 --target-sdk-version 34 --version-code 1 --version-name 1.0
+          mkdir -p apk/lib/arm64-v8a && cp build/libfoxle.so apk/lib/arm64-v8a/
+          (cd apk && zip -qr ../base.apk lib)
+          "$BT/zipalign" -f -p 4 base.apk aligned.apk
+          keytool -genkeypair -keystore debug.keystore -storepass android -keypass android -alias foxle \
+            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Foxle,O=Foxle,C=ID"
+          "$BT/apksigner" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out Foxle-native.apk aligned.apk
+          "$BT/apksigner" verify --verbose Foxle-native.apk
+          ls -l Foxle-native.apk
+      - name: Unggah APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Foxle-native-apk
+          path: Foxle-native.apk
