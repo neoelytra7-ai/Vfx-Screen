@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GH Build ⛏</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+:root{--crack:none;--top:none;--side:none}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{font:21px/1.15 'VT323',ui-monospace,monospace;color:#fff;min-height:100vh;overflow-x:hidden;background:#2c3a1a;-webkit-font-smoothing:none}
+.px{font-family:'Press Start 2P',ui-monospace,monospace}
+#bg{position:fixed;inset:0;width:100%;height:100%;image-rendering:pixelated;z-index:0;pointer-events:none}
+#scene{position:fixed;inset:0;z-index:0;overflow:hidden;background:#2c3a1a;transition:filter 2.5s}
+body.dead #scene{filter:saturate(.55) sepia(.3) brightness(.78)}
+.ly{position:absolute;left:-10vw;top:-5vh;width:120vw;height:110vh;will-change:transform;transform-origin:50% 60%;image-rendering:auto}
+#far{filter:blur(2.5px)}
+#mid,#fore2{image-rendering:pixelated}
+#fore2{opacity:0}
+.rays{position:fixed;left:-20%;top:-20%;width:140%;height:140%;z-index:0;pointer-events:none;opacity:.4;will-change:transform}
+body.exact #bok{mix-blend-mode:screen}body.exact .pn{-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px)}
+#app{position:relative;z-index:2;max-width:520px;margin:auto;padding:calc(14px + env(safe-area-inset-top)) 14px 150px;display:grid;gap:14px}
+#app.shake{animation:shake .55s}
+@keyframes shake{0%,100%{transform:none}10%{transform:translate(-9px,5px)}25%{transform:translate(8px,-6px)}40%{transform:translate(-7px,-4px)}55%{transform:translate(6px,6px)}70%{transform:translate(-4px,3px)}85%{transform:translate(3px,-2px)}}
+
+/* logo */
+.head{position:relative;text-align:center;padding-top:6px;animation:drop .9s cubic-bezier(.2,1.3,.3,1) both}
+@keyframes drop{from{transform:translateY(-120px);opacity:0}to{transform:none;opacity:1}}
+.logo{font:28px/1.1 'Press Start 2P',monospace;color:#d4d4d4;letter-spacing:1px;text-shadow:-4px 0 #000,4px 0 #000,0 -4px #000,0 4px #000,4px 8px 0 #000,0 8px 0 #4a4a4a,-4px 8px 0 #000}
+.logo small{display:block;font-size:10px;color:#ffdc3a;margin-top:12px;letter-spacing:3px;text-shadow:-2px 0 #000,2px 0 #000,0 -2px #000,0 2px #000,2px 4px 0 #3a2a00}
+#splash{position:absolute;right:-2px;bottom:-4px;font:9px 'Press Start 2P',monospace;color:#ffff3c;text-shadow:2px 2px 0 #3f3f00;transform:rotate(-14deg);white-space:nowrap}
+
+/* panel ala inventory */
+.pn{margin:4px;padding:14px;background:rgba(50,50,50,.8);box-shadow:0 0 0 4px #000,inset 4px 4px 0 #8c8c8c,inset -4px -4px 0 #232323;animation:rise .7s cubic-bezier(.2,1.1,.3,1) both}
+.pn:nth-of-type(1){animation-delay:.12s}.pn:nth-of-type(2){animation-delay:.22s}.pn:nth-of-type(3){animation-delay:.32s}
+@keyframes rise{from{transform:translateY(40px);opacity:0}to{transform:none;opacity:1}}
+.row{display:grid;grid-template-columns:2fr 1fr;gap:10px}
+.slot{width:100%;padding:9px 11px;border:0;color:#fff;font:inherit;font-size:22px;background:#111;box-shadow:inset 3px 3px 0 #000,inset -3px -3px 0 #6a6a6a;outline:0;border-radius:0}
+.slot::placeholder{color:#777}
+.slot:focus{box-shadow:0 0 0 3px #fff,inset 3px 3px 0 #000,inset -3px -3px 0 #6a6a6a}
+#tok{margin-top:10px}
+
+/* tombol */
+.mc{display:block;width:100%;border:0;border-radius:0;padding:14px 10px;cursor:pointer;color:#fff;font:11px/1.4 'Press Start 2P',monospace;text-shadow:2px 2px 0 #3f3f3f;background:#7b7b7b;box-shadow:0 0 0 3px #000,inset 3px 3px 0 #b0b0b0,inset -3px -3px 0 #4a4a4a;transition:transform .08s}
+.mc:hover{background:#6d7fc4;color:#ffffa0;box-shadow:0 0 0 3px #000,inset 3px 3px 0 #a3b4ff,inset -3px -3px 0 #3b4a86}
+.mc:active{transform:translateY(3px);box-shadow:0 0 0 3px #000,inset 3px 3px 0 #4a4a4a,inset -3px -3px 0 #b0b0b0}
+.mc.green{background:#3f9b2c;box-shadow:0 0 0 3px #000,inset 3px 3px 0 #7be15f,inset -3px -3px 0 #1f5c14}
+.mc.green:hover{background:#4fb838;color:#fff}
+.mc.red{background:#b5702a;box-shadow:0 0 0 3px #000,inset 3px 3px 0 #f0b070,inset -3px -3px 0 #6b3d12}
+
+/* drop */
+#drop{padding:22px 10px;text-align:center;cursor:pointer;background:#161616;border:4px dashed #6f6f6f;color:#bdbdbd;font:10px/1.9 'Press Start 2P',monospace;transition:.15s}
+#drop .ic{display:block;font-size:30px;margin-bottom:8px}
+#drop.on,#drop:hover{border-color:#ffdc3a;color:#ffdc3a;background:#24220f}
+
+
+
+/* XP bar */
+.lvl{text-align:center;font:15px 'Press Start 2P',monospace;color:#80ff20;text-shadow:-2px 0 #000,2px 0 #000,0 -2px #000,0 2px #000,2px 2px 0 #000;margin-bottom:8px}
+.lvl.up{animation:lup .6s cubic-bezier(.2,1.8,.3,1)}
+@keyframes lup{from{transform:scale(2.2)}to{transform:scale(1)}}
+.xp{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+.seg{height:18px;position:relative;overflow:hidden;background:#111;box-shadow:inset 3px 3px 0 #000,inset -3px -3px 0 #555}
+.seg i{position:absolute;inset:3px;background:linear-gradient(#c4ff5e 0 40%,#69c915 40%);transform:scaleX(0);transform-origin:left;transition:transform .5s steps(8)}
+.seg.done i{transform:scaleX(1)}
+.seg.cur i{transform:scaleX(.45);transition:none}
+.seg.bad i{background:#e0903a;transform:scaleX(1);animation:none}
+.lb{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:6px;font:7px 'Press Start 2P',monospace;color:#a8a8a8;text-align:center}
+.stt{display:flex;justify-content:space-between;gap:10px;margin-top:12px;align-items:flex-end}
+#st{font-size:23px;min-height:26px;color:#ddd;word-break:break-word}
+#st::after{content:'_';opacity:var(--bl,1)}
+#st.ok{color:#7dff5a}#st.er{color:#ffb36b}
+#tm{font:9px 'Press Start 2P',monospace;color:#ffdc3a;white-space:nowrap}
+#dl{margin-top:14px}
+
+/* error / death */
+#errbox{margin-top:14px;animation:rise .5s both}
+.dead-t{text-align:center;font:13px/1.5 'Press Start 2P',monospace;color:#ffb36b;text-shadow:3px 3px 0 #3a1d00;margin:2px 0 6px}
+.dead-s{text-align:center;color:#f1d3b0;margin-bottom:8px}
+pre{margin:0 0 12px;white-space:pre-wrap;word-break:break-word;background:#0e0e0e;border:3px solid #6b4a2a;color:#ffe6cc;padding:10px;font:19px/1.2 'VT323',monospace;max-height:42vh;overflow:auto}
+
+/* overlay sinematik */
+#vig{position:fixed;inset:0;pointer-events:none;z-index:7;background:radial-gradient(ellipse at center,transparent 58%,rgba(0,0,0,.4));transition:background 1s}
+body.dead #vig{background:radial-gradient(ellipse at center,transparent 45%,rgba(60,32,8,.45))}
+#flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:10}
+
+/* toast achievement */
+#toast{position:fixed;top:calc(12px + env(safe-area-inset-top));left:50%;transform:translate(-50%,-160%);transition:transform .7s cubic-bezier(.2,1.25,.3,1);width:min(340px,92vw);z-index:9;background:#1b1b1b;box-shadow:0 0 0 3px #000,inset 3px 3px 0 #5a5a5a,inset -3px -3px 0 #222;display:flex;gap:12px;padding:12px;align-items:center}
+#toast.show{transform:translate(-50%,0)}
+#toast img{width:40px;height:40px;image-rendering:pixelated;box-shadow:0 0 0 3px #000}
+#toast b{display:block;font:8px 'Press Start 2P',monospace;color:#ffff55;margin-bottom:6px}
+#toast span{font-size:23px}
+
+
+#mute{position:fixed;top:calc(10px + env(safe-area-inset-top));right:10px;z-index:11;width:44px;padding:8px 0;font-size:13px}
+</style>
+</head>
+<body>
+<div id="scene">
+  <canvas id="far" class="ly"></canvas>
+  <canvas id="bok" class="ly"></canvas>
+  <canvas id="mid" class="ly"></canvas>
+  <canvas id="fore" class="ly"></canvas>
+  <canvas id="fore2" class="ly"></canvas>
+</div>
+<canvas class="rays" id="rays"></canvas>
+<canvas id="bg"></canvas>
+
+<div id="app">
+  <div class="head">
+    <div class="logo">GH BUILD<small>RUNNER EDITION</small></div>
+    <div id="splash">Craft it!</div>
+  </div>
+
+  <div class="pn">
+    <div class="row"><input class="slot" id="repo" placeholder="owner/repo" autocomplete="off" autocapitalize="off"><input class="slot" id="br" value="main" placeholder="branch" autocomplete="off" autocapitalize="off"></div>
+    <input class="slot" id="tok" type="password" placeholder="Token GitHub (repo + workflow)">
+  </div>
+
+  <div class="pn">
+    <div id="drop"><span class="ic">⛏</span><span id="dropt">TARUH / PILIH FILE .YML</span></div>
+    <input id="file" type="file" accept=".yml,.yaml" hidden>
+  </div>
+
+  <div class="pn" id="out">
+    <div class="lvl" id="lvl">0</div>
+    <div class="xp" id="xp"><div class="seg"><i></i></div><div class="seg"><i></i></div><div class="seg"><i></i></div><div class="seg"><i></i></div></div>
+    <div class="lb"><span>HAPUS+ADD</span><span>RUN</span><span>BUILD</span><span>DONE</span></div>
+    <div class="stt"><div id="st">Siap. Taruh file .yml</div><div id="tm"></div></div>
+    <button class="mc green" id="dl" hidden>⬇ DOWNLOAD debug.zip</button>
+    <div id="errbox" hidden>
+      <div class="dead-t">🥀 BUNGANYA LAYU</div>
+      <div class="dead-s">Build gagal — copy error ini lalu kirim ke Claude</div>
+      <pre id="errtx"></pre>
+      <button class="mc red" id="cp">COPY ERROR</button>
+    </div>
+  </div>
+</div>
+
+<button class="mc" id="mute" title="Suara">🔊</button>
+<div id="toast"><img id="tic" alt=""><div><b>Advancement Made!</b><span>Build Complete</span></div></div>
+<div id="vig"></div><div id="flash"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const LS={get(k){try{return localStorage.getItem(k)||''}catch(e){return ''}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+['repo','br','tok'].forEach(k=>{const v=LS.get('ghb_'+k);if(v)$(k).value=v;$(k).addEventListener('input',()=>LS.set('ghb_'+k,$(k).value.trim()))});
+
+/* ================= SUARA (sintesis WebAudio, tanpa file) ================= */
+let AC=null,muted=LS.get('ghb_mute')==='1';
+function ac(){try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();if(AC.state==='suspended')AC.resume()}catch(e){}return AC}
+function tone(f,d,type='square',v=.06,t=0,f2){if(muted)return;const a=ac();if(!a)return;const o=a.createOscillator(),g=a.createGain(),s=a.currentTime+t;o.type=type;o.frequency.setValueAtTime(f,s);if(f2)o.frequency.exponentialRampToValueAtTime(f2,s+d);g.gain.setValueAtTime(v,s);g.gain.exponentialRampToValueAtTime(.0001,s+d);o.connect(g);g.connect(a.destination);o.start(s);o.stop(s+d+.03)}
+function noise(d,v=.1,t=0){if(muted)return;const a=ac();if(!a)return;const n=a.sampleRate*d|0,b=a.createBuffer(1,n,a.sampleRate),c=b.getChannelData(0);for(let i=0;i<n;i++)c[i]=(Math.random()*2-1)*(1-i/n);const s=a.createBufferSource(),g=a.createGain();s.buffer=b;g.gain.value=v;s.connect(g);g.connect(a.destination);s.start(a.currentTime+t)}
+const sfx={
+  click:()=>tone(660,.06,'square',.05),
+  drop:()=>{tone(300,.12,'square',.06,0,600);tone(900,.1,'triangle',.05,.08)},
+  place:()=>{noise(.12,.12);tone(150,.1,'square',.05,0,80)},
+  crack:()=>noise(.06,.1),
+  xp:()=>tone(900+Math.random()*500,.07,'sine',.035),
+  levelup:()=>[523,659,784,1047,1319].forEach((f,i)=>tone(f,.18,'triangle',.09,i*.09)),
+  hurt:()=>{tone(230,.4,'sawtooth',.09,0,70);noise(.25,.12)},
+  boom:()=>{noise(.8,.28);tone(95,.55,'sawtooth',.1,0,30)},
+  hiss:()=>noise(.95,.07),
+  wilt:()=>{tone(392,.6,'triangle',.05);tone(311,.95,'triangle',.05,.28)}
+};
+$('mute').textContent=muted?'🔇':'🔊';
+$('mute').onclick=()=>{muted=!muted;LS.set('ghb_mute',muted?'1':'0');$('mute').textContent=muted?'🔇':'🔊';sfx.click()};
+addEventListener('pointerdown',()=>ac(),{once:true});
+
+/* ================= TEXTURE PIXEL (digenerate, tanpa gambar) ================= */
+function mulberry(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function mk(w,h,fn){const c=document.createElement('canvas');c.width=w;c.height=h;fn(c.getContext('2d'));return c}
+const px=(x,X,Y,c)=>{x.fillStyle=c;x.fillRect(X,Y,1,1)};
+const pk=(r,a)=>a[(r()*a.length)|0];
+const GR=['#5da13a','#6bb344','#4f8f30','#79c24e','#5a9c38'],DI=['#866043','#7a5738','#946b4a','#6b4a2f','#8d6748'];
+const texSide=mk(16,16,x=>{const r=mulberry(11);for(let j=0;j<16;j++)for(let i=0;i<16;i++)px(x,i,j,pk(r,DI));for(let i=0;i<16;i++){const d=3+(r()<.45?1:0)+(r()<.15?1:0);for(let j=0;j<d;j++)px(x,i,j,pk(r,GR))}});
+$('tic').src=texSide.toDataURL();
+const SPL=['Craft it!','Hapus → Add → Run!','Aww man...','Tanpa push manual!','Satisfying!','Diamond tier!','100% pixelated!','Ssssss...'];
+$('splash').textContent=SPL[(Math.random()*SPL.length)|0];
+let lvl=+LS.get('ghb_lvl')||0;$('lvl').textContent=lvl;
+
+/* ================= SCENE: taman golden-hour (bokeh, kamera panning, angin, partikel) ================= */
+const LY={far:$('far'),bok:$('bok'),mid:$('mid'),fore:$('fore'),fore2:$('fore2')};
+const CT={};for(const k in LY)CT[k]=LY[k].getContext('2d');
+const DIM={far:6,bok:8,mid:4,fore:9,fore2:4},FACT={far:.25,bok:.6,mid:1,fore:1.8,fore2:1.8};
+const cv=$('bg'),cx=cv.getContext('2d'),S=4;
+/* ===== LOW-POWER: pacing adaptif, efek berat di-bake, bukan dihitung ulang tiap frame ===== */
+const _q=new URLSearchParams(location.search),FPSFIX=+_q.get('fps')||0;   // ?fps=120 utk A/B test
+if(_q.has('exact'))document.body.classList.add('exact');                   // ?exact = nyalain lagi backdrop-blur & blend screen
+const RAYS=$('rays'),SPLASH_EL=$('splash'),BNC=document.querySelector('#drop .ic'),STEL=$('st');
+let fastNow=false,fastUntil=0,lastBn=-1,lastBl=-1,lastFp=-1,lastCur=null,lastFK=-1,lastAct=performance.now();const LT={};
+const ECO=_q.get('eco')!=='0';  // ?eco=0 matiin penurunan fps saat nganggur
+['pointerdown','pointermove','touchstart','keydown','input','wheel','scroll'].forEach(e=>addEventListener(e,()=>{lastAct=performance.now()},{passive:true,capture:true}));
+function bakeRays(){ // sinar matahari: gradient + mask di-bake SEKALI ke texture, animasinya cuma transform
+  const s=.5,w=Math.max(8,Math.ceil(innerWidth*1.4*s)),h=Math.max(8,Math.ceil(innerHeight*1.4*s));
+  RAYS.width=w;RAYS.height=h;const x=RAYS.getContext('2d');x.clearRect(0,0,w,h);
+  const a=105*Math.PI/180,dx=Math.sin(a),dy=-Math.cos(a),L=Math.abs(w*dx)+Math.abs(h*dy),P=150*s,np=Math.ceil(L/P)+2,T=np*P;
+  const sx=w/2-dx*L/2-dx*P,sy=h/2-dy*L/2-dy*P;
+  const g=x.createLinearGradient(sx,sy,sx+dx*T,sy+dy*T),C0='rgba(255,236,170,0)',C1='rgba(255,236,170,.14)';
+  for(let i=0;i<np;i++){const o=i*P;g.addColorStop(o/T,C0);g.addColorStop((o+70*s)/T,C0);g.addColorStop((o+85*s)/T,C1)}
+  g.addColorStop(1,C0);x.fillStyle=g;x.fillRect(0,0,w,h);
+  x.globalCompositeOperation='destination-in';x.save();x.translate(.42*w,.14*h);x.scale(.58*w*Math.SQRT2,.86*h*Math.SQRT2);
+  const m=x.createRadialGradient(0,0,0,0,0,1);m.addColorStop(0,'rgba(0,0,0,1)');m.addColorStop(.72,'rgba(0,0,0,0)');m.addColorStop(1,'rgba(0,0,0,0)');
+  x.fillStyle=m;x.fillRect(-1e3,-1e3,2e3,2e3);x.restore();x.globalCompositeOperation='source-over';
+}
+let W=0,H=0,parts=[],last=performance.now(),ang=30,spd=.7,chipT=0,windK=1,windBoost=0,zoomK=0,focusK=0,wilt=0,lastFar=-1,lastMid=-1;
+let grass=[],flowers=[],vines=[],bokeh=[],fgFl=[],fgBl=[];
+const rnd=(a,b)=>a+Math.random()*(b-a),lerp=(a,b,t)=>a+(b-a)*t,ch=a=>a[(Math.random()*a.length)|0];
+const FLC=[['#ffc93a','#ffe58a'],['#ff9a2e','#ffc27a'],['#e8452c','#ff8a6a'],['#f4f1e6','#ffd84a'],['#e58ab5','#f7c0d8'],['#ffc93a','#ffe58a'],['#ff9a2e','#ffc27a']];
+const windF=(x,t)=>windK*(.55+.45*Math.sin(t*.7+x*.05)+.25*Math.sin(t*1.9+x*.13));
+
+function glow(x,gx,gy,r,col,a){const g=x.createRadialGradient(gx,gy,0,gx,gy,r);g.addColorStop(0,`rgba(${col},${a})`);g.addColorStop(1,`rgba(${col},0)`);x.fillStyle=g;x.fillRect(gx-r,gy-r,r*2,r*2)}
+// latar jauh: bangunan bata, lentera, dinding kayu, semak (digambar sekali, lalu diburamkan)
+function drawFar(){
+  const c=LY.far,x=CT.far,w=c.width,h=c.height,r=mulberry(3);
+  let g=x.createLinearGradient(0,0,0,h);g.addColorStop(0,'#f2e2ad');g.addColorStop(.3,'#c2a867');g.addColorStop(.62,'#5a5f30');g.addColorStop(1,'#1d3314');x.fillStyle=g;x.fillRect(0,0,w,h);
+  const bw=w*.4,bh=h*.6;x.fillStyle='#4d4636';x.fillRect(0,0,bw,bh);
+  const BR=['#8a7e66','#7b705a','#938770','#6c624d'];
+  for(let y=0,row=0;y<bh;y+=4,row++)for(let bx=-(row%2)*6;bx<bw;bx+=12){x.fillStyle=BR[(r()*BR.length)|0];x.fillRect(bx,y,11,3)}
+  g=x.createLinearGradient(0,0,0,bh);g.addColorStop(0,'rgba(255,240,190,.28)');g.addColorStop(1,'rgba(20,18,8,.55)');x.fillStyle=g;x.fillRect(0,0,bw,bh);
+  x.fillStyle='#3d4132';x.fillRect(w*.4,h*.18,w*.26,h*.44);
+  for(let y=h*.18,row=0;y<h*.62;y+=4,row++)for(let bx=w*.4-(row%2)*6;bx<w*.66;bx+=12){x.fillStyle=['#4a4d3b','#40442f','#53563f'][(r()*3)|0];x.fillRect(bx,y|0,11,3)}
+  const lx=w*.44|0;x.fillStyle='#4a3320';x.fillRect(lx,h*.2,2,h*.4);
+  glow(x,lx+1,h*.17,18,'255,184,80',.7);x.fillStyle='#ffb347';x.fillRect(lx-3,h*.13|0,8,9);x.fillStyle='#ffe0a0';x.fillRect(lx-1,h*.13+2|0,4,4);
+  glow(x,w*.63,h*.37,10,'255,160,60',.75);x.fillStyle='#ffa43c';x.fillRect(w*.63-2|0,h*.37-2|0,5,5);
+  for(const wy of[.3,.43,.56]){const yy=h*wy|0;glow(x,3,yy+3,14,'255,190,90',.6);x.fillStyle='#ffc060';x.fillRect(1,yy,5,7)}
+  const rx=w*.78|0;for(let i=rx,k=0;i<w;i+=3,k++){x.fillStyle=['#3a2a1c','#2f2217','#45321f'][k%3];x.fillRect(i,0,3,h*.64)}
+  x.fillStyle='#e0903a';x.fillRect(rx-3,h*.2,2,h*.38);
+  for(let i=0;i<w*1.4;i++){x.fillStyle=['#2f5a1f','#3d7326','#4b8a2c','#27481a'][(r()*4)|0];x.fillRect(r()*w,h*(.54+r()*.22),2+r()*5,2+r()*4)}
+  for(let i=0;i<34;i++){x.fillStyle=['#d9482e','#f2eadf','#e8a53a'][(r()*3)|0];x.fillRect(r()*w,h*(.6+r()*.14),2,2)}
+  g=x.createRadialGradient(w*.42,0,0,w*.42,0,w*.6);g.addColorStop(0,'rgba(255,250,220,.9)');g.addColorStop(.5,'rgba(255,236,170,.3)');g.addColorStop(1,'rgba(255,230,150,0)');x.fillStyle=g;x.fillRect(0,0,w,h);
+}
+function resize(){
+  W=Math.ceil(innerWidth/S);H=Math.ceil(innerHeight/S);cv.width=W;cv.height=H;
+  for(const k in LY){LY[k].width=Math.ceil(innerWidth*1.2/DIM[k]);LY[k].height=Math.ceil(innerHeight*1.1/DIM[k])}
+  const m=LY.mid,mw=m.width,mh=m.height,f=LY.fore,b=LY.bok;
+  grass=Array.from({length:Math.ceil(mw*1.2)},()=>({x:rnd(0,mw),y:mh*rnd(.7,.95),h:rnd(5,17),p:rnd(0,6.28),c:(Math.random()*3)|0})).sort((a,c)=>a.y-c.y);
+  flowers=Array.from({length:Math.ceil(mw/6)},()=>({x:rnd(0,mw),y:mh*rnd(.74,.94),h:rnd(9,26),p:rnd(0,6.28),f:ch(FLC)})).sort((a,c)=>a.y-c.y);
+  vines=Array.from({length:12},(_,i)=>({x:i<9?mw*rnd(.55,.99):mw*rnd(.02,.3),len:mh*rnd(.12,.4),p:rnd(0,6.28)}));
+  fgFl=Array.from({length:7},()=>({nx:rnd(0,1),ny:rnd(.9,.99),hb:rnd(6,16),p:rnd(0,6.28),rb:rnd(1.6,3),f:ch([['#f0a030','#ffd070'],['#d98ab0','#f2c2d8'],['#f2eadf','#ffe27a'],['#9a6aa8','#c9a0d6'],['#ff9a2e','#ffc27a']])}));
+  fgBl=Array.from({length:Math.ceil(f.width/2.4)},()=>({nx:rnd(0,1),ny:rnd(.93,1),hb:rnd(4,12),p:rnd(0,6.28)}));
+  bokeh=Array.from({length:26},()=>({x:rnd(0,b.width),y:rnd(0,b.height),r:rnd(2.5,8.5),a:rnd(.06,.2),p:rnd(0,6.28),vx:rnd(.01,.05),vy:-rnd(.005,.03),c:ch(['255,214,120','255,214,120','255,230,160','210,255,140','255,170,90'])}));
+  drawFar();bakeRays();
+}
+addEventListener('resize',resize);resize();
+
+// midground: sulur menjuntai, rumput & bunga pixel yang bergoyang tertiup angin
+const GC=[['#2f6a1a','#5fae2a','#a6e84f'],['#3a7a20','#6fc032','#b9f06a'],['#276016','#4f9c24','#8fd640']];
+// ===== midground: sama persis, tapi ditulis ke buffer piksel (1 putImageData) bukan ribuan fillRect+parse warna =====
+let mImg=null,mBuf=null,mW=0,mH=0;
+const u32=(()=>{const M=new Map();return h=>{let v=M.get(h);if(v===undefined){const n=parseInt(h.slice(1),16);v=((255<<24)|((n&255)<<16)|(n&65280)|((n>>16)&255))>>>0;M.set(h,v)}return v}})();
+const GCu=GC.map(a=>a.map(u32)),C_V0=u32('#3f7a22'),C_V1=u32('#58a02c'),C_VL0=u32('#9be04a'),C_VL1=u32('#c8f27a'),C_S0=u32('#3a7a20'),C_S1=u32('#5fae2a'),C_Y=u32('#ffd84a'),C_GND=u32('#244a15');
+function px1(x,y,c){if(x>=0&&y>=0&&x<mW&&y<mH)mBuf[y*mW+x]=c}
+function rct(x,y,w,h,c){if(x<0){w+=x;x=0}if(y<0){h+=y;y=0}if(x+w>mW)w=mW-x;if(y+h>mH)h=mH-y;if(w<=0||h<=0)return;for(let j=0;j<h;j++){const o=(y+j)*mW+x;for(let i=0;i<w;i++)mBuf[o+i]=c}}
+function drawMid(t){
+  const c=LY.mid,x=CT.mid,w=c.width,h=c.height;
+  if(!mImg||mW!==w||mH!==h){mW=w;mH=h;mImg=x.createImageData(w,h);mBuf=new Uint32Array(mImg.data.buffer)}else mBuf.fill(0);
+  for(const v of vines)for(let k=0;k<v.len;k++){
+    const f=k/v.len,sw=windF(v.x,t)*3.6*f*f+Math.sin(t*1.3+v.p+k*.05)*.7*f,px=v.x+sw|0;
+    px1(px,k,k%7<2?C_V0:C_V1);
+    if(k%6===3){const s=((k/6|0)%2)?1:-3;rct(px+s,k,3,2,C_VL0);rct(px+s,k,2,1,C_VL1)}
+  }
+  for(const b of grass){
+    const bh=b.h*(1-.25*wilt),A=(2+b.h*.28)*windF(b.x,t)+Math.sin(t*2.6+b.p)*.5+wilt*b.h*.3,col=GCu[b.c];
+    for(let k=0;k<bh;k++){const f=k/bh;px1(b.x+A*f*f|0,b.y-k|0,f<.4?col[0]:f<.75?col[1]:col[2])}
+  }
+  for(const fl of flowers){
+    const fh=fl.h*(1-.3*wilt),A=(2+fl.h*.22)*windF(fl.x,t)+Math.sin(t*2.1+fl.p)*.5+wilt*fl.h*.55;
+    for(let k=0;k<fh;k++){const q=k/fh;px1(fl.x+A*q*q|0,fl.y-k|0,q<.5?C_S0:C_S1)}
+    const hx=fl.x+A|0,hy=fl.y-fh|0,c0=u32(fl.f[0]),c1=u32(fl.f[1]);
+    rct(hx-1,hy-2,3,1,c0);rct(hx-2,hy-1,5,3,c0);rct(hx-1,hy+2,3,1,c0);
+    rct(hx,hy-1,1,2,c1);
+    if(fl.f[0]==='#f4f1e6')rct(hx-1,hy,2,1,C_Y)
+  }
+  rct(0,h*.95|0,w,h,C_GND);
+  x.putImageData(mImg,0,0);
+}
+// foreground: bunga besar. fore = versi halus/out-of-focus, fore2 = versi pixel tajam (muncul saat fokus ditarik ke depan)
+function drawFore(id,t){
+  const c=LY[id],x=CT[id],w=c.width,h=c.height,sc=9/DIM[id],wd=Math.max(1,Math.round(2*sc));x.clearRect(0,0,w,h);
+  for(const b of fgBl){const A=(3+b.hb*.5)*sc*windF(b.nx*204,t)+Math.sin(t*2+b.p)*sc,bh=b.hb*sc,bx=b.nx*w,by=b.ny*h;for(let k=0;k<bh;k++){const q=k/bh;x.fillStyle=q<.5?'#1f4a12':'#356f1c';x.fillRect(bx+A*q*q|0,by-k|0,wd,1)}}
+  for(const f of fgFl){
+    const bx=f.nx*w,by=f.ny*h,fh=f.hb*sc*(1-.3*wilt),A=(3+f.hb*.4)*sc*windF(f.nx*204,t)+Math.sin(t*1.7+f.p)*.8*sc+wilt*f.hb*sc*.6;
+    for(let k=0;k<fh;k++){const q=k/fh;x.fillStyle='#2c5f18';x.fillRect(bx+A*q*q|0,by-k|0,wd,1)}
+    const hx=bx+A,hy=by-fh,r=f.rb*sc;
+    x.fillStyle=f.f[0];x.beginPath();x.arc(hx,hy,r,0,6.283);x.fill();x.fillStyle=f.f[1];x.beginPath();x.arc(hx,hy,r*.45,0,6.283);x.fill();
+  }
+  const g=x.createLinearGradient(0,h*.7,0,h);g.addColorStop(0,'rgba(10,28,8,0)');g.addColorStop(1,'rgba(10,28,8,.7)');x.fillStyle=g;x.fillRect(0,h*.7,w,h*.3);
+}
+// bokeh: lingkaran cahaya hangat yang melayang, ditiup angin
+function drawBok(t,dt){
+  const c=LY.bok,x=CT.bok,w=c.width,h=c.height;x.clearRect(0,0,w,h);x.globalCompositeOperation='lighter';
+  for(const b of bokeh){
+    b.x+=(b.vx+windF(b.x,t)*.025)*dt;b.y+=b.vy*dt;if(b.x>w+b.r)b.x=-b.r;if(b.y<-b.r)b.y=h+b.r;
+    const a=b.a*(.6+.4*Math.sin(t*.6+b.p));
+    const R=b.r*(1+.9*focusK),aa=a*(1+.7*focusK);x.fillStyle=`rgba(${b.c},${aa*.55})`;x.beginPath();x.arc(b.x,b.y,R,0,6.283);x.fill();
+    x.strokeStyle=`rgba(${b.c},${aa})`;x.lineWidth=.7;x.stroke();
+  }
+  x.globalCompositeOperation='source-over';
+}
+function burst(clientX,clientY,cols,n,sp=1.7){const x=clientX/S,y=clientY/S;for(let i=0;i<n;i++){const a=rnd(0,6.283),v=rnd(.3,sp);parts.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-rnd(.4,1.1),g:.07,life:rnd(50,100),c:cols[(Math.random()*cols.length)|0],s:Math.random()<.4?2:1})}}
+function orbsTo(el,fromX,fromY,n){const r=el.getBoundingClientRect(),tx=(r.left+r.width/2)/S,ty=(r.top+r.height/2)/S;for(let i=0;i<n;i++){const a=rnd(0,6.283),v=rnd(.6,2.2);parts.push({x:fromX/S,y:fromY/S,vx:Math.cos(a)*v,vy:Math.sin(a)*v-1.2,g:0,life:260,c:'#9dff3a',s:2,xp:1,tx,ty,delay:rnd(10,40)|0})}}
+
+function frame(now){
+  const t0=performance.now();fastNow=false;
+  const dt=Math.min(3,(now-last)/16.67);last=now;const t=now/1000;
+  // angin: makin kencang saat build, reda saat gagal, hembusan besar saat sukses
+  windK=lerp(windK,(building?1.6:dead?.12:1)+windBoost,.04*dt);
+  focusK=lerp(focusK,building?1:0,.025*dt);wilt=lerp(wilt,dead?1:0,.02*dt);windBoost*=Math.pow(.985,dt);
+  zoomK=lerp(zoomK,building?.12:0,.02*dt);
+  // kamera: panning pelan kiri-kanan + dolly in/out, tiap layer punya parallax sendiri
+  const vw=innerWidth/100,vh=innerHeight/100,pf=1+.8*focusK,px=(Math.sin(t*.09)*3.8+Math.sin(t*.037)*1.3)*vw*pf,py=Math.sin(t*.06+1)*1.2*vh*pf,z=1+.035*(.5+.5*Math.sin(t*.05))+zoomK;
+  for(const k in LY){const s=`translate3d(${(px*FACT[k]).toFixed(1)}px,${(py*FACT[k]).toFixed(1)}px,0) scale(${(1+(z-1)*FACT[k]).toFixed(4)})`;if(LT[k]!==s){LT[k]=s;LY[k].style.transform=s}}
+  // animasi dekor yg dulu CSS (jalan di compositor 120Hz terus-menerus) -> ikut tick ini
+  {const u=(t%36)/18,r=u<1?u:2-u,e=r*r*(3-2*r);RAYS.style.transform=`translateX(${(-4+9*e).toFixed(2)}%) skewX(${(-2+4*e).toFixed(2)}deg)`}
+  {const u=(t/.55)%2,r=u<1?u:2-u,e=r*r*(3-2*r);SPLASH_EL.style.transform=`rotate(-14deg) scale(${(1+.14*e).toFixed(3)})`}
+  {const u=(t/.9)%2,v=Math.floor((u<1?u:2-u)*6)/6;   // steps(6) alternate, sama seperti CSS lama
+   if(v!==lastBn){lastBn=v;BNC.style.transform=v?`translateY(${-8*v}px) rotate(${-12*v}deg)`:''}
+   const cur=building||curSeg>=0?document.querySelector('.seg.cur i'):null;
+   if(cur&&(cur!==lastCur||v!==lastFp)){lastCur=cur;lastFp=v;cur.style.transform=`scaleX(${(.45+.55*v).toFixed(3)})`}
+   const bl=(t%1)<.5?1:0;if(bl!==lastBl){lastBl=bl;STEL.style.setProperty('--bl',bl)}}
+  // rack focus: fokus pindah dari midground ke foreground saat build (latar jauh & tengah memburam, bokeh membesar)
+  const fb=+(2.5+3.5*focusK).toFixed(1);if(fb!==lastFar){LY.far.style.filter=`blur(${fb}px)`;lastFar=fb}
+  const mb=+(4.5*focusK).toFixed(1);if(mb!==lastMid){LY.mid.style.filter=mb>.05?`blur(${mb}px)`:'';lastMid=mb}
+  if(focusK!==lastFK){lastFK=focusK;LY.fore.style.opacity=1-focusK;LY.fore2.style.opacity=focusK}
+  drawMid(t);if(focusK<.98)drawFore('fore',t);if(focusK>.02)drawFore('fore2',t);drawBok(t,dt);
+  // partikel: debu cahaya keemasan, daun & kelopak tertiup angin
+  cx.clearRect(0,0,W,H);
+  if(Math.random()<.2*dt)parts.push({x:rnd(0,W),y:rnd(H*.35,H),vx:rnd(.02,.08),vy:-rnd(.02,.1),g:0,life:rnd(220,460),c:ch(['#ffe08a','#fff3c4','#ffd36b','#ffe9a8']),s:Math.random()<.3?2:1,amb:1,p:rnd(0,6.28)});
+  if(Math.random()<.03*dt)parts.push({x:-2,y:rnd(H*.15,H*.9),vx:.4,vy:0,g:0,life:700,c:ch(['#7dc83c','#a6e84f','#f7c0d8','#ffe58a']),s:2,leaf:1,p:rnd(0,6.28)});
+  for(let i=parts.length-1;i>=0;i--){const q=parts[i];
+    if(q.xp){if(q.delay>0){q.delay-=dt}else{q.vx+=(q.tx-q.x)*.006*dt;q.vy+=(q.ty-q.y)*.006*dt;q.vx*=.93;q.vy*=.93;if(Math.hypot(q.tx-q.x,q.ty-q.y)<4){parts.splice(i,1);if(Math.random()<.35)sfx.xp();continue}}}
+    if(q.amb){q.vx=Math.min(.7,q.vx+(windF(q.x,t)*.004-.0003)*dt);q.vy+=Math.sin(t*1.5+q.p)*.002*dt}
+    if(q.fall){q.vx=Math.sin(t*1.5+q.p)*.18+.05;q.vy=.1+Math.sin(t*2+q.p)*.03}
+    if(q.leaf){q.vx=.25+windF(q.x*2,t)*.5;q.vy=Math.sin(t*3+q.p)*.15+.04}
+    if(q.xp||q.g>0)fastNow=true;q.vy+=q.g*dt;q.x+=q.vx*dt;q.y+=q.vy*dt;q.life-=dt;
+    if(q.life<=0||q.y>H+4||q.y<-70||q.x>W+6){parts.splice(i,1);continue}
+    let al=Math.min(1,q.life/25);
+    if(q.amb)al=Math.min(1,q.life/60,(460-q.life)/60+.2)*(.55+.45*Math.sin(t*3+q.p));
+    al=Math.max(0,al);cx.globalAlpha=al;
+    cx.fillStyle=q.xp?((now/120+i)%2<1?'#9dff3a':'#d4ff7a'):q.c;cx.fillRect(q.x|0,q.y|0,q.s,q.s);
+    if(q.s===2&&(q.amb||q.xp)){cx.globalAlpha=al*.25;cx.fillRect(q.x-1|0,q.y-1|0,4,4)}
+    cx.globalAlpha=1}
+  // pacing: 30fps saat tenang, 60fps hanya saat ada gerakan cepat (burst/XP/shake/rack-focus/angin kencang). Main thread TIDUR di antara frame.
+  const fast=fastNow||now<fastUntil||windBoost>.3||Math.abs(focusK-(building?1:0))>.01;
+  const idle=ECO&&!building?now-lastAct:0,gap=FPSFIX?1000/FPSFIX:fast?1000/60:idle>90000?1000/12:idle>15000?1000/20:1000/30;
+  setTimeout(()=>requestAnimationFrame(frame),Math.max(0,gap-(performance.now()-t0)-8))}
+requestAnimationFrame(frame);
+
+/* ================= EFEK STATUS ================= */
+let building=false,dead=false,won=false,curSeg=-1,tmr=null,crackIv=null,crackK=0,t0b=0;
+const segs=[...document.querySelectorAll('.seg')];
+const setSeg=(n,bad)=>segs.forEach((s,i)=>{s.className='seg'+(i<n?' done':i===n?(bad?' bad':' cur'):'');s.firstElementChild.style.transform=''});
+const cubeC=()=>{const r=$('xp').getBoundingClientRect();return[r.left+r.width*(.08+Math.random()*.84),r.top+r.height/2]};
+function shake(){fastUntil=performance.now()+700;const a=$('app');a.classList.remove('shake');void a.offsetWidth;a.classList.add('shake')}
+function flash(col,ms){const f=$('flash');f.style.background=col;f.style.transition='none';f.style.opacity=.9;requestAnimationFrame(()=>{f.style.transition='opacity '+ms+'ms';f.style.opacity=0})}
+function startFx(){
+  dead=won=building=false;curSeg=-1;clearInterval(crackIv);clearInterval(tmr);
+  document.body.classList.remove('building','dead');$('toast').classList.remove('show');
+  setSeg(-1);
+  t0b=Date.now();$('tm').textContent='00:00';
+  tmr=setInterval(()=>{const s=((Date.now()-t0b)/1000)|0;$('tm').textContent=String(s/60|0).padStart(2,'0')+':'+String(s%60).padStart(2,'0')},500);
+}
+function beginBuild(){building=true;document.body.classList.add('building')}
+function endBuild(){building=false;document.body.classList.remove('building');clearInterval(crackIv);clearInterval(tmr)}
+function win(){
+  won=true;endBuild();setSeg(4);windBoost=1.8;
+  for(let i=0;i<4;i++){const[x,y]=cubeC();burst(x,y,['#9dff3a','#ffe08a','#79c24e','#fff6c0','#ffd36b'],14,2.4);orbsTo($('lvl'),x,y,7)}
+  flash('#fff6c0',700);sfx.levelup();
+  lvl++;LS.set('ghb_lvl',String(lvl));setTimeout(()=>{$('lvl').textContent=lvl;const l=$('lvl');l.classList.remove('up');void l.offsetWidth;l.classList.add('up')},700);
+  setTimeout(()=>{$('toast').classList.add('show');sfx.drop()},350);setTimeout(()=>$('toast').classList.remove('show'),4800);
+}
+function death(){
+  dead=true;endBuild();setSeg(Math.max(0,curSeg),true);
+  document.body.classList.add('dead');sfx.wilt();
+  // angin berhenti, bunga merunduk, kelopak berguguran pelan
+  for(let i=0;i<54;i++)parts.push({x:rnd(0,W),y:rnd(-60,-2),vx:0,vy:.1,g:0,life:rnd(500,800),c:ch(['#ffc93a','#ff9a2e','#e8452c','#f4f1e6','#e58ab5']),s:ch([1,2,2]),fall:1,p:rnd(0,6.28)});
+}
+// dipanggil dari msg(): memetakan teks status -> fase animasi
+function fx(t,c){
+  if(c==='er'){if(!dead)death();return}
+  if(c==='ok'){if(!won)win();return}
+  let n=-1;if(/^Hapus/.test(t))n=0;else if(/^Run/.test(t))n=1;else if(/^Build/.test(t))n=2;else if(/^Siapkan/.test(t))n=3;
+  if(n>=0&&n!==curSeg){curSeg=n;setSeg(n);if(n>=1&&!building)beginBuild()}
+}
+
+/* ================= LOGIKA BUILD (tidak berubah) ================= */
+const drop=$('drop'),fi=$('file');
+drop.onclick=()=>{sfx.click();fi.click()};
+fi.onchange=()=>{pick(fi.files[0]);fi.value=''};
+['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('on')}));
+['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('on')}));
+drop.addEventListener('drop',ev=>pick(ev.dataTransfer.files[0]));
+
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const _msg=(t,c)=>{$('st').className=c||'';$('st').textContent=t};
+const msg=(t,c)=>{_msg(t,c);fx(t,c)};
+
+// cache:'no-store' penting: GitHub API membalas max-age=60 sehingga status di UI telat sampai 1 menit
+async function api(path,opt={},raw){
+  let r;try{r=await fetch(path.startsWith('http')?path:'https://api.github.com'+path,{cache:'no-store',...opt,headers:{Authorization:'Bearer '+$('tok').value.replace(/[^\x21-\x7e]/g,''),Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',...(opt.headers||{})}})}catch(e){throw new Error(e.message+' | Network/CORS gagal: '+path.replace(/\?.*/,'')+'\nBuka lokal (bukan preview Claude), cek internet/adblock/VPN.')}
+  if(raw)return r;
+  if(!r.ok){let m='';try{m=(await r.json()).message}catch(e){}throw new Error(`${r.status} ${m||r.statusText} (${path})`)}
+  return r.status===204?null:r.json();
+}
+function b64(buf){let s='';const b=new Uint8Array(buf);for(let i=0;i<b.length;i+=0x8000)s+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(s)}
+function dl(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
+
+// Pastikan yml selalu punya trigger push + workflow_dispatch (tanpa filter), apa pun isi "on:" aslinya.
+// Hanya menyentuh key "on:" di kolom 0 -> isi heredoc / block scalar (selalu menjorok) tidak pernah kena.
+function injectOn(text){
+  text=text.replace(/^\uFEFF/,'');
+  const nl=text.includes('\r\n')?'\r\n':'\n';
+  const L=text.split(/\r?\n/);
+  const block=['on:','  push:','  workflow_dispatch:'];
+  const i=L.findIndex(l=>/^("on"|'on'|on)\s*:/.test(l));
+  if(i<0){
+    const n=L.findIndex(l=>/^name\s*:/.test(l));
+    L.splice(n<0?0:n+1,0,...block);
+  }else{
+    let j=i+1;
+    while(j<L.length&&(L[j]===''||/^\s/.test(L[j])||/^#/.test(L[j])||/^-/.test(L[j])))j++;
+    while(j>i+1&&L[j-1]==='')j--; // sisakan baris kosong pemisah
+    L.splice(i,j-i,...block);
+  }
+  return L.join(nl);
+}
+
+let busy=false,result=null;
+async function pick(f){
+  if(!f||busy)return;
+  const repo=$('repo').value.trim(),br=$('br').value.trim()||'main';
+  if(!/^[\w.-]+\/[\w.-]+$/.test(repo)||!$('tok').value.trim()){alert('Isi repo & token dulu.');return}
+  busy=true;result=null;ac();
+  $('dropt').textContent='📄 '+f.name.toUpperCase();
+  $('dl').hidden=true;$('errbox').hidden=true;
+  startFx();
+  try{await run(f,repo,br)}catch(e){fail(String(e.message||e))}
+  busy=false;
+}
+function fail(t){msg('✕ Gagal','er');$('errbox').hidden=false;$('errtx').textContent=t}
+
+async function run(f,repo,br){
+  const text=injectOn(await f.text());
+  const wf=f.name.replace(/\.ya?ml$/i,'').replace(/[^\w.-]+/g,'-').replace(/^-+|-+$/g,'')+'.yml';
+  const path='.github/workflows/'+wf;
+
+  // 1. HAPUS semua yml lama + 2. ADD yml baru (satu commit; trigger push sudah dipastikan ada)
+  msg('Hapus yml lama + add…');
+  const content=b64(new TextEncoder().encode(text).buffer);
+  const bp=br.split('/').map(encodeURIComponent).join('/');
+  let base=null;
+  try{base=(await api(`/repos/${repo}/git/ref/heads/${bp}`)).object.sha}catch(e){if(!/^(404|409)/.test(e.message))throw e}
+  let head;
+  if(!base){
+    head=(await api(`/repos/${repo}/contents/${path}`,{method:'PUT',body:JSON.stringify({message:'ci: add '+wf,content,branch:br})})).commit.sha;
+  }else{
+    let old=[];
+    try{
+      const l=await api(`/repos/${repo}/contents/.github/workflows?ref=${encodeURIComponent(br)}`);
+      old=(Array.isArray(l)?l:[]).filter(x=>x.type==='file'&&/\.ya?ml$/i.test(x.name)&&x.path!==path);
+    }catch(e){if(!/^404/.test(e.message))throw e}
+    const bc=await api(`/repos/${repo}/git/commits/${base}`);
+    const blob=await api(`/repos/${repo}/git/blobs`,{method:'POST',body:JSON.stringify({content,encoding:'base64'})});
+    const tree=await api(`/repos/${repo}/git/trees`,{method:'POST',body:JSON.stringify({base_tree:bc.tree.sha,tree:[{path,mode:'100644',type:'blob',sha:blob.sha},...old.map(x=>({path:x.path,mode:'100644',type:'blob',sha:null}))]})});
+    const cm=await api(`/repos/${repo}/git/commits`,{method:'POST',body:JSON.stringify({message:'ci: replace workflows with '+wf,tree:tree.sha,parents:[base]})});
+    await api(`/repos/${repo}/git/refs/heads/${bp}`,{method:'PATCH',body:JSON.stringify({sha:cm.sha})});
+    head=cm.sha;
+  }
+
+  // 3. RUN (satu saja)
+  msg('Run…');
+  const t0=Date.now();let rn=null,dispatched=false,dErr='';
+  const recent=async()=>(await api(`/repos/${repo}/actions/runs?branch=${encodeURIComponent(br)}&per_page=5`)).workflow_runs.find(x=>new Date(x.created_at)>=new Date(t0-15000))||null;
+  while(!rn){
+    rn=(await api(`/repos/${repo}/actions/runs?head_sha=${head}&per_page=5`)).workflow_runs[0]||null; // run dari push
+    if(rn)break;
+    const el=Date.now()-t0;
+    if(el>15000&&!dispatched){ // fallback: push tidak memicu run -> cek dulu, baru dispatch (anti dobel)
+      rn=await recent();if(rn)break;
+      try{await api(`/repos/${repo}/actions/workflows/${wf}/dispatches`,{method:'POST',body:JSON.stringify({ref:br})});dispatched=true}catch(e){dErr=e.message}
+    }
+    if(dispatched){rn=await recent();if(rn)break}
+    if(el>90000)throw new Error('Run tidak muncul.'+(dErr?'\n'+dErr:''));
+    await sleep(1500);
+  }
+  const url=rn.html_url;
+  while(rn.status!=='completed'){
+    try{
+      const jb=(await api(`/repos/${repo}/actions/runs/${rn.id}/jobs`)).jobs[0];
+      const cur=jb&&jb.steps&&jb.steps.find(s=>s.status==='in_progress');
+      msg('Build… '+(cur?cur.name:''));
+    }catch(e){msg('Build…')}
+    await sleep(3000);
+    rn=await api(`/repos/${repo}/actions/runs/${rn.id}`);
+  }
+
+  // 4. hasil
+  if(rn.conclusion!=='success'){
+    const em=await mainError(repo,rn)+'\n\n'+url;
+    $('errbox').hidden=false;$('errtx').textContent=em;
+    msg('✕ Build '+rn.conclusion,'er');
+    return;
+  }
+  msg('Siapkan download…');
+  result=await prepare(repo,rn);
+  if(!result){msg('✓ Sukses, tapi tidak ada artifact/asset.','ok');return}
+  msg('✓ Sukses · '+result.label+' · '+(result.blob.size/1048576).toFixed(1)+' MB','ok');
+  $('dl').hidden=false;
+}
+$('dl').onclick=()=>{sfx.click();if(result)dl(result.blob,'debug.zip')};
+
+async function prepare(repo,rn){
+  const arts=(await api(`/repos/${repo}/actions/runs/${rn.id}/artifacts`)).artifacts;
+  if(arts.length){
+    const r=await api(`/repos/${repo}/actions/artifacts/${arts[0].id}/zip`,{},true);
+    if(!r.ok)throw new Error('Download artifact gagal: '+r.status);
+    return {blob:await r.blob(),label:arts[0].name};
+  }
+  const rel=(await api(`/repos/${repo}/releases?per_page=5`)).find(x=>x.target_commitish===rn.head_sha||new Date(x.created_at)>=new Date(rn.run_started_at));
+  if(!rel||!rel.assets.length)return null;
+  const z=new JSZip();
+  for(const a of rel.assets){
+    const r=await api(`/repos/${repo}/releases/assets/${a.id}`,{headers:{Accept:'application/octet-stream'}},true);
+    if(!r.ok)throw new Error('Download asset gagal: '+a.name);
+    z.file(a.name,await r.blob());
+  }
+  return {blob:await z.generateAsync({type:'blob'}),label:rel.assets.map(a=>a.name).join(', ')};
+}
+
+// ================= PEMILAH ERROR OTOMATIS =================
+// 1) log dipotong ke step yang gagal (pakai timestamp) -> warning/noise step lain tidak ikut
+// 2) hanya baris bermakna error yang diambil (Kotlin/Java/AAPT/Gradle/shell/dependency), semua job yang gagal
+// 3) dedup + path runner dibersihkan + dibatasi panjangnya supaya enak di-copy
+const ANSI=/\x1b\[[0-9;]*[A-Za-z]/g,TSR=/^(\d{4}-\d\d-\d\dT[\d:.]+Z) ?/;
+const NOISE=[/^w: /,/(^|\s)warning:/i,/##\[warning\]/,/^\s*at (org\.gradle|java\.|jdk\.|sun\.|kotlin\.|com\.android\.)/,/\b0 errors?\b/i,/no errors/i,/^Download(ing)? /,/Run with --(stacktrace|info|debug|scan)/,/Get more help at/,/^\s*(Deprecated|BUILD FAILED in)/];
+const ERRP=[
+  /^e: /,                                   // Kotlin
+  /:\d+(:\d+)?: error:/,                    // javac / gcc / aapt
+  /(^|\s)error:\s/i,/^ERROR\b/,/^Error:/,/^##\[error\]/,
+  /Unresolved reference/,/cannot find symbol/,/package .* does not exist/,/incompatible types/,/cannot be applied/,/Type mismatch/,/None of the following candidates/,
+  /Execution failed for task/,/> Task :\S+ FAILED/,/^FAILURE:/,/^Caused by:/,
+  /Could not (resolve|find|determine|get|download|create|initialize)/,/Failed to (resolve|apply|find|install|compile|transform)/,
+  /^[\w.$]+(Exception|Error)(:|$)/,/(Exception|Error): /,
+  /AAPT2?.*(error|failed)/i,/resource .* not found/i,/Manifest merger failed/i,/Duplicate class/i,/Duplicate resources/i,
+  /command not found/,/No such file or directory/,/Permission denied/,/SDK location not found/,/licen[cs]e.*not accepted/i,
+  /syntax error/i,/unexpected (EOF|end of file|token)/i,/^fatal:/,/\bFAILED\b/,
+  /Process completed with exit code [1-9]/
+];
+function extractErrors(raw,fs){
+  // potong ke jendela waktu step yang gagal
+  let lines=raw.split(/\r?\n/);
+  if(fs&&fs.started_at&&fs.completed_at){
+    const a=Date.parse(fs.started_at)-1500,b=Date.parse(fs.completed_at)+1500;let inWin=true;const cut=[];
+    for(const l of lines){const m=l.match(TSR);if(m){const t=Date.parse(m[1]);inWin=t>=a&&t<=b}if(inWin)cut.push(l)}
+    if(cut.length>3)lines=cut;
+  }
+  const L=lines.map(l=>l.replace(TSR,'').replace(ANSI,'').replace(/file:\/\//g,'').replace(/\/home\/runner\/work\/[^/]+\/[^/]+\//g,'').trimEnd());
+  const seen=new Set(),errs=[];let exit='';
+  const add=l=>{const k=l.trim();if(!k||seen.has(k))return;seen.add(k);errs.push(l)};
+  for(let i=0;i<L.length;i++){
+    const l=L[i];if(!l.trim()||NOISE.some(r=>r.test(l)))continue;
+    if(/Process completed with exit code/.test(l)){exit=l.replace('##[error]','');continue}
+    if(!ERRP.some(r=>r.test(l)))continue;
+    add(l);
+    // konteks: baris kode + caret / symbol / location yang menyertai error javac
+    if(/:\d+(:\d+)?: error:/.test(l)||/cannot find symbol/.test(l)){
+      for(let j=i+1;j<Math.min(L.length,i+4);j++){const n=L[j];if(!n.trim()||/^\S/.test(n)&&!/^(symbol|location):/.test(n)||ERRP.some(r=>r.test(n)))break;add(n)}
+    }
+  }
+  // ringkasan Gradle: blok "What went wrong"
+  const gw=[],w=L.findIndex(l=>/What went wrong/.test(l));
+  if(w>=0)for(let j=w+1;j<Math.min(L.length,w+9);j++){const n=L[j];if(/^\* Try:|^\* Get/.test(n))break;if(n.trim()&&!seen.has(n.trim()))gw.push(n)}
+  let out=[];
+  if(errs.length)out.push(`${errs.length} baris error:\n`+errs.join('\n'));
+  if(gw.length)out.push('Gradle:\n'+gw.join('\n'));
+  if(!out.length){ // tidak ada pola dikenali -> ekor log
+    out.push(L.filter(l=>l.trim()&&!/^##\[(group|endgroup)\]/.test(l)).slice(-25).join('\n'));
+  }
+  if(exit&&!errs.length)out.push(exit);
+  let txt=out.join('\n\n');
+  if(txt.length>6000)txt=txt.slice(0,6000)+'\n… (dipotong, lihat log lengkap di link)';
+  return txt;
+}
+async function mainError(repo,rn){
+  const jobs=(await api(`/repos/${repo}/actions/runs/${rn.id}/jobs?per_page=50`)).jobs;
+  const bad=jobs.filter(j=>j.conclusion==='failure');
+  const list=bad.length?bad:jobs.slice(0,1);
+  const res=[];
+  for(const jb of list){
+    const fs=(jb.steps||[]).find(s=>s.conclusion==='failure');
+    const head=(list.length>1?`[Job: ${jb.name}] `:'')+(fs?`Step gagal: ${fs.name}`:'Job gagal');
+    let body;
+    try{
+      const r=await api(`/repos/${repo}/actions/jobs/${jb.id}/logs`,{},true);
+      body=r.ok?extractErrors(await r.text(),fs):`(log tidak bisa diambil: ${r.status})`;
+    }catch(e){body='(log gagal diambil: '+e.message+')'}
+    res.push(head+'\n\n'+body);
+  }
+  return res.join('\n\n————————\n\n');
+}
+$('cp').onclick=async()=>{sfx.click();try{await navigator.clipboard.writeText($('errtx').textContent);$('cp').textContent='COPIED ✓';setTimeout(()=>$('cp').textContent='COPY ERROR',1500)}catch(e){}};
+</script>
+</body>
+</html>
