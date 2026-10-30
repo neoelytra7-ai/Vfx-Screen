@@ -1,0 +1,230 @@
+name: Cinema Sky APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Build APK
+        run: |
+          set -e
+          A=$ANDROID_HOME
+          BT=$A/build-tools/$(ls $A/build-tools|grep -E '^[0-9.]+$'|sort -V|tail -1)
+          AJ=$A/platforms/$(ls $A/platforms|grep -E '^android-[0-9]+$'|sort -V|tail -1)/android.jar
+          K=$GITHUB_WORKSPACE/wp.keystore
+          if [ ! -f $K ]; then
+            keytool -genkeypair -keystore $K -alias k -keyalg RSA -keysize 2048 -validity 36500 -storepass wallpaper -keypass wallpaper -dname "CN=Sky,O=Sky,C=ID"
+            (git config user.name bot && git config user.email bot@x && git add wp.keystore && git commit -qm "ci: keystore" && git push -q) || echo "::warning::keystore gagal di-push, update berikutnya tidak bisa menimpa"
+          fi
+          mkdir -p /tmp/b/{s/x/sky,res/xml,res/drawable,assets,o,d,out} && cd /tmp/b
+          cat > M.xml <<'X'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="x.sky">
+          <uses-feature android:name="android.software.live_wallpaper" android:required="true"/>
+          <application android:label="Cinema Sky" android:icon="@drawable/i" android:hardwareAccelerated="true" android:allowBackup="false">
+          <activity android:name=".Main" android:exported="true" android:theme="@android:style/Theme.NoDisplay">
+          <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
+          <service android:name=".WP" android:exported="true" android:permission="android.permission.BIND_WALLPAPER">
+          <intent-filter><action android:name="android.service.wallpaper.WallpaperService"/></intent-filter>
+          <meta-data android:name="android.service.wallpaper" android:resource="@xml/wp"/></service>
+          </application></manifest>
+          X
+          cat > res/xml/wp.xml <<'X'
+          <wallpaper xmlns:android="http://schemas.android.com/apk/res/android" android:thumbnail="@drawable/i"/>
+          X
+          cat > res/drawable/i.xml <<'X'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108"><path android:fillColor="#3d8fe0" android:pathData="M0,0h108v108h-108z"/><path android:fillColor="#fff7d0" android:pathData="M72,24m-12,0a12,12 0 1,0 24,0a12,12 0 1,0 -24,0"/><path android:fillColor="#4fae3e" android:pathData="M0,78C30,66 70,66 108,78v30h-108z"/></vector>
+          X
+          cat > s/x/sky/WP.java <<'X'
+          package x.sky;
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.hardware.*;
+          import android.os.*;
+          import android.service.wallpaper.WallpaperService;
+          import android.util.DisplayMetrics;
+          import android.view.*;
+          import android.webkit.*;
+          public class WP extends WallpaperService{
+           public Engine onCreateEngine(){return new E();}
+           static class V extends WebView{
+            V(Context c){super(c);}
+            void att(){try{onAttachedToWindow();onWindowVisibilityChanged(0);onVisibilityChanged(this,0);}catch(Throwable e){}}
+            void vis(boolean b){try{onWindowVisibilityChanged(b?0:8);}catch(Throwable e){}}
+           }
+           public class E extends Engine implements SensorEventListener,Runnable{
+            V v;Handler h=new Handler(Looper.getMainLooper());SensorManager sm;Sensor ac;
+            boolean on,ld;int sw,sh,gap=33,fw,fh;float tx,ty,ox=.5f;
+            public void onCreate(SurfaceHolder s){super.onCreate(s);setTouchEventsEnabled(true);
+             sm=(SensorManager)getSystemService(SENSOR_SERVICE);ac=sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+             v=new V(WP.this);WebSettings t=v.getSettings();t.setJavaScriptEnabled(true);
+             v.setBackgroundColor(0xff4f9be0);v.setOverScrollMode(2);v.addJavascriptInterface(this,"A");fit();}
+            void fit(){DisplayMetrics m=new DisplayMetrics();((WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(m);
+             int a=(int)(m.widthPixels*.6f),b=(int)(m.heightPixels*.6f);if(a!=fw||b!=fh){fw=a;fh=b;getSurfaceHolder().setFixedSize(a,b);}}
+            @JavascriptInterface public void f(int n){gap=1000/n;}
+            public void onSurfaceChanged(SurfaceHolder s,int f,int w,int hh){super.onSurfaceChanged(s,f,w,hh);sw=w;sh=hh;
+             v.measure(View.MeasureSpec.makeMeasureSpec(w,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(hh,View.MeasureSpec.EXACTLY));v.layout(0,0,w,hh);
+             if(!ld){ld=true;v.att();v.loadUrl("file:///android_asset/index.html");}else v.reload();}
+            public void onVisibilityChanged(boolean b){on=b;if(v==null)return;h.removeCallbacks(this);
+             if(b){fit();v.onResume();v.resumeTimers();v.vis(true);if(ac!=null)sm.registerListener(this,ac,SensorManager.SENSOR_DELAY_GAME);
+              v.evaluateJavascript("window.W&&W.wake()",null);h.post(this);}
+             else{sm.unregisterListener(this);v.evaluateJavascript("window.W&&W.z()",null);v.vis(false);v.onPause();v.pauseTimers();}}
+            public void run(){if(!on)return;
+             v.evaluateJavascript("window.W&&W.s("+tx+","+ty+","+ox+")",null);
+             SurfaceHolder s=getSurfaceHolder();Canvas c=null;
+             try{c=s.lockCanvas();if(c!=null)v.draw(c);}catch(Throwable e){}
+             finally{if(c!=null)try{s.unlockCanvasAndPost(c);}catch(Throwable e){}}
+             h.postDelayed(this,gap);}
+            public void onTouchEvent(MotionEvent e){if(v!=null&&sw>0)v.evaluateJavascript("window.W&&W.p("+e.getX()/sw+","+e.getY()/sh+","+e.getActionMasked()+")",null);}
+            public void onOffsetsChanged(float x,float y,float xs,float ys,int xp,int yp){ox=x;}
+            public void onSensorChanged(SensorEvent e){tx=Math.max(-1,Math.min(1,e.values[0]/5f));ty=Math.max(-1,Math.min(1,(e.values[1]-6f)/5f));}
+            public void onAccuracyChanged(Sensor s,int a){}
+            public void onDestroy(){on=false;h.removeCallbacks(this);try{sm.unregisterListener(this);v.destroy();}catch(Throwable e){}super.onDestroy();}
+           }
+          }
+          X
+          cat > s/x/sky/Main.java <<'X'
+          package x.sky;
+          import android.app.*;
+          import android.content.*;
+          import android.os.Bundle;
+          public class Main extends Activity{
+           protected void onCreate(Bundle b){super.onCreate(b);
+            try{startActivity(new Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,new ComponentName(this,WP.class)));}
+            catch(Exception e){startActivity(new Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER));}
+            finish();}
+          }
+          X
+          cat > assets/index.html <<'X'
+          <!DOCTYPE html><html><head><meta charset=utf-8>
+          <meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+          <style>*{margin:0}html,body{height:100%;overflow:hidden;background:#4f9be0}canvas,#gr,#vg,#gn{position:fixed;pointer-events:none}canvas{will-change:transform}#gr,#vg{inset:0}
+          #vg{background:radial-gradient(ellipse 80% 75% at 50% 45%,transparent 55%,rgba(5,25,65,.45))}
+          #gr{background:linear-gradient(165deg,rgba(255,190,110,.16),transparent 42%,rgba(20,100,190,.14))}
+          #gn{left:-20%;top:-20%;width:140%;height:140%;opacity:.08;background-size:64px}</style></head>
+          <body><div id=gr></div><div id=vg></div><div id=gn></div><script>
+          const M=Math,R=M.random,$=i=>document.getElementById(i),D=devicePixelRatio||1,IW=innerWidth,IH=innerHeight,U=IW/100,UH=IH/100,VP=IW*D/100;
+          const mul=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=M.imul(a^a>>>15,1|a);t=t+M.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
+          const cl=(v,a,b)=>v<a?a:v>b?b:v,sm=(a,b,k,d)=>a+(b-a)*(1-M.exp(-k*d)),ss=v=>(v=cl(v,0,1))*v*(3-2*v);
+          const hx=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+          const pk=(a,b,m)=>{m=cl(m,0,1);return((255<<24)|((a[2]+(b[2]-a[2])*m|0)<<16)|((a[1]+(b[1]-a[1])*m|0)<<8)|(a[0]+(b[0]-a[0])*m|0))>>>0};
+          /* layer: nama,lebar vw,tinggi vh,downscale q,parallax F,zoom-couple Kz,warp-couple Kw */
+          const LY={};
+          function L(n,w,h,q,F,Kz,Kw,o){o=o||{};const c=document.createElement('canvas'),l=o.l!=null?o.l:-(w-100)/2,t=o.t!=null?o.t:-(h-100)/2;
+          c.style.cssText=`left:${l}vw;top:${t}vh;width:${w}vw;height:${h}vh;`+(o.org?`transform-origin:${o.org}`:'');
+          c.width=M.ceil(w*VP/q);c.height=M.ceil(h*IH*D/100/q);$('gr').before(c);
+          return LY[n]={c,x:c.getContext('2d'),w:c.width,h:c.height,q,F,Kz,Kw,dr:o.dr||0,ub:VP/q}}
+          L('sky',120,110,3,.04,.2,-.04);L('c1',260,70,2.6,.1,.3,-.05,{l:-15,t:-5,dr:.9});L('c2',260,80,2.6,.2,.5,-.07,{l:-15,t:-5,dr:1.8});
+          L('hl',130,115,2,.35,.7,-.02);L('hb',130,115,2,.35,.7,-.02);L('mid',140,120,1.5,1,1,.14);L('mb',140,120,6,1,1,.14);
+          L('rays',140,140,3,.12,.2,0);L('fb',170,130,2,2.2,2.6,.5,{org:'50% 100%'});L('fs',170,130,2,2.2,2.6,.5,{org:'50% 100%'});
+          L('bk',120,110,3,1.4,1.6,.9);L('fl',120,110,4,-.35,0,.3);
+
+          /* ===== bake sekali (berat di awal, ringan selamanya) ===== */
+          const rg=(x,cx,cy,r,st)=>{const g=x.createRadialGradient(cx,cy,0,cx,cy,r);st.forEach(([o,c])=>g.addColorStop(o,c));x.fillStyle=g;x.fillRect(cx-r,cy-r,2*r,2*r)};
+          const puff=(x,cx,cy,r,c,a)=>rg(x,cx,cy,r,[[0,`rgba(${c},${a})`],[.55,`rgba(${c},${a*.6})`],[1,`rgba(${c},0)`]]);
+          function blur(d,s,px){const x=d.x;if('filter' in x){x.filter=`blur(${px}px)`;x.drawImage(s.c,0,0,d.w,d.h);x.filter='none'}else{const t=document.createElement('canvas');t.width=d.w/6|0;t.height=d.h/6|0;t.getContext('2d').drawImage(s.c,0,0,t.width,t.height);x.drawImage(t,0,0,d.w,d.h)}}
+          function bakeSky(){const{x,w,h}=LY.sky,g=x.createLinearGradient(0,0,0,h*.62);[[0,'#1b64c8'],[.35,'#3a8cdf'],[.7,'#78bff2'],[1,'#d4eefb']].forEach(([o,c])=>g.addColorStop(o,c));
+          x.fillStyle=g;x.fillRect(0,0,w,h);const sx=w*.7,sy=h*.2;puff(x,sx,sy,w*.55,'255,248,220',.75);puff(x,sx,sy,w*.17,'255,255,245',1);
+          x.globalCompositeOperation='lighter';x.save();x.translate(sx,sy);x.scale(1,.012);puff(x,0,0,w*.7,'150,200,255',.6);x.restore();x.globalCompositeOperation='source-over'}
+          function bakeCl(n,sd,cnt,sz,yr){const{x,w,h}=LY[n],r=mul(sd),tile=w/2,vw=w/260;
+          for(let i=0;i<cnt;i++){const cx=r()*tile,cy=h*(yr[0]+r()*(yr[1]-yr[0])),s=sz*vw*(.6+r()*.8),ps=[];
+          for(let k=0;k<16;k++){const dx=(r()-.5)*1.7*s,dy=-(1-M.abs(dx)/(.85*s))*r()*.38*s;ps.push([dx,dy,s*(.17+r()*.2)])}
+          for(const t of[0,tile]){for(const p of ps)puff(x,cx+t+p[0],cy+p[1]+.07*s,p[2]*1.05,'120,152,205',.5);
+          for(const p of ps)puff(x,cx+t+p[0]-.03*s,cy+p[1]-.03*s,p[2],'255,255,255',.85)}}}
+          function hill(x,w,h,y0,a,k,sd,c0,c1,y1){x.beginPath();x.moveTo(0,h);const fn=i=>y0+M.sin(i*k+sd)*a+M.sin(i*k*2.7+sd*3)*a*.35;
+          for(let i=0;i<=w;i+=3)x.lineTo(i,fn(i));x.lineTo(w,h);x.closePath();const g=x.createLinearGradient(0,y0-a,0,y1);g.addColorStop(0,c0);g.addColorStop(1,c1);x.fillStyle=g;x.fill();return fn}
+          function bakeHills(){const o=LY.hl,x=o.x,w=o.w,h=o.h,r=mul(9),k=6.28/(w*.55);
+          hill(x,w,h,.54*h,.012*h,k*.8,1,'#9ccbe4','#c3e2dc',.72*h);
+          const f2=hill(x,w,h,.578*h,.016*h,k,4,'#5fa684','#8fcaa2',.76*h);
+          for(let i=0;i<34;i++){const tx=r()*w,ty=f2(tx)+h*.004,rd=w*(.012+r()*.014);puff(x,tx,ty-rd*.3,rd,'38,100,64',.95);puff(x,tx-rd*.25,ty-rd*.55,rd*.6,'120,190,120',.55)}
+          const g=x.createLinearGradient(0,.5*h,0,.72*h);g.addColorStop(0,'rgba(236,247,252,0)');g.addColorStop(.5,'rgba(236,247,252,.5)');g.addColorStop(1,'rgba(236,247,252,0)');x.fillStyle=g;x.fillRect(0,.5*h,w,.22*h);
+          hill(x,w,h,.625*h,.011*h,k*1.3,7,'#58b246','#2c7a22',h);
+          for(let i=0;i<7;i++){x.save();x.translate(r()*w,h*(.68+r()*.2));x.scale(1,.16);puff(x,0,0,w*(.12+r()*.1),'255,240,150',.2);x.restore()}
+          blur(LY.hb,o,w*.012)}
+          function bakeRays(){const o=LY.rays,x=o.x,w=o.w,h=o.h,a=120*M.PI/180,dx=M.sin(a),dy=-M.cos(a),Ln=M.abs(w*dx)+M.abs(h*dy),P=w*.2,np=M.ceil(Ln/P)+2,T=np*P,sx=w/2-dx*Ln/2-dx*P,sy=h/2-dy*Ln/2-dy*P,g=x.createLinearGradient(sx,sy,sx+dx*T,sy+dy*T),C='255,248,215';
+          for(let i=0;i<np;i++){const q=i*P;g.addColorStop(q/T,`rgba(${C},0)`);g.addColorStop((q+.45*P)/T,`rgba(${C},0)`);g.addColorStop((q+.65*P)/T,`rgba(${C},.17)`);g.addColorStop((q+.9*P)/T,`rgba(${C},0)`)}
+          x.fillStyle=g;x.fillRect(0,0,w,h);x.globalCompositeOperation='destination-in';rg(x,.671*w,.264*h,w*.75,[[0,'rgba(0,0,0,1)'],[.6,'rgba(0,0,0,.35)'],[1,'rgba(0,0,0,0)']]);x.globalCompositeOperation='source-over'}
+          function bakeFl(){const o=LY.fl,x=o.x,w=o.w,h=o.h,P=(X,Y)=>[(X+10)/120*w,(Y+5)/110*h],s=P(74,17),c=P(50,50),v=[c[0]-s[0],c[1]-s[1]];
+          [[.5,.05,'255,200,120',.14],[.9,.035,'120,220,255',.12],[1.35,.09,'255,150,200',.08],[1.8,.045,'160,255,200',.1],[2.3,.07,'255,220,140',.09]].forEach(([k,r,C,a])=>rg(x,s[0]+v[0]*k,s[1]+v[1]*k,w*r,[[0,`rgba(${C},${a*.2})`],[.7,`rgba(${C},${a*.5})`],[.9,`rgba(${C},${a})`],[1,`rgba(${C},0)`]]))}
+          function bakeFore(){const o=LY.fs,x=o.x,w=o.w,h=o.h,r=mul(77),vw=w/170,PL=[['#10380e','#2d8a20','#a0e04c'],['#16440f','#3a9c28','#c6ee6c'],['#0d340e','#277a1e','#86d24a']];
+          for(let i=0;i<110;i++){const bx=r()*w,by=h*(.9+r()*.1),ht=h*(.05+r()*r()*.2),ln=((bx-w/2)/w*.5+(r()-.5)*.25)*ht,bw=vw*(.7+r()*1.3),P=PL[r()*3|0],g=x.createLinearGradient(0,by,0,by-ht);
+          g.addColorStop(0,P[0]);g.addColorStop(.55,P[1]);g.addColorStop(1,P[2]);x.beginPath();x.moveTo(bx-bw,by);x.quadraticCurveTo(bx-bw*.5+ln*.3,by-ht*.55,bx+ln,by-ht);x.quadraticCurveTo(bx+bw*.6+ln*.35,by-ht*.5,bx+bw,by);x.closePath();x.fillStyle=g;x.fill()}
+          for(let i=0;i<6;i++){const fx=w*(.22+r()*.56),by=h*.97,ht=h*(.14+r()*.16),ln=(r()-.5)*ht*.3,hx_=fx+ln,hy=by-ht,pr=vw*(2.4+r()*1.6);
+          x.strokeStyle='#2a7a1f';x.lineWidth=vw*.7;x.beginPath();x.moveTo(fx,by);x.quadraticCurveTo(fx+ln*.2,by-ht*.6,hx_,hy);x.stroke();
+          for(let k=0;k<13;k++){x.save();x.translate(hx_,hy);x.rotate(k/13*6.283);x.beginPath();x.ellipse(pr*.62,0,pr*.42,pr*.15,0,0,6.283);x.fillStyle=k%2?'#eef2fa':'#fff';x.fill();x.restore()}
+          x.fillStyle='#ffc22a';x.beginPath();x.arc(hx_,hy,pr*.27,0,6.283);x.fill();x.fillStyle='rgba(120,70,0,.35)';x.beginPath();x.arc(hx_+pr*.05,hy+pr*.05,pr*.15,0,6.283);x.fill()}
+          const g=x.createLinearGradient(0,h*.72,0,h);g.addColorStop(0,'rgba(6,30,8,0)');g.addColorStop(1,'rgba(6,30,8,.6)');x.fillStyle=g;x.fillRect(0,h*.72,w,h*.28);blur(LY.fb,o,vw*2.4)}
+
+          /* ===== midground rumput: 1 putImageData/frame (metode builder), angin per-blade ===== */
+          const TN=[['#1f5a1c','#3f9a2c','#8fd24a'],['#24621e','#4cae34','#a9e05a'],['#2c6a1a','#58b02a','#c9e85e'],['#1a4f1a','#378a2c','#7cc24a']].map(a=>a.map(hx)),HZ=hx('#b4dcc8'),CS=pk(hx('#2f7a24'),HZ,0);
+          let MB=[],FL=[],mi,mu,MW,MH,WN=1;
+          const wf=(x,t)=>WN*(.55+.45*M.sin(t*.7+x*.05)+.25*M.sin(t*1.9+x*.13));
+          function mkMid(){const o=LY.mid,r=mul(5),w=o.w,h=o.h,ub=o.ub;MW=w;MH=h;mi=o.x.createImageData(w,h);mu=new Uint32Array(mi.data.buffer);
+          for(let i=0,n=M.ceil(w*2.6);i<n;i++){const y=h*(.6+.39*M.pow(r(),1.25)),s=(y/h-.6)/.39,T=TN[r()*4|0],m=(1-s)*.55;
+          MB.push({x:r()*w|0,y:y|0,h:ub*(.5+s*5.6)*(.7+r()*.6),p:r()*6.28,w2:s>.45,c:[pk(T[0],HZ,m),pk(T[1],HZ,m),pk(T[2],HZ,m)]})}
+          MB.sort((a,b)=>a.y-b.y);const FC=[['#ffffff','#ffd23a'],['#ffffff','#ffd23a'],['#ffd42e','#fff0a0'],['#ff9ac0','#ffe0ec'],['#a8b0ff','#e4e6ff']];
+          for(let i=0,n=M.ceil(w/4.5);i<n;i++){const y=h*(.64+.35*M.pow(r(),1.2)),s=(y/h-.6)/.39,f=FC[r()*5|0];
+          FL.push({x:r()*w|0,y:y|0,h:ub*(1.2+s*6)*(.8+r()*.5),p:r()*6.28,c0:pk(hx(f[0]),HZ,(1-s)*.4),c1:pk(hx(f[1]),HZ,(1-s)*.4),r:s>.5?2:1})}
+          FL.sort((a,b)=>a.y-b.y)}
+          const px1=(x,y,c)=>{if(x>=0&&y>=0&&x<MW&&y<MH)mu[y*MW+x]=c},rc=(x,y,w,h,c)=>{for(let j=0;j<h;j++)for(let i=0;i<w;i++)px1(x+i,y+j,c)};
+          function drawMid(t){mu.fill(0);
+          for(const b of MB){const A=(1+b.h*.2)*wf(b.x,t)+M.sin(t*2.4+b.p)*.5;for(let k=0,n=b.h|0;k<n;k++){const f=k/b.h,xx=b.x+(A*f*f|0),c=f<.35?b.c[0]:f<.75?b.c[1]:b.c[2];px1(xx,b.y-k,c);if(b.w2)px1(xx+1,b.y-k,c)}}
+          for(const f of FL){const A=(1+f.h*.18)*wf(f.x,t)+M.sin(t*2+f.p)*.5,n=f.h|0;for(let k=0;k<n;k++){const q=k/n;px1(f.x+(A*q*q|0),f.y-k,CS)}
+          const X=f.x+(A|0),Y=f.y-n;if(f.r==2){rc(X-1,Y-2,3,5,f.c0);rc(X-2,Y-1,5,3,f.c0);rc(X-1,Y-1,2,2,f.c1)}else{rc(X-1,Y,3,1,f.c0);rc(X,Y-1,1,3,f.c0);px1(X,Y,f.c1)}}
+          LY.mid.x.putImageData(mi,0,0)}
+
+          /* ===== bokeh ===== */
+          const SP=['255,246,210','255,225,150','205,236,255'].map(c=>{const s=document.createElement('canvas');s.width=s.height=48;const x=s.getContext('2d');rg(x,24,24,24,[[0,`rgba(${c},.35)`],[.7,`rgba(${c},.45)`],[.9,`rgba(${c},.9)`],[1,`rgba(${c},0)`]]);return s});
+          let BK=[];function mkBok(){const o=LY.bk,r=mul(21),u=o.ub;BK=Array.from({length:24},()=>({x:r()*o.w,y:r()*o.h,r:u*(.5+r()*1.3),a:.1+r()*.22,p:r()*6.28,vx:u*(.05+r()*.12),vy:-u*(.02+r()*.07),c:r()*3|0}))}
+          function drawBok(t,dt,k){const o=LY.bk,x=o.x;x.clearRect(0,0,o.w,o.h);x.globalCompositeOperation='lighter';
+          for(const b of BK){b.x+=(b.vx+wf(b.x,t)*b.vx*.6)*dt;b.y+=b.vy*dt;if(b.x>o.w+b.r*4)b.x=-b.r*4;if(b.y<-b.r*4)b.y=o.h+b.r*4;
+          const r=b.r*(1+3.2*k),a=b.a*(.6+.4*M.sin(t*.7+b.p))*(1+.9*k);x.globalAlpha=M.min(1,a);x.drawImage(SP[b.c],b.x-r,b.y-r,2*r,2*r)}
+          x.globalAlpha=1;x.globalCompositeOperation='source-over'}
+
+          /* ===== kamera sinematik ===== */
+          let tx=0,ty=0,ox=.5,TX=0,TY=0,OX=.5,DXt=0,DX=0,drag=0,lx=0,wb=0,w0=0,fa=0,paused=0,run=0,last=performance.now(),fc=0,gap=33,lf=0;const LT={},OP={};
+          const op=(k,v)=>{v=+v.toFixed(2);if(OP[k]!==v){OP[k]=v;LY[k].c.style.opacity=v}};
+          function frame(now){
+          const dt=cl((now-last)/1000,.001,.1),t=now/1000;last=now;fc++;
+          TX=sm(TX,tx,5,dt);TY=sm(TY,ty,5,dt);OX=sm(OX,ox,3,dt);DX=sm(DX,drag?DXt:0,drag?9:.6,dt);wb*=M.exp(-dt*1.1);WN=sm(WN,1+wb,3,dt);
+          const wp=cl((now-w0)/4200,0,1),wk=M.pow(1-wp,3);fa=ss((wp-.08)/.62);   /* wk: warp FOV 1→0 | fa: rack-focus 0→1 */
+          const X=M.sin(t*.11)*5+M.sin(t*.047+1)*2+TX*3.2-(OX-.5)*12+DX+wk*wk*3.5+M.sin(t*3.1+M.sin(t*.7)*2)*.05,
+          Y=M.sin(t*.07)*1.1+TY*1.4-wk*wk*4+M.sin(t*2.3+1)*.04,
+          ro=M.sin(t*.13)*.22+TX*.5+wk*1.2+M.sin(t*1.7)*.04,Z=1.04+.03*M.sin(t*.045)+wb*.01;
+          for(const k in LY){const o=LY[k],s=1+(Z-1)*o.Kz+wk*o.Kw,dx=X*o.F*U-(o.dr?(t*o.dr%130)*U:0),r2=o.F>0?ro*M.min(o.F,1):0,
+          str=`translate3d(${dx.toFixed(1)}px,${(Y*o.F*UH).toFixed(1)}px,0) rotate(${r2.toFixed(3)}deg) scale(${s.toFixed(4)})`;if(LT[k]!==str){LT[k]=str;o.c.style.transform=str}}
+          op('hb',1-fa);op('mb',1-fa);op('fb',1-fa);op('fs',fa);op('rays',.75+.25*M.sin(t*.3));
+          drawMid(t);if(fa<.995){const m=LY.mb;m.x.clearRect(0,0,m.w,m.h);m.x.drawImage(LY.mid.c,0,0,m.w,m.h)}
+          drawBok(t,dt,1-fa);if(fc%3==0)$('gn').style.transform=`translate(${R()*64|0}px,${R()*64|0}px)`;
+          const fast=wp<1||drag||wb>.25;gap=fast?16:33;if(fast!==lf){lf=fast;window.A&&A.f(fast?60:30)}}
+          function loop(now){if(paused){run=0;return}const t0=performance.now();frame(now);setTimeout(()=>requestAnimationFrame(loop),M.max(0,gap-(performance.now()-t0)-6))}
+          const go=()=>{if(!run){run=1;requestAnimationFrame(loop)}};
+          window.W={s(a,b,c){tx=a;ty=b;ox=c},
+          p(x,y,a){if(a==0){drag=1;DXt=DX;lx=x;wb=M.min(1.2,wb+.7)}else if(a==2&&drag){DXt=cl(DXt+(x-lx)*-40,-9,9);lx=x}else if(a==1||a==3)drag=0},
+          wake(){w0=performance.now();wb=1;paused=0;go()},z(){paused=1}};
+          addEventListener('pointerdown',e=>W.p(e.clientX/IW,e.clientY/IH,0));
+          addEventListener('pointermove',e=>{if(drag)W.p(e.clientX/IW,e.clientY/IH,2);else if(!window.A)W.s((e.clientX/IW-.5)*2,(e.clientY/IH-.5)*2,.5)});
+          addEventListener('pointerup',()=>W.p(0,0,1));
+          {const c=document.createElement('canvas');c.width=c.height=64;const x=c.getContext('2d'),d=x.createImageData(64,64);for(let i=0;i<d.data.length;i+=4){d.data[i]=d.data[i+1]=d.data[i+2]=R()<.5?0:255;d.data[i+3]=R()*255}x.putImageData(d,0,0);$('gn').style.backgroundImage=`url(${c.toDataURL()})`}
+          bakeSky();bakeCl('c1',3,9,22,[.12,.6]);bakeCl('c2',8,5,36,[.15,.7]);bakeHills();bakeFore();bakeRays();bakeFl();mkMid();mkBok();W.wake();
+          </script></body></html>
+          X
+          $BT/aapt2 compile --dir res -o r.zip
+          $BT/aapt2 link -o a.ap_ -I $AJ --manifest M.xml -A assets --min-sdk-version 26 --target-sdk-version 34 --version-code $(($(date +%s)/60)) --version-name 1.$GITHUB_RUN_NUMBER r.zip
+          javac --release 11 -nowarn -cp $AJ -d o s/x/sky/*.java
+          $BT/d8 --lib $AJ --min-api 26 --output d $(find o -name '*.class')
+          (cd d && zip -q ../a.ap_ classes.dex)
+          $BT/zipalign -f -p 4 a.ap_ z.apk
+          $BT/apksigner sign --ks $K --ks-key-alias k --ks-pass pass:wallpaper --key-pass pass:wallpaper --out out/CinemaSky.apk z.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: /tmp/b/out/CinemaSky.apk
+          compression-level: 0
+          retention-days: 1
