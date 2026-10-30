@@ -1,0 +1,803 @@
+name: Build Autobot APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Generate project
+        run: |
+          set -e
+          rm -rf app/src app/build.gradle app/build.gradle.kts build.gradle.kts settings.gradle.kts
+          J=app/src/main/java/com/autobot/app
+          R=app/src/main/res
+          mkdir -p $J $R/values $R/values-v31 $R/drawable $R/mipmap-anydpi-v26
+
+          cat > settings.gradle << 'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'Autobot'
+          include ':app'
+          EOF
+
+          cat > build.gradle << 'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle << 'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.autobot.app'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.autobot.app'
+              minSdk 26
+              targetSdk 34
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application
+              android:label="Autobot"
+              android:icon="@mipmap/ic_launcher"
+              android:theme="@style/T"
+              android:hardwareAccelerated="true">
+              <activity
+                android:name=".MainActivity"
+                android:exported="true"
+                android:screenOrientation="portrait"
+                android:configChanges="orientation|screenSize|keyboardHidden">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+
+          cat > $R/values/colors.xml << 'EOF'
+          <resources><color name="bg">#0A0A0F</color></resources>
+          EOF
+
+          cat > $R/values/styles.xml << 'EOF'
+          <resources>
+            <style name="T" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+              <item name="android:windowBackground">@color/bg</item>
+              <item name="android:windowFullscreen">true</item>
+              <item name="android:statusBarColor">@color/bg</item>
+              <item name="android:navigationBarColor">@color/bg</item>
+            </style>
+          </resources>
+          EOF
+
+          cat > $R/values-v31/styles.xml << 'EOF'
+          <resources>
+            <style name="T" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+              <item name="android:windowBackground">@color/bg</item>
+              <item name="android:windowFullscreen">true</item>
+              <item name="android:statusBarColor">@color/bg</item>
+              <item name="android:navigationBarColor">@color/bg</item>
+              <item name="android:windowSplashScreenBackground">@color/bg</item>
+              <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash_empty</item>
+            </style>
+          </resources>
+          EOF
+
+          cat > $R/mipmap-anydpi-v26/ic_launcher.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@color/bg"/>
+            <foreground android:drawable="@drawable/ic_fg"/>
+          </adaptive-icon>
+          EOF
+
+          cat > $R/drawable/ic_splash_empty.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="1dp" android:height="1dp" android:viewportWidth="1" android:viewportHeight="1">
+            <path android:fillColor="#00000000" android:pathData="M0,0h1v1h-1z"/>
+          </vector>
+          EOF
+
+          cat > $R/drawable/ic_fg.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp" android:height="108dp"
+            android:viewportWidth="108" android:viewportHeight="108">
+            <group android:scaleX="0.85" android:scaleY="0.85" android:pivotX="54" android:pivotY="54">
+              <path android:fillColor="#E53935" android:pathData="M26,26L42,34L46,46L32,48Z"/>
+              <path android:fillColor="#E53935" android:pathData="M82,26L66,34L62,46L76,48Z"/>
+              <path android:fillColor="#E53935" android:pathData="M50,32L58,32L62,46L54,50L46,46Z"/>
+              <path android:fillColor="#E53935" android:pathData="M32,52L46,50L48,64L40,70Z"/>
+              <path android:fillColor="#E53935" android:pathData="M76,52L62,50L60,64L68,70Z"/>
+              <path android:fillColor="#E53935" android:pathData="M50,54L58,54L60,66L54,72L48,66Z"/>
+              <path android:fillColor="#E53935" android:pathData="M42,74L66,74L54,86Z"/>
+            </group>
+          </vector>
+          EOF
+
+          cat > $J/MainActivity.java << 'EOF'
+          package com.autobot.app;
+
+          import android.app.Activity;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.*;
+          import android.widget.*;
+
+          public class MainActivity extends Activity {
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              if (Build.VERSION.SDK_INT >= 28)
+                getWindow().getAttributes().layoutInDisplayCutoutMode =
+                  WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+              getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+
+              FrameLayout root = new FrameLayout(this);
+              root.setBackgroundColor(0xFF0A0A0F);
+
+              final FrameLayout ui = new FrameLayout(this);
+              ui.setBackgroundColor(0xFF10131A);
+              TextView t = new TextView(this);
+              t.setText("AUTOBOT\nUI siap");
+              t.setTextColor(0xFF9FB3C8);
+              t.setTextSize(22);
+              t.setGravity(Gravity.CENTER);
+              ui.addView(t, new FrameLayout.LayoutParams(-1, -1));
+              ui.setVisibility(View.INVISIBLE);
+
+              TransformView tv = new TransformView(this, ty -> {
+                if (ui.getVisibility() != View.VISIBLE) ui.setVisibility(View.VISIBLE);
+                ui.setTranslationY(ty);
+              });
+
+              root.addView(ui, new FrameLayout.LayoutParams(-1, -1));
+              root.addView(tv, new FrameLayout.LayoutParams(-1, -1));
+              setContentView(root);
+            }
+          }
+          EOF
+
+          cat > $J/TransformView.java << 'EOF'
+          package com.autobot.app;
+
+          import android.animation.*;
+          import android.content.Context;
+          import android.graphics.*;
+          import android.view.*;
+          import android.view.animation.LinearInterpolator;
+
+          public class TransformView extends View {
+            public interface Sheet { void y(float ty); }
+
+            final Sheet sheet;
+            final Robot3D rob = new Robot3D();
+            final Paint beam = new Paint(Paint.ANTI_ALIAS_FLAG);
+            float t;
+            boolean init;
+            ValueAnimator an;
+
+            public TransformView(Context c, Sheet s) {
+              super(c);
+              sheet = s;
+              beam.setStyle(Paint.Style.STROKE);
+              beam.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.ADD));
+            }
+
+            @Override protected void onAttachedToWindow() {
+              super.onAttachedToWindow();
+              post(() -> {
+                an = ValueAnimator.ofFloat(0, Robot3D.DE + 60);
+                an.setDuration((long) (Robot3D.DE + 60));
+                an.setInterpolator(new LinearInterpolator());
+                an.addUpdateListener(a -> {
+                  t = (float) a.getAnimatedValue();
+                  int H = getHeight();
+                  rob.update(t, getWidth(), H);
+                  if (rob.tick > 0) { rob.tick = 0; performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); }
+                  if (rob.launchEvt) { rob.launchEvt = false; performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); }
+                  sheet.y(t < Robot3D.DS ? -H * 1.5f : Math.min(0f, rob.gripY - H));
+                  invalidate();
+                });
+                an.addListener(new AnimatorListenerAdapter() {
+                  @Override public void onAnimationEnd(Animator x) {
+                    sheet.y(0);
+                    setVisibility(GONE);
+                  }
+                });
+                an.start();
+              });
+            }
+
+            @Override protected void onDetachedFromWindow() {
+              if (an != null) an.cancel();
+              super.onDetachedFromWindow();
+            }
+
+            @Override protected void onDraw(Canvas c) {
+              int w = getWidth(), h = getHeight();
+              if (w == 0 || h == 0) return;
+              if (!init) { init = true; rob.update(0, w, h); }
+              rob.draw(c);
+              if (t > Robot3D.DS - 100 && t < Robot3D.DE) {
+                float a = Math.min(1f, (t - (Robot3D.DS - 100)) / 200f), y = rob.gripY, k = rob.k;
+                beam.setStrokeWidth(k * 2.2f); beam.setColor(0xFF26C6DA); beam.setAlpha((int) (70 * a));
+                c.drawLine(0, y, w, y, beam);
+                beam.setStrokeWidth(Math.max(1.5f, k * 0.5f)); beam.setColor(0xFFE0F7FA); beam.setAlpha((int) (230 * a));
+                c.drawLine(0, y, w, y, beam);
+              }
+            }
+          }
+          EOF
+
+          cat > $J/Robot3D.java << 'EOF'
+          package com.autobot.app;
+
+          import android.graphics.*;
+          import java.util.*;
+
+          /** Mini 3D engine (software, Canvas) + robot Autobot prosedural. */
+          final class Robot3D {
+            static final float F = 700f;
+            static final float T0 = 120, PD = 700, CR = 1800, LA = 2100, LE = 2800, DS = 3000, DE = 4500;
+            static final int RED = 0xFFE53935;
+            static final float LX = -0.45f, LY = 0.75f, LZ = 0.55f;
+
+            static final float[][] P = {
+              {26,26,42,34,46,46,32,48}, {82,26,66,34,62,46,76,48},
+              {50,32,58,32,62,46,54,50,46,46}, {32,52,46,50,48,64,40,70},
+              {76,52,62,50,60,64,68,70}, {50,54,58,54,60,66,54,72,48,66}, {42,74,66,74,54,86}
+            };
+            static final int[] PC = {0xFFD32F2F,0xFFD32F2F,0xFFE53935,0xFFD32F2F,0xFFD32F2F,0xFFC62828,0xFFB0BEC5};
+            static final float[] PDL = {160,160,80,260,260,0,40};
+
+            // ------------------------------------------------------------ math utils
+            static float cl(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+            static float sm(float x) { x = cl(x); return x * x * (3 - 2 * x); }
+            static float lerp(float a, float b, float f) { return a + (b - a) * f; }
+            static float bk(float x) { x = cl(x); float c1 = 1.70158f, c3 = c1 + 1, m = x - 1; return 1 + c3 * m * m * m + c1 * m * m; }
+            static int mix(int a, int b, float f) {
+              f = cl(f);
+              int r = (int) lerp((a >> 16) & 255, (b >> 16) & 255, f);
+              int g = (int) lerp((a >> 8) & 255, (b >> 8) & 255, f);
+              int bl = (int) lerp(a & 255, b & 255, f);
+              return 0xFF000000 | (r << 16) | (g << 8) | bl;
+            }
+            static float[] newell(float[] v, int[] q) {
+              float nx = 0, ny = 0, nz = 0; int n = q.length;
+              for (int i = 0; i < n; i++) {
+                int a = q[i] * 3, b = q[(i + 1) % n] * 3;
+                nx += (v[a+1] - v[b+1]) * (v[a+2] + v[b+2]);
+                ny += (v[a+2] - v[b+2]) * (v[a] + v[b]);
+                nz += (v[a] - v[b]) * (v[a+1] + v[b+1]);
+              }
+              return new float[]{nx, ny, nz};
+            }
+
+            // ------------------------------------------------------------ mesh
+            static final class Mesh {
+              float[] v; int[][] f; int col; float met; boolean emi, gear;
+              Mesh(float[] v, int[][] f, int col, float met, boolean orient) {
+                this.v = v; this.f = f; this.col = col; this.met = met;
+                if (orient) orient();
+              }
+              Mesh at(float x, float y, float z) {
+                for (int i = 0; i < v.length; i += 3) { v[i] += x; v[i+1] += y; v[i+2] += z; }
+                return this;
+              }
+              Mesh emissive() { emi = true; return this; }
+              void orient() {
+                int nv = v.length / 3; float cx = 0, cy = 0, cz = 0;
+                for (int i = 0; i < nv; i++) { cx += v[3*i]; cy += v[3*i+1]; cz += v[3*i+2]; }
+                cx /= nv; cy /= nv; cz /= nv;
+                for (int[] q : f) {
+                  float[] n = newell(v, q); float fx = 0, fy = 0, fz = 0;
+                  for (int i : q) { fx += v[3*i]; fy += v[3*i+1]; fz += v[3*i+2]; }
+                  fx = fx / q.length - cx; fy = fy / q.length - cy; fz = fz / q.length - cz;
+                  if (n[0]*fx + n[1]*fy + n[2]*fz < 0) {
+                    for (int a = 0, b = q.length - 1; a < b; a++, b--) { int t = q[a]; q[a] = q[b]; q[b] = t; }
+                  }
+                }
+              }
+            }
+
+            /** tapered box: bottom w x d, top tw x td, height h (centered). */
+            static Mesh tbox(float w, float h, float d, float tw, float td, int col, float met) {
+              float a = w / 2, b = d / 2, c = tw / 2, e = td / 2, y = h / 2;
+              float[] v = {-a,-y,-b, a,-y,-b, a,-y,b, -a,-y,b, -c,y,-e, c,y,-e, c,y,e, -c,y,e};
+              int[][] f = {{0,1,2,3},{4,5,6,7},{0,1,5,4},{1,2,6,5},{2,3,7,6},{3,0,4,7}};
+              return new Mesh(v, f, col, met, true);
+            }
+            static Mesh box(float w, float h, float d, int col, float met) { return tbox(w, h, d, w, d, col, met); }
+
+            /** extrude polygon (xy pairs, y-up) along z, centered. */
+            static Mesh prism(float[] xy, float d, int col, float met) {
+              int n = xy.length / 2; float area = 0;
+              for (int i = 0; i < n; i++) { int j = (i + 1) % n; area += xy[2*i] * xy[2*j+1] - xy[2*j] * xy[2*i+1]; }
+              float[] p = xy.clone();
+              if (area < 0) for (int i = 0; i < n; i++) { p[2*i] = xy[2*(n-1-i)]; p[2*i+1] = xy[2*(n-1-i)+1]; }
+              float[] v = new float[n * 6];
+              for (int i = 0; i < n; i++) {
+                v[3*i] = p[2*i]; v[3*i+1] = p[2*i+1]; v[3*i+2] = -d / 2;
+                v[3*(i+n)] = p[2*i]; v[3*(i+n)+1] = p[2*i+1]; v[3*(i+n)+2] = d / 2;
+              }
+              int[][] f = new int[n + 2][];
+              int[] back = new int[n], front = new int[n];
+              for (int i = 0; i < n; i++) { back[i] = n - 1 - i; front[i] = n + i; }
+              f[0] = back; f[1] = front;
+              for (int i = 0; i < n; i++) { int j = (i + 1) % n; f[2+i] = new int[]{i, j, j + n, i + n}; }
+              return new Mesh(v, f, col, met, false);
+            }
+
+            static Mesh gear(float R, float r, int teeth, float th, int col, float met) {
+              float[] xy = new float[teeth * 8];
+              float st = (float) (Math.PI * 2 / teeth);
+              float[] ang = {0f, 0.18f, 0.42f, 0.6f};
+              for (int t = 0; t < teeth; t++) for (int k = 0; k < 4; k++) {
+                float a = t * st + ang[k] * st; float rr = (k == 1 || k == 2) ? R : r;
+                xy[8*t + 2*k] = (float) Math.cos(a) * rr; xy[8*t + 2*k + 1] = (float) Math.sin(a) * rr;
+              }
+              Mesh m = prism(xy, th, col, met); m.gear = true; return m;
+            }
+
+            // ------------------------------------------------------------ node
+            static final class Node {
+              Node p; Mesh m; float px, py, pz, rx, ry, rz, sx = 1, sy = 1, sz = 1;
+              float[] A = new float[9], T = new float[3], wv, sv;
+              int col; boolean plate, glow; int pi; float cex, cey, e, pr;
+              Node(Node p, Mesh m, float x, float y, float z) {
+                this.p = p; this.m = m; px = x; py = y; pz = z;
+                if (m != null) { wv = new float[m.v.length]; sv = new float[m.v.length / 3 * 2]; col = m.col; }
+              }
+              void upd() {
+                float cx = (float) Math.cos(rx), sx_ = (float) Math.sin(rx);
+                float cy = (float) Math.cos(ry), sy_ = (float) Math.sin(ry);
+                float cz = (float) Math.cos(rz), sz_ = (float) Math.sin(rz);
+                float l0 = cz*cy*sx, l1 = (cz*sy_*sx_ - sz_*cx)*sy, l2 = (cz*sy_*cx + sz_*sx_)*sz;
+                float l3 = sz_*cy*sx, l4 = (sz_*sy_*sx_ + cz*cx)*sy, l5 = (sz_*sy_*cx - cz*sx_)*sz;
+                float l6 = -sy_*sx, l7 = cy*sx_*sy, l8 = cy*cx*sz;
+                if (p == null) {
+                  A[0]=l0;A[1]=l1;A[2]=l2;A[3]=l3;A[4]=l4;A[5]=l5;A[6]=l6;A[7]=l7;A[8]=l8;
+                  T[0]=px;T[1]=py;T[2]=pz;
+                } else {
+                  float[] q = p.A;
+                  A[0]=q[0]*l0+q[1]*l3+q[2]*l6; A[1]=q[0]*l1+q[1]*l4+q[2]*l7; A[2]=q[0]*l2+q[1]*l5+q[2]*l8;
+                  A[3]=q[3]*l0+q[4]*l3+q[5]*l6; A[4]=q[3]*l1+q[4]*l4+q[5]*l7; A[5]=q[3]*l2+q[4]*l5+q[5]*l8;
+                  A[6]=q[6]*l0+q[7]*l3+q[8]*l6; A[7]=q[6]*l1+q[7]*l4+q[8]*l7; A[8]=q[6]*l2+q[7]*l5+q[8]*l8;
+                  T[0]=q[0]*px+q[1]*py+q[2]*pz+p.T[0];
+                  T[1]=q[3]*px+q[4]*py+q[5]*pz+p.T[1];
+                  T[2]=q[6]*px+q[7]*py+q[8]*pz+p.T[2];
+                }
+              }
+            }
+
+            // ------------------------------------------------------------ scene
+            final ArrayList<Node> all = new ArrayList<>();
+            final Node[] pl = new Node[7];
+            Node root, pelvis, torso, head, shL, shR, uaL, uaR, faL, faR, fiL, fiR, hipL, hipR, knL, knR, ftL, ftR;
+            Node hornL, hornR, nzL, nzR, wgL, wgR, eyeL, eyeR, winL, winR;
+            Node[] gears = new Node[8], fingL = new Node[4], fingR = new Node[4];
+            Node pisL, pisR, rodL, rodR;
+            float[] gdir = new float[8];
+
+            Node N(Node p, Mesh m, float x, float y, float z) { Node n = new Node(p, m, x, y, z); all.add(n); return n; }
+
+            Robot3D() {
+              int blue = 0xFF2457B8, red = 0xFFC62828, silver = 0xFFB0BEC5, dark = 0xFF37474F, gold = 0xFFC9A227;
+              root = N(null, null, 0, 0, 0);
+              pelvis = N(root, tbox(22, 10, 14, 20, 12, silver, 0.7f), 0, -14, 0);
+              torso = N(pelvis, tbox(30, 22, 18, 38, 20, red, 0.7f).at(0, 11, 0), 0, 5, 0);
+              winL = N(torso, tbox(12, 6, 1.4f, 12, 1.4f, 0xFF81D4FA, 0.95f), -9, 17, 9.3f);
+              winR = N(torso, tbox(12, 6, 1.4f, 12, 1.4f, 0xFF81D4FA, 0.95f), 9, 17, 9.3f);
+              gears[0] = N(torso, gear(4.4f, 3.4f, 10, 1.4f, gold, 0.9f), -13.5f, 4, 9.2f); gdir[0] = 1;
+              gears[1] = N(torso, gear(4.4f, 3.4f, 10, 1.4f, gold, 0.9f), 13.5f, 4, 9.2f); gdir[1] = -1;
+              head = N(torso, null, 0, 22, 0);
+              N(head, tbox(16, 16, 15, 14, 13, 0xFF1E5BBF, 0.8f).at(0, 8, 0), 0, 0, 0);
+              N(head, tbox(10, 8, 2, 10, 2, silver, 0.9f), 0, 4, 8);
+              N(head, box(6, 2, 0.6f, 0xFF263238, 0.3f), 0, 2.2f, 9.2f);
+              eyeL = N(head, box(4.2f, 1.6f, 0.8f, 0xFF4FC3F7, 0).emissive(), -3.8f, 8.2f, 7.9f); eyeL.glow = true;
+              eyeR = N(head, box(4.2f, 1.6f, 0.8f, 0xFF4FC3F7, 0).emissive(), 3.8f, 8.2f, 7.9f); eyeR.glow = true;
+              N(head, box(2.5f, 7, 6, 0xFF2457B8, 0.8f), -8.9f, 8, 0);
+              N(head, box(2.5f, 7, 6, 0xFF2457B8, 0.8f), 8.9f, 8, 0);
+              hornL = N(head, box(2.4f, 9, 2.4f, silver, 0.9f).at(0, 4.5f, 0), -5, 16, 0);
+              hornR = N(head, box(2.4f, 9, 2.4f, silver, 0.9f).at(0, 4.5f, 0), 5, 16, 0);
+              // lengan
+              for (int s = -1; s <= 1; s += 2) {
+                Node sh = N(torso, tbox(14, 13, 15, 12, 13, blue, 0.8f), 21 * s, 16, 0);
+                Node ua = N(sh, box(8, 18, 9, silver, 0.85f).at(0, -9, 0), 0, -3, 0);
+                Node fa = N(ua, tbox(11, 18, 12, 9, 10, blue, 0.8f).at(0, -9, 0), 0, -18, 0);
+                Node fi = N(fa, box(9, 8, 9, 0xFF78909C, 0.8f).at(0, -4, 0), 0, -18, 0);
+                Node[] fg = s < 0 ? fingL : fingR;
+                for (int i = 0; i < 4; i++) fg[i] = N(fi, box(1.8f, 5, 2, 0xFF546E7A, 0.6f).at(0, -2.5f, 0), -3.4f + i * 2.27f, -8, 3.6f);
+                int gi = s < 0 ? 2 : 3;
+                gears[gi] = N(sh, gear(4.6f, 3.6f, 10, 1.4f, gold, 0.9f), 0, 0, 8.2f); gdir[gi] = s;
+                Node wg = N(torso, box(14, 20, 1.6f, 0xFF1A3A7A, 0.85f).at(7 * s, 8, 0), 10 * s, 18, -11);
+                Node nz = N(torso, box(7, 12, 7, dark, 0.6f), 8 * s, 8, -11.5f);
+                Node nzz = N(nz, box(5, 3, 5, 0xFF90A4AE, 0.9f).at(0, -1.5f, 0), 0, -6, 0);
+                if (s < 0) { shL = sh; uaL = ua; faL = fa; fiL = fi; wgL = wg; nzL = nzz; } else { shR = sh; uaR = ua; faR = fa; fiR = fi; wgR = wg; nzR = nzz; }
+              }
+              // kaki
+              for (int s = -1; s <= 1; s += 2) {
+                Node hip = N(pelvis, box(10, 20, 11, blue, 0.8f).at(0, -10, 0), 8 * s, -5, 0);
+                Node kn = N(hip, tbox(12, 22, 14, 10, 12, blue, 0.8f).at(0, -11, 0), 0, -20, 0);
+                Node ft = N(kn, box(12, 6, 18, silver, 0.8f).at(0, -3, 4), 0, -22, 0);
+                int gi = s < 0 ? 4 : 5;
+                gears[gi] = N(hip, gear(4, 3.1f, 9, 1.4f, gold, 0.9f), 0, -4, 6.2f); gdir[gi] = s;
+                int gj = s < 0 ? 6 : 7;
+                gears[gj] = N(kn, gear(4.6f, 3.6f, 10, 1.4f, gold, 0.9f), 0, 0, 7.4f); gdir[gj] = -s;
+                Node po = N(hip, box(3, 11, 3, dark, 0.7f), 0, -12, -7);
+                Node ro = N(kn, box(1.7f, 13, 1.7f, 0xFFCFD8DC, 0.95f), 0, 2, -7.4f);
+                if (s < 0) { hipL = hip; knL = kn; ftL = ft; pisL = po; rodL = ro; } else { hipR = hip; knR = kn; ftR = ft; pisR = po; rodR = ro; }
+              }
+              // pecahan emblem -> plat armor
+              pl[0] = plate(0, shL, 0, 0.5f, 8.4f, 0.6f, 0.45f);
+              pl[1] = plate(1, shR, 0, 0.5f, 8.4f, 0.6f, 0.45f);
+              pl[2] = plate(2, head, 0, 12.4f, 7.9f, 0.8f, 0.4f);
+              pl[3] = plate(3, knL, 0, -9, 7.8f, 0.6f, 0.8f);
+              pl[4] = plate(4, knR, 0, -9, 7.8f, 0.6f, 0.8f);
+              pl[5] = plate(5, torso, 0, 7, 9.9f, 1.5f, 0.7f);
+              pl[6] = plate(6, pelvis, 0, 0, 7.8f, 0.8f, 0.6f);
+            }
+
+            Node plate(int i, Node par, float x, float y, float z, float sx, float sy) {
+              float[] q = P[i]; int n = q.length / 2; float cx = 0, cy = 0;
+              for (int j = 0; j < n; j++) { cx += q[2*j]; cy += q[2*j+1]; }
+              cx /= n; cy /= n;
+              float[] xy = new float[n * 2];
+              for (int j = 0; j < n; j++) { xy[2*j] = q[2*j] - cx; xy[2*j+1] = -(q[2*j+1] - cy); }
+              Node nd = N(par, prism(xy, 1.4f, RED, 0.85f), x, y, z);
+              nd.sx = sx; nd.sy = sy; nd.plate = true; nd.pi = i; nd.cex = cx - 54; nd.cey = -(cy - 54);
+              return nd;
+            }
+
+            // ------------------------------------------------------------ state
+            float t, lt, W, H, k, Y, awy, yawC = 1, yawS, tmp0, tmp1;
+            float gripY, lastY, velY;
+            boolean launched, ringOn; float ringT, ringX, ringY;
+            int tick; boolean launchEvt;
+            final boolean[] hit = new boolean[7];
+            final float[] sp2 = new float[2];
+
+            float anchor(float t) {
+              float h2 = H / 2;
+              if (t < LA) return h2;
+              if (t < LE) { float p = (t - LA) / (LE - LA); return lerp(h2, -90 * k, p * p * p); }
+              if (t < DS) return -90 * k;
+              float p = cl((t - DS) / (DE - DS));
+              float e = p < .5f ? 4 * p * p * p : 1 - (float) Math.pow(-2 * p + 2, 3) / 2;
+              return lerp(-90 * k, H + 100 * k, e);
+            }
+
+            float u(float ts, float dur) { return bk((t - ts) / dur); }
+            void grow(Node n, float g) {
+              float v = cl(g * 8);
+              n.sx = n.sz = Math.max(0.001f, (0.4f + 0.6f * g) * v);
+              n.sy = Math.max(0.001f, g);
+            }
+
+            void pose() {
+              float rdy = sm((t - 1500) / 300f);
+              float gp = u(200, 420), gt = u(330, 420), gh = u(560, 420), gs = u(450, 420), ga = u(560, 420);
+              float ge = u(680, 380), gf = u(780, 380), gl = u(380, 420), gk = u(520, 420), gfo = u(650, 380);
+              float crouch = sm((t - CR) / 300f) * (1 - sm((t - LA) / 160f));
+              float thr = sm((t - CR) / 300f) * (1 - sm((t - LE) / 300f));
+              float rise = sm((t - (LE - 100)) / 500f);
+              float wing = sm((t - CR) / 450f) * (1 - sm((t - DS) / 450f));
+              float br = (float) Math.sin(t * 0.006f);
+
+              float rs = lerp(1f, 1.4f, sm((t - 300) / 900f));
+              root.sx = root.sy = root.sz = rs;
+              root.py = awy + (19 - 7 * crouch) * rs; root.rz = 0.025f * (float) Math.sin(t * 0.004f) * rdy;
+              grow(pelvis, gp); pelvis.rx = (1 - gp) * -0.5f + 0.08f * crouch;
+              grow(torso, gt); torso.sy *= 1 + 0.012f * br; torso.rx = 0.18f * crouch + (1 - gt) * -0.6f;
+              grow(head, gh); head.ry = (1 - gh) * -3.0f + 0.2f * (float) Math.sin(t * 0.003f) * rdy; head.rx = 0.05f * (float) Math.sin(t * 0.005f) * rdy;
+              float flick = (t > 1500 && t < 1620) ? 0.4f : 1f;
+              hornL.rz = -(0.25f + 0.07f * (float) Math.sin(t * 0.009f)) * gh - (1 - gh) * 1.4f;
+              hornR.rz = (0.25f + 0.07f * (float) Math.sin(t * 0.009f + 1)) * gh + (1 - gh) * 1.4f;
+              eyeL.col = eyeR.col = mix(0xFF29B6F6, 0xFFB3E5FC, (0.5f + 0.5f * (float) Math.sin(t * 0.012f)) * flick);
+
+              grow(shL, gs); grow(shR, gs);
+              shL.rz = -0.1f + (1 - gs) * 1.3f - rise * 0.85f * 3.14159f;
+              shR.rz = 0.1f - (1 - gs) * 1.3f + rise * 0.85f * 3.14159f;
+              grow(uaL, ga); grow(uaR, ga);
+              faL.rx = faR.rx = -(1 - ge) * 2.2f - 0.25f - 0.12f * (float) Math.sin(t * 0.004f) * rdy * (1 - rise);
+              grow(faL, ge); grow(faR, ge); grow(fiL, gf); grow(fiR, gf);
+              float curl = 0.15f + 1.15f * sm((t - 1650) / 250f);
+              for (int i = 0; i < 4; i++) {
+                float c = curl * (1 - 0.06f * i) + 0.05f * (float) Math.sin(t * 0.01f + i);
+                fingL[i].rx = fingR[i].rx = -c * 1.2f;
+              }
+
+              grow(hipL, gl); grow(hipR, gl);
+              hipL.rx = hipR.rx = -(1 - gl) * 1.4f - 0.6f * crouch;
+              hipL.rz = hipR.rz = 0;
+              grow(knL, gk); grow(knR, gk);
+              knL.rx = knR.rx = (1 - gk) * 2.4f + 1.1f * crouch;
+              grow(ftL, gfo); grow(ftR, gfo);
+              ftL.rx = ftR.rx = (1 - gfo) * -1.0f - 0.6f * crouch * 0.5f;
+              pisL.sy = pisR.sy = 1 + 0.15f * crouch;
+              rodL.py = rodR.py = 2 + 4 * crouch + (1 - gk) * -6;
+
+              wgL.rz = wgR.rz = 0; wgL.rz = 1.0f * wing; wgR.rz = -1.0f * wing;
+              nzL.sy = nzR.sy = 1 + 1.2f * thr;
+              for (int i = 0; i < 8; i++) {
+                if (gears[i] == null) continue;
+                float ratio = (i == 6 || i == 7) ? 1.3f : 1f;
+                gears[i].rz = gdir[i] * ratio * t * 0.0035f;
+              }
+              for (int i = 0; i < 7; i++) {
+                float p = cl((t - T0 - PDL[i]) / PD);
+                Node n = pl[i]; n.e = bk(p); n.pr = p;
+                n.col = mix(RED, PC[i], p);
+              }
+            }
+
+            float[] sp(Node n, float x, float y, float z) {
+              float wx = n.A[0]*x + n.A[1]*y + n.A[2]*z + n.T[0];
+              float wy = n.A[3]*x + n.A[4]*y + n.A[5]*z + n.T[1];
+              float wz = n.A[6]*x + n.A[7]*y + n.A[8]*z + n.T[2];
+              float cx = wx * yawC + wz * yawS, cz = -wx * yawS + wz * yawC;
+              float per = F / (F - cz);
+              sp2[0] = W / 2 + cx * per * k; sp2[1] = H / 2 - wy * per * k;
+              return sp2;
+            }
+
+            // ------------------------------------------------------------ render buffers
+            static final int MAXF = 3200;
+            final int[] fN = new int[MAXF], fI = new int[MAXF], fC = new int[MAXF];
+            final boolean[] fS = new boolean[MAXF];
+            final long[] keys = new long[MAXF];
+            int nf;
+
+            void update(float tt, int w, int h) {
+              float dt = Math.max(0, Math.min(40, tt - lt)); lt = tt;
+              t = tt; W = w; H = h; k = Math.min(w, h) * 0.0059f;
+              Y = anchor(t); velY = dt > 0 ? (Y - lastY) / dt : 0; lastY = Y;
+              awy = (H / 2 - Y) / k;
+              float amp = 0.55f * sm((t - T0) / 500f) * (1 - 0.7f * sm((t - 1700) / 600f));
+              float yaw = amp * (float) Math.sin((t - T0) * 0.0042f);
+              yawC = (float) Math.cos(yaw); yawS = (float) Math.sin(yaw);
+              pose();
+              for (Node n : all) n.upd();
+              collect();
+              float gx = 0;
+              sp(fiL, 0, -4, 0); float g1 = sp2[1]; sp(fiR, 0, -4, 0); float g2 = sp2[1];
+              gripY = (g1 + g2) / 2;
+              events(dt);
+              stepSparks(dt);
+            }
+
+            void collect() {
+              nf = 0;
+              float sweep = ((t * 0.0006f) % 1f) * 3.6f - 1.8f;
+              float il = (float) (1 / Math.sqrt(LX*LX + LY*LY + LZ*LZ));
+              for (int ni = 0; ni < all.size(); ni++) {
+                Node n = all.get(ni);
+                Mesh m = n.m;
+                if (m == null) continue;
+                if (!n.plate && Math.abs(n.A[0]) + Math.abs(n.A[3]) + Math.abs(n.A[6]) < 0.06f) continue;
+                float[] v = m.v, wv = n.wv, sv = n.sv; int nv = v.length / 3;
+                float e = n.e, roll = 0, lift = 0, ccx = 0, ccy = 0, cr = 1, sr = 0;
+                if (n.plate) {
+                  float p = n.pr; float ph = (float) Math.sin(Math.PI * p);
+                  roll = ((n.pi & 1) == 0 ? 1 : -1) * 1.4f * ph; lift = 45 * ph;
+                  ccx = lerp(n.cex, n.T[0], e); ccy = lerp(n.cey + awy, n.T[1], e);
+                  cr = (float) Math.cos(roll); sr = (float) Math.sin(roll);
+                }
+                float[] A = n.A, T = n.T;
+                for (int i = 0; i < nv; i++) {
+                  float x = v[3*i], y = v[3*i+1], z = v[3*i+2], vx, vy, vz;
+                  if (n.plate) {
+                    float ex = x + n.cex, ey = y + n.cey + awy, ez = z;
+                    float ax = A[0]*x + A[1]*y + A[2]*z + T[0], ay = A[3]*x + A[4]*y + A[5]*z + T[1], az = A[6]*x + A[7]*y + A[8]*z + T[2];
+                    vx = lerp(ex, ax, e); vy = lerp(ey, ay, e); vz = lerp(ez, az, e);
+                    float dx = vx - ccx, dy = vy - ccy;
+                    vx = ccx + dx * cr - dy * sr; vy = ccy + dx * sr + dy * cr; vz += lift;
+                  } else {
+                    vx = A[0]*x + A[1]*y + A[2]*z + T[0]; vy = A[3]*x + A[4]*y + A[5]*z + T[1]; vz = A[6]*x + A[7]*y + A[8]*z + T[2];
+                  }
+                  float cx = vx * yawC + vz * yawS, cz = -vx * yawS + vz * yawC;
+                  wv[3*i] = cx; wv[3*i+1] = vy; wv[3*i+2] = cz;
+                  float per = F / (F - cz);
+                  sv[2*i] = W / 2 + cx * per * k; sv[2*i+1] = H / 2 - vy * per * k;
+                }
+                for (int fi = 0; fi < m.f.length && nf < MAXF; fi++) {
+                  int[] q = m.f[fi];
+                  float[] nn = newell(wv, q);
+                  float len = (float) Math.sqrt(nn[0]*nn[0] + nn[1]*nn[1] + nn[2]*nn[2]);
+                  if (len < 1e-6f) continue;
+                  nn[0] /= len; nn[1] /= len; nn[2] /= len;
+                  float fx = 0, fy = 0, fz = 0;
+                  for (int i : q) { fx += wv[3*i]; fy += wv[3*i+1]; fz += wv[3*i+2]; }
+                  fx /= q.length; fy /= q.length; fz /= q.length;
+                  float vx = -fx, vy = -fy, vz = F - fz;
+                  float vl = (float) Math.sqrt(vx*vx + vy*vy + vz*vz); vx /= vl; vy /= vl; vz /= vl;
+                  float ndv = nn[0]*vx + nn[1]*vy + nn[2]*vz;
+                  if (ndv <= 0) continue;
+                  int c;
+                  if (m.emi) c = n.col;
+                  else {
+                    float diff = Math.max(0, (nn[0]*LX + nn[1]*LY + nn[2]*LZ) * il);
+                    float hx = LX*il + vx, hy = LY*il + vy, hz = LZ*il + vz;
+                    float hl = (float) Math.sqrt(hx*hx + hy*hy + hz*hz);
+                    float nh = Math.max(0, (nn[0]*hx + nn[1]*hy + nn[2]*hz) / hl);
+                    float spec = (float) Math.pow(nh, 36) * m.met;
+                    float rx = 2*ndv*nn[0] - vx, ry = 2*ndv*nn[1] - vy;
+                    float env = 0.5f + 0.5f * ry;
+                    float bd = (rx * 0.9f + ry * 0.6f - sweep) * 5;
+                    float band = (float) Math.exp(-bd * bd) * m.met;
+                    float rim = (float) Math.pow(1 - ndv, 3) * 0.3f;
+                    int bc = n.col;
+                    float lum = (0.2f + 0.8f * diff) * (1 - 0.2f * m.met);
+                    float r = ((bc >> 16) & 255) * lum + m.met * env * 50 + spec * 230 + band * 190 + rim * 30;
+                    float g = ((bc >> 8) & 255) * lum + m.met * env * 50 + spec * 230 + band * 190 + rim * 50;
+                    float b = (bc & 255) * lum + m.met * env * 55 + spec * 230 + band * 190 + rim * 110;
+                    c = 0xFF000000 | ((int) Math.min(255, r) << 16) | ((int) Math.min(255, g) << 8) | (int) Math.min(255, b);
+                  }
+                  fN[nf] = ni; fI[nf] = fi; fC[nf] = c; fS[nf] = !m.gear && !m.emi;
+                  float z = fz + (n.plate ? 1.5f : 0);
+                  int bits = Float.floatToIntBits(z); bits ^= (bits >> 31) & 0x7fffffff;
+                  keys[nf] = ((long) bits << 32) | nf;
+                  nf++;
+                }
+              }
+              Arrays.sort(keys, 0, nf);
+            }
+
+            // ------------------------------------------------------------ sparks
+            static final int NS = 280;
+            final float[] spx = new float[NS], spy = new float[NS], svx = new float[NS], svy = new float[NS];
+            final float[] sl = new float[NS], sml = new float[NS], ssz = new float[NS];
+            final int[] scol = new int[NS];
+            int sc; final Random rnd = new Random(7);
+
+            void emit(float x, float y, int n, float spd, float size, int col, float life, float ang, float spread) {
+              for (int i = 0; i < n; i++) {
+                int j = sc; sc = (sc + 1) % NS;
+                float a = ang + (rnd.nextFloat() - 0.5f) * spread;
+                float s = spd * (0.35f + rnd.nextFloat()) * k / 6f;
+                spx[j] = x; spy[j] = y; svx[j] = (float) Math.cos(a) * s; svy[j] = (float) Math.sin(a) * s;
+                sl[j] = sml[j] = life * (0.6f + 0.6f * rnd.nextFloat()); ssz[j] = size * (0.5f + rnd.nextFloat()) * k / 6f; scol[j] = col;
+              }
+            }
+
+            void stepSparks(float dt) {
+              for (int i = 0; i < NS; i++) {
+                if (sl[i] <= 0) continue;
+                sl[i] -= dt; spx[i] += svx[i] * dt; spy[i] += svy[i] * dt; svy[i] += 0.0012f * dt * k / 6f;
+                svx[i] *= 0.995f;
+              }
+            }
+
+            void events(float dt) {
+              for (int i = 0; i < 7; i++) {
+                if (!hit[i] && pl[i].pr >= 1) {
+                  hit[i] = true; tick++;
+                  float sx = 0, sy = 0; int nv = pl[i].sv.length / 2;
+                  for (int j = 0; j < nv; j++) { sx += pl[i].sv[2*j]; sy += pl[i].sv[2*j+1]; }
+                  emit(sx / nv, sy / nv, 26, 1.6f, 2.2f, 0xFFFFD27A, 520, 0, 6.28f);
+                  emit(sx / nv, sy / nv, 8, 0.6f, 4f, 0xFFFFFFFF, 260, 0, 6.28f);
+                }
+              }
+              if (t > 1500 && rnd.nextFloat() < 0.12f && t < DS) {
+                Node g = gears[rnd.nextInt(2)]; sp(g, 0, 0, 1);
+                emit(sp2[0], sp2[1], 2, 0.5f, 1.6f, 0xFFFFE08A, 300, -1.57f, 2.5f);
+              }
+              if (t >= LA && !launched) {
+                launched = true; launchEvt = true; ringOn = true; ringT = t;
+                sp(ftL, 6, -6, 0); ringX = W / 2; ringY = sp2[1];
+              }
+              if (t > CR + 250 && t < LE + 150) {
+                float f = t < LA ? 0.35f : 1f; Node[] fs = {ftL, ftR, nzL, nzR};
+                for (int i = 0; i < 4; i++) {
+                  sp(fs[i], 0, i < 2 ? -6 : -3, 0);
+                  emit(sp2[0], sp2[1], (int) (4 * f + 1), 1.4f * f, 5f, i < 2 ? 0xFFFFA726 : 0xFFFF7043, 380, 1.57f, 0.6f);
+                  emit(sp2[0], sp2[1], 1, 1.1f * f, 3f, 0xFFFFF59D, 260, 1.57f, 0.4f);
+                }
+              }
+              if (t > DS && t < DE) {
+                for (int i = 0; i < 2; i++) { sp(i == 0 ? fiL : fiR, 0, -4, 0); emit(sp2[0], sp2[1], 2, 0.9f, 2f, 0xFF80DEEA, 340, -1.57f, 3.5f); }
+              }
+            }
+
+            // ------------------------------------------------------------ draw
+            final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), edge = new Paint(Paint.ANTI_ALIAS_FLAG), add = new Paint(Paint.ANTI_ALIAS_FLAG);
+            final Path path = new Path();
+            boolean pinit;
+
+            void draw(Canvas c) {
+              if (!pinit) {
+                pinit = true;
+                fill.setStyle(Paint.Style.FILL_AND_STROKE);
+                edge.setStyle(Paint.Style.STROKE); edge.setColor(0xFF05070C);
+                add.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.ADD));
+              }
+              edge.setStrokeWidth(Math.max(1f, k * 0.14f)); fill.setStrokeWidth(Math.max(1f, k * 0.1f));
+              // speed lines
+              float sv = Math.abs(velY);
+              if (sv > 1.0f) {
+                add.setStyle(Paint.Style.STROKE); add.setStrokeWidth(Math.max(1.5f, k * 0.35f));
+                for (int i = 0; i < 16; i++) {
+                  float x = ((i * 7919) % 1000) / 1000f * W;
+                  float y = ((i * 104729 + t * sv * 0.9f) % (H + 400)) - 200;
+                  add.setColor(0xFFFFFFFF); add.setAlpha((int) Math.min(70, sv * 30));
+                  c.drawLine(x, y, x, y + Math.min(300, sv * 70), add);
+                }
+              }
+              for (int q = 0; q < nf; q++) {
+                int id = (int) (keys[q] & 0xffffffffL);
+                Node n = all.get(fN[id]); int[] f = n.m.f[fI[id]];
+                path.reset();
+                for (int j = 0; j < f.length; j++) {
+                  float x = n.sv[2*f[j]], y = n.sv[2*f[j]+1];
+                  if (j == 0) path.moveTo(x, y); else path.lineTo(x, y);
+                }
+                path.close();
+                fill.setColor(fC[id]);
+                c.drawPath(path, fill);
+                if (fS[id]) c.drawPath(path, edge);
+              }
+              // glow mata
+              add.setStyle(Paint.Style.FILL);
+              for (Node e : new Node[]{eyeL, eyeR}) {
+                if (Math.abs(e.A[0]) < 0.3f) continue;
+                sp(e, 0, 0, 0.5f);
+                float pulse = 0.7f + 0.3f * (float) Math.sin(t * 0.012f);
+                for (int i = 3; i >= 1; i--) { add.setColor(0xFF4FC3F7); add.setAlpha((int) (28 * pulse)); c.drawCircle(sp2[0], sp2[1], k * 3.2f * i, add); }
+              }
+              // percikan
+              for (int i = 0; i < NS; i++) {
+                if (sl[i] <= 0) continue;
+                float a = sl[i] / sml[i];
+                add.setStyle(Paint.Style.FILL); add.setColor(scol[i]); add.setAlpha((int) (255 * a));
+                c.drawCircle(spx[i], spy[i], ssz[i] * (0.4f + 0.6f * a), add);
+                add.setStyle(Paint.Style.STROKE); add.setStrokeWidth(Math.max(1f, ssz[i] * 0.6f)); add.setAlpha((int) (140 * a));
+                c.drawLine(spx[i], spy[i], spx[i] - svx[i] * 90, spy[i] - svy[i] * 90, add);
+              }
+              if (ringOn) {
+                float a = cl(1 - (t - ringT) / 600f);
+                if (a <= 0) ringOn = false;
+                else {
+                  add.setStyle(Paint.Style.STROKE); add.setStrokeWidth(k * 1.2f * a + 1); add.setColor(0xFF80DEEA); add.setAlpha((int) (200 * a));
+                  c.drawCircle(ringX, ringY, (t - ringT) * 0.9f * k / 3f, add);
+                }
+              }
+            }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - name: Rename
+        run: cp app/build/outputs/apk/debug/app-debug.apk Autobot.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Autobot
+          path: Autobot.apk
+          if-no-files-found: error
