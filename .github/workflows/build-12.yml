@@ -4,9 +4,8 @@
 name: Build APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -436,6 +435,7 @@ jobs:
           import java.util.concurrent.ArrayBlockingQueue
           import java.util.concurrent.Executors
           import java.util.concurrent.atomic.AtomicBoolean
+          import java.util.concurrent.atomic.AtomicLong
 
           private const val MODEL_BASE =
               "https://huggingface.co/plhery/mobileclip2-onnx/resolve/main/onnx/s0/"
@@ -550,14 +550,19 @@ jobs:
                           val total = todo.size
                           val q = ArrayBlockingQueue<Item>(24)
                           val pool = Executors.newFixedThreadPool(3)
+                          val decNs = AtomicLong()   // total waktu decode thumbnail + preprocess
+                          val decN = AtomicLong()
                           for (id in todo) pool.execute {
                               var arr: FloatArray? = null
                               try {
                                   if (!flag.get()) {
+                                      val td = System.nanoTime()
                                       // thumbnail MediaStore (cache sistem / EXIF thumb), BUKAN foto asli
                                       val bmp = cr.loadThumbnail(uriOf(id), Size(SZ, SZ), null)
                                       arr = preprocess(bmp)
                                       bmp.recycle()
+                                      decNs.addAndGet(System.nanoTime() - td)
+                                      decN.incrementAndGet()
                                   }
                               } catch (_: Throwable) {
                               }
@@ -568,18 +573,32 @@ jobs:
                           var lastUi = t0
                           var done = 0
                           var err = ""
+                          var infNs = 0L
+                          var infN = 0
+                          // dec = rata2 ms decode+preprocess per foto (3 thread paralel), inf = rata2 ms inferensi model per foto
+                          val timing = {
+                              val dn = decN.get()
+                              val d = if (dn > 0) decNs.get() / dn / 1e6 else 0.0
+                              val f = if (infN > 0) infNs / infN / 1e6 else 0.0
+                              String.format("dec %.0f ms (x3) | inf %.0f ms", d, f)
+                          }
                           for (n in 0 until total) {
                               val item = q.take()
                               val a = item.arr
                               if (a != null && !flag.get()) {
-                                  try { idx.add(item.id, eng.embedImage(a)) } catch (e: Throwable) { err = e.toString() }
+                                  try {
+                                      val ti = System.nanoTime()
+                                      idx.add(item.id, eng.embedImage(a))
+                                      infNs += System.nanoTime() - ti
+                                      infN++
+                                  } catch (e: Throwable) { err = e.toString() }
                               }
                               done++
                               val now = System.nanoTime()
                               if (now - lastUi > 500_000_000L) {
                                   lastUi = now
                                   val rate = done / ((now - t0) / 1e9)
-                                  val s = String.format("Index %d/%d | %.1f img/s | %s %s", done, total, rate, eng.accel, err)
+                                  val s = String.format("Index %d/%d | %.1f img/s | %s | %s %s", done, total, rate, eng.accel, timing(), err)
                                   post(s)
                                   progress?.invoke(s, done, total)
                               }
@@ -587,7 +606,7 @@ jobs:
                           pool.shutdown()
                           val sec = (System.nanoTime() - t0) / 1e9
                           val tag = if (flag.get()) "Dihentikan" else "Selesai"
-                          post(String.format("%s: %d foto terindeks | %.1f img/s | %s %s", tag, idx.size, total / maxOf(sec, 0.001), eng.accel, err))
+                          post(String.format("%s: %d foto terindeks | %.1f img/s | %s | %s %s", tag, idx.size, total / maxOf(sec, 0.001), eng.accel, timing(), err))
                       } catch (e: Throwable) {
                           post("Index gagal: $e")
                       } finally {
@@ -1032,7 +1051,18 @@ jobs:
           curl -fsSL -o vision_model.onnx             https://huggingface.co/plhery/mobileclip2-onnx/resolve/main/onnx/s0/vision_model.onnx
           python --version
           pip install -q 'tensorflow==2.19.0' 'tf_keras==2.19.0' onnx2tf onnx onnxruntime onnxsim sng4onnx onnx_graphsurgeon psutil ai-edge-litert
-          onnx2tf -i vision_model.onnx -o tfl -b 1
+          # onnx2tf memuat data uji dengan np.load tanpa allow_pickle -> crash di numpy baru; patch di sini
+          python - <<'PY'
+          import sys, numpy as np
+          _l = np.load
+          def _p(*a, **k):
+              k['allow_pickle'] = True
+              return _l(*a, **k)
+          np.load = _p
+          sys.argv = ['onnx2tf', '-i', 'vision_model.onnx', '-o', 'tfl', '-b', '1']
+          from onnx2tf import main
+          main()
+          PY
           ls -l tfl
           mkdir -p ../app/src/gpu/assets
           cp tfl/vision_model_float32.tflite ../app/src/gpu/assets/vision_s0.tflite
