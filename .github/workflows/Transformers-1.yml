@@ -1,0 +1,379 @@
+name: Build Autobot APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Generate project
+        run: |
+          set -e
+          rm -rf app/src app/build.gradle app/build.gradle.kts build.gradle.kts settings.gradle.kts
+          J=app/src/main/java/com/autobot/app
+          R=app/src/main/res
+          mkdir -p $J $R/values $R/values-v31 $R/drawable $R/mipmap-anydpi-v26
+
+          cat > settings.gradle << 'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'Autobot'
+          include ':app'
+          EOF
+
+          cat > build.gradle << 'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle << 'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.autobot.app'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.autobot.app'
+              minSdk 26
+              targetSdk 34
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application
+              android:label="Autobot"
+              android:icon="@mipmap/ic_launcher"
+              android:theme="@style/T"
+              android:hardwareAccelerated="true">
+              <activity
+                android:name=".MainActivity"
+                android:exported="true"
+                android:screenOrientation="portrait"
+                android:configChanges="orientation|screenSize|keyboardHidden">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+
+          cat > $R/values/colors.xml << 'EOF'
+          <resources><color name="bg">#0A0A0F</color></resources>
+          EOF
+
+          cat > $R/values/styles.xml << 'EOF'
+          <resources>
+            <style name="T" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+              <item name="android:windowBackground">@color/bg</item>
+              <item name="android:windowFullscreen">true</item>
+              <item name="android:statusBarColor">@color/bg</item>
+              <item name="android:navigationBarColor">@color/bg</item>
+            </style>
+          </resources>
+          EOF
+
+          cat > $R/values-v31/styles.xml << 'EOF'
+          <resources>
+            <style name="T" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+              <item name="android:windowBackground">@color/bg</item>
+              <item name="android:windowFullscreen">true</item>
+              <item name="android:statusBarColor">@color/bg</item>
+              <item name="android:navigationBarColor">@color/bg</item>
+              <item name="android:windowSplashScreenBackground">@color/bg</item>
+            </style>
+          </resources>
+          EOF
+
+          cat > $R/mipmap-anydpi-v26/ic_launcher.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@color/bg"/>
+            <foreground android:drawable="@drawable/ic_fg"/>
+          </adaptive-icon>
+          EOF
+
+          cat > $R/drawable/ic_fg.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp" android:height="108dp"
+            android:viewportWidth="108" android:viewportHeight="108">
+            <group android:scaleX="0.85" android:scaleY="0.85" android:pivotX="54" android:pivotY="54">
+              <path android:fillColor="#E53935" android:pathData="M26,26L42,34L46,46L32,48Z"/>
+              <path android:fillColor="#E53935" android:pathData="M82,26L66,34L62,46L76,48Z"/>
+              <path android:fillColor="#E53935" android:pathData="M50,32L58,32L62,46L54,50L46,46Z"/>
+              <path android:fillColor="#E53935" android:pathData="M32,52L46,50L48,64L40,70Z"/>
+              <path android:fillColor="#E53935" android:pathData="M76,52L62,50L60,64L68,70Z"/>
+              <path android:fillColor="#E53935" android:pathData="M50,54L58,54L60,66L54,72L48,66Z"/>
+              <path android:fillColor="#E53935" android:pathData="M42,74L66,74L54,86Z"/>
+            </group>
+          </vector>
+          EOF
+
+          cat > $J/MainActivity.java << 'EOF'
+          package com.autobot.app;
+
+          import android.app.Activity;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.*;
+          import android.widget.*;
+
+          public class MainActivity extends Activity {
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              if (Build.VERSION.SDK_INT >= 28)
+                getWindow().getAttributes().layoutInDisplayCutoutMode =
+                  WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+              getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+
+              FrameLayout root = new FrameLayout(this);
+              root.setBackgroundColor(0xFF0A0A0F);
+
+              final FrameLayout ui = new FrameLayout(this);
+              ui.setBackgroundColor(0xFF10131A);
+              TextView t = new TextView(this);
+              t.setText("AUTOBOT\nUI siap");
+              t.setTextColor(0xFF9FB3C8);
+              t.setTextSize(22);
+              t.setGravity(Gravity.CENTER);
+              ui.addView(t, new FrameLayout.LayoutParams(-1, -1));
+              ui.setVisibility(View.INVISIBLE);
+
+              TransformView tv = new TransformView(this, ty -> {
+                if (ui.getVisibility() != View.VISIBLE) ui.setVisibility(View.VISIBLE);
+                ui.setTranslationY(ty);
+              });
+
+              root.addView(ui, new FrameLayout.LayoutParams(-1, -1));
+              root.addView(tv, new FrameLayout.LayoutParams(-1, -1));
+              setContentView(root);
+            }
+          }
+          EOF
+
+          cat > $J/TransformView.java << 'EOF'
+          package com.autobot.app;
+
+          import android.animation.*;
+          import android.content.Context;
+          import android.graphics.*;
+          import android.view.*;
+
+          public class TransformView extends View {
+            public interface Sheet { void y(float ty); }
+
+            // Pecahan emblem Autobot (grid 108x108) -> jadi bagian robot
+            static final float[][] P = {
+              {26,26,42,34,46,46,32,48},        // 0 lengan kiri
+              {82,26,66,34,62,46,76,48},        // 1 lengan kanan
+              {50,32,58,32,62,46,54,50,46,46},  // 2 kepala
+              {32,52,46,50,48,64,40,70},        // 3 kaki kiri
+              {76,52,62,50,60,64,68,70},        // 4 kaki kanan
+              {50,54,58,54,60,66,54,72,48,66},  // 5 dada
+              {42,74,66,74,54,86}               // 6 pinggang
+            };
+            // target: tx, ty (offset dari pusat), rot(rad), sx, sy
+            static final float[][] D = {
+              {-27,-2,-0.12f,0.9f,2.2f}, {27,-2,0.12f,0.9f,2.2f}, {0,-32,0,1.3f,1.1f},
+              {-9,40,0,0.8f,2.6f}, {9,40,0,0.8f,2.6f}, {0,-8,0,2.6f,1f}, {0,8,0,0.7f,1f}
+            };
+            static final int[] DL = {180,180,120,260,260,0,60};
+            static final int[] C = {0xFFD32F2F,0xFFD32F2F,0xFF1565C0,0xFF1976D2,0xFF1976D2,0xFFC62828,0xFF90A4AE};
+            static final int RED = 0xFFE53935;
+            static final float T0=250, DUR=600, CR=1150, LA=1450, LE=2100, DS=2350, DE=3700, TOTAL=3750;
+
+            final Path[] pa = new Path[7];
+            final float[] cx = new float[7], cy = new float[7];
+            final boolean[] hit = new boolean[7];
+            final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+            final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+            final Paint fx = new Paint(Paint.ANTI_ALIAS_FLAG);
+            final Sheet sheet;
+            float t;
+            boolean launched;
+            ValueAnimator an;
+
+            public TransformView(Context c, Sheet s) {
+              super(c);
+              sheet = s;
+              line.setStyle(Paint.Style.STROKE);
+              line.setStrokeWidth(0.7f);
+              line.setStrokeJoin(Paint.Join.MITER);
+              line.setColor(0xFF0A0A0F);
+              for (int i = 0; i < 7; i++) {
+                float[] p = P[i];
+                int n = p.length / 2;
+                float sx = 0, sy = 0;
+                for (int j = 0; j < n; j++) { sx += p[2*j]; sy += p[2*j+1]; }
+                cx[i] = sx / n; cy[i] = sy / n;
+                Path q = new Path();
+                for (int j = 0; j < n; j++) {
+                  float x = p[2*j] - cx[i], y = p[2*j+1] - cy[i];
+                  if (j == 0) q.moveTo(x, y); else q.lineTo(x, y);
+                }
+                q.close();
+                pa[i] = q;
+              }
+            }
+
+            @Override protected void onAttachedToWindow() {
+              super.onAttachedToWindow();
+              post(() -> {
+                an = ValueAnimator.ofFloat(0, TOTAL);
+                an.setDuration((long) TOTAL);
+                an.setInterpolator(new LinearInterpolator());
+                an.addUpdateListener(a -> {
+                  t = (float) a.getAnimatedValue();
+                  int H = getHeight();
+                  float k = Math.min(getWidth(), H) * 0.0059f;
+                  float ty = t < DS ? -H * 1.5f : Math.min(0f, anchor(t, H, k) - 44 * k - H);
+                  sheet.y(ty);
+                  invalidate();
+                });
+                an.addListener(new AnimatorListenerAdapter() {
+                  @Override public void onAnimationEnd(Animator x) {
+                    sheet.y(0);
+                    setVisibility(GONE);
+                  }
+                });
+                an.start();
+              });
+            }
+
+            @Override protected void onDetachedFromWindow() {
+              if (an != null) an.cancel();
+              super.onDetachedFromWindow();
+            }
+
+            static float lerp(float a, float b, float f) { return a + (b - a) * f; }
+            static float cl(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+            static float sm(float x) { x = cl(x); return x * x * (3 - 2 * x); }
+            static float back(float x) {
+              float c1 = 1.70158f, c3 = c1 + 1, m = x - 1;
+              return 1 + c3 * m * m * m + c1 * m * m;
+            }
+            static int mix(int a, int b, float f) {
+              f = cl(f);
+              int r = (int) lerp((a >> 16) & 255, (b >> 16) & 255, f);
+              int g = (int) lerp((a >> 8) & 255, (b >> 8) & 255, f);
+              int bl = (int) lerp(a & 255, b & 255, f);
+              return 0xFF000000 | (r << 16) | (g << 8) | bl;
+            }
+
+            float anchor(float t, int H, float k) {
+              float h2 = H / 2f;
+              if (t < LA) return h2;
+              if (t < LE) { float p = (t - LA) / (LE - LA); return lerp(h2, -100 * k, p * p * p); }
+              if (t < DS) return -100 * k;
+              float p = cl((t - DS) / (DE - DS));
+              float e = p < .5f ? 4 * p * p * p : 1 - (float) Math.pow(-2 * p + 2, 3) / 2;
+              return lerp(-100 * k, H + 46 * k, e);
+            }
+
+            @Override protected void onDraw(Canvas c) {
+              int W = getWidth(), H = getHeight();
+              float k = Math.min(W, H) * 0.0059f;
+              float Y = anchor(t, H, k), X = W / 2f;
+              float fy = Y + 66 * k;
+              float sq = t < CR ? 1f
+                : t < LA ? 1 - 0.12f * sm((t - CR) / 300f)
+                : t < LE ? 0.88f + 0.2f * (1 - (float) Math.pow(1 - cl((t - LA) / 250f), 3))
+                : 1f;
+              float rz = t < LA ? 0 : sm((t - LA) / 300f);
+
+              if (t >= LA && !launched) { launched = true; performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); }
+
+              c.save();
+              c.translate(0, fy); c.scale(1, sq); c.translate(0, -fy);
+
+              // api / thruster
+              if (t > CR + 150 && t < LE + 120) {
+                float f = t < LA ? cl((t - CR - 150) / 150f) * 0.4f : 1f;
+                for (int side = -1; side <= 1; side += 2) {
+                  for (int j = 0; j < 22; j++) {
+                    float s = j / 22f;
+                    float jx = (float) Math.sin(t * 0.05 + j * 1.7 + side * 2) * 1.6f * k * s;
+                    float px = X + side * 9 * k + jx;
+                    float py = fy + s * (16 + 46 * f) * k;
+                    float r = (4.2f * (1 - s) + 0.6f) * k * f;
+                    fx.setColor(mix(0xFFFFE082, 0xFFFF6D00, s));
+                    fx.setAlpha((int) (230 * (1 - s) * Math.min(1f, f * 1.5f)));
+                    c.drawCircle(px, py, r, fx);
+                  }
+                }
+              }
+
+              // bagian tubuh
+              for (int i = 0; i < 7; i++) {
+                float p = cl((t - T0 - DL[i]) / DUR);
+                float e = back(p);
+                if (p >= 1 && !hit[i]) { hit[i] = true; performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); }
+                float jit = (p <= 0 && t > T0 - 150) ? 0.06f * (float) Math.sin(t * 0.09 + i) : 0f;
+                float tgx = 54 + D[i][0];
+                float tgy = 54 + D[i][1] + (i < 2 ? -22 * rz : 0);
+                float gx = lerp(cx[i], tgx, e), gy = lerp(cy[i], tgy, e);
+                float sx = 1 + (D[i][3] - 1) * e, sy = 1 + (D[i][4] - 1) * e;
+                c.save();
+                c.translate(X + (gx - 54) * k, Y + (gy - 54) * k);
+                c.rotate((e * D[i][2] + jit) * 57.2958f);
+                c.scale(k * sx, k * sy);
+                fill.setColor(mix(RED, C[i], p));
+                c.drawPath(pa[i], fill);
+                c.drawPath(pa[i], line);
+                c.restore();
+              }
+
+              // mata menyala setelah transformasi selesai
+              float ea = cl((t - (T0 + 260 + DUR)) / 150f);
+              if (ea > 0) {
+                c.save();
+                c.translate(X, Y);
+                c.scale(k, k);
+                float pulse = 0.75f + 0.25f * (float) Math.sin(t * 0.02);
+                fx.setColor(0xFF4FC3F7);
+                fx.setAlpha((int) (70 * ea * pulse));
+                c.drawRoundRect(-9.5f, -33.8f, -1.5f, -29.2f, 1.5f, 1.5f, fx);
+                c.drawRoundRect(1.5f, -33.8f, 9.5f, -29.2f, 1.5f, 1.5f, fx);
+                fx.setAlpha((int) (255 * ea));
+                c.drawRoundRect(-7.8f, -32.4f, -2.4f, -30.6f, 0.8f, 0.8f, fx);
+                c.drawRoundRect(2.4f, -32.4f, 7.8f, -30.6f, 0.8f, 0.8f, fx);
+                c.restore();
+              }
+              c.restore();
+            }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - name: Rename
+        run: cp app/build/outputs/apk/debug/app-debug.apk Autobot.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Autobot
+          path: Autobot.apk
+          if-no-files-found: error
