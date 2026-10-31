@@ -72,7 +72,7 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-feature android:name="android.software.live_wallpaper" android:required="true"/>
             <uses-permission android:name="android.permission.INTERNET"/>
-            <application android:label="@string/app_name" android:icon="@drawable/ic" android:usesCleartextTraffic="true">
+            <application android:hardwareAccelerated="true" android:label="@string/app_name" android:icon="@drawable/ic" android:usesCleartextTraffic="true">
               <activity android:name=".Main" android:exported="true" android:theme="@android:style/Theme.Material.NoActionBar">
                 <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
               </activity>
@@ -119,13 +119,15 @@ jobs:
 
           cat > $P/java/com/htmlwp/app/WP.kt <<'EOF'
           package com.htmlwp.app
+          import android.app.Presentation
           import android.content.Context
           import android.content.SharedPreferences
           import android.graphics.Canvas
           import android.graphics.Color
           import android.hardware.*
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
           import android.net.Uri
-          import android.os.Build
           import android.service.wallpaper.WallpaperService
           import android.view.*
           import android.webkit.*
@@ -143,13 +145,12 @@ jobs:
             }
           }
 
-          // WebView yang "dianggap attached" supaya Chromium merender walau tanpa window
           class WV(c: Context) : WebView(c) {
-            var on = false
+            var soft = false; var on = false
             fun att() { if (!on) { on = true; try { onAttachedToWindow(); onWindowFocusChanged(true) } catch (e: Exception) {} } }
             fun vis(v: Boolean) { try { onWindowVisibilityChanged(if (v) View.VISIBLE else View.GONE) } catch (e: Exception) {} }
             fun det() { if (on) { on = false; try { onDetachedFromWindow() } catch (e: Exception) {} } }
-            override fun isShown() = true
+            override fun isShown() = if (soft) true else super.isShown()
           }
 
           class WP : WallpaperService() {
@@ -159,8 +160,8 @@ jobs:
               val sp = getSharedPreferences("p", 0)
               val ch = Choreographer.getInstance()
               val sm = getSystemService(SENSOR_SERVICE) as SensorManager
-              lateinit var wv: WV
-              var vis = false; var ld = false; var hw = false; var last = 0L; var fps = 60
+              var wv: WV? = null; var vd: VirtualDisplay? = null; var pr: Presentation? = null
+              var vis = false; var gpu = true; var last = 0L; var fps = 60; var sw = 0; var sh = 0
               var gx = 0f; var gy = 0f; var gz = 0f; var lb = 999.0; var lg = 999.0
               val cb = object : Choreographer.FrameCallback {
                 override fun doFrame(t: Long) {
@@ -170,12 +171,65 @@ jobs:
                 }
               }
 
-              fun rd() { fps = sp.getInt("fps", 60); hw = sp.getBoolean("hw", false) }
-              fun js(s: String) = wv.evaluateJavascript(s, null)
+              fun rd() { fps = sp.getInt("fps", 60) }
+              fun js(s: String) { wv?.evaluateJavascript(s, null) }
 
               fun load() {
+                val v = wv ?: return
                 val u = sp.getString("url", "") ?: ""
-                wv.loadUrl(if (u.isNotEmpty()) u else "https://appassets.androidplatform.net/wp/" + Uri.encode(sp.getString("entry", "index.html"), "/"))
+                v.loadUrl(if (u.isNotEmpty()) u else "https://appassets.androidplatform.net/wp/" + Uri.encode(sp.getString("entry", "index.html"), "/"))
+              }
+
+              fun mk(c: Context): WV {
+                val v = WV(c)
+                v.setBackgroundColor(Color.BLACK)
+                v.isVerticalScrollBarEnabled = false; v.isHorizontalScrollBarEnabled = false; v.overScrollMode = View.OVER_SCROLL_NEVER
+                val a = WebViewAssetLoader.Builder().addPathHandler("/wp/", InternalStoragePathHandler(applicationContext, File(filesDir, "wp"))).build()
+                v.webViewClient = object : WebViewClient() {
+                  override fun shouldInterceptRequest(w: WebView, r: WebResourceRequest): WebResourceResponse? = a.shouldInterceptRequest(r.url)
+                  override fun onPageFinished(w: WebView, u: String) { w.evaluateJavascript("document.documentElement.style.overflow='hidden'", null) }
+                }
+                v.webChromeClient = WebChromeClient()
+                v.settings.apply {
+                  javaScriptEnabled = true; domStorageEnabled = true; mediaPlaybackRequiresUserGesture = false
+                  mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW; allowFileAccess = false; allowContentAccess = false
+                }
+                return v
+              }
+
+              fun stop() {
+                try { pr?.dismiss() } catch (e: Exception) {}; pr = null
+                try { vd?.release() } catch (e: Exception) {}; vd = null
+                wv?.let { it.det(); try { it.destroy() } catch (e: Exception) {} }; wv = null
+              }
+
+              // GPU: WebView hidup di window asli (Presentation) pada VirtualDisplay yang menulis ke surface wallpaper
+              // Software: WebView di-draw manual ke canvas (fallback, tanpa WebGL)
+              fun start() {
+                stop(); if (sw <= 0) return
+                gpu = sp.getBoolean("gpu", true)
+                if (gpu) try {
+                  val d = (getSystemService(DISPLAY_SERVICE) as DisplayManager)
+                    .createVirtualDisplay("hw", sw, sh, resources.displayMetrics.densityDpi, surfaceHolder.surface, 0)
+                  vd = d
+                  val p = Presentation(this@WP, d.display, android.R.style.Theme_Material_NoActionBar_Fullscreen)
+                  val v = mk(p.context); wv = v
+                  p.setContentView(v)
+                  p.window?.apply { setLayout(-1, -1); clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND) }
+                  p.show(); pr = p
+                } catch (e: Throwable) { stop(); gpu = false }
+                if (!gpu) {
+                  val v = mk(applicationContext); v.soft = true; wv = v
+                  v.measure(View.MeasureSpec.makeMeasureSpec(sw, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(sh, View.MeasureSpec.EXACTLY))
+                  v.layout(0, 0, sw, sh); v.att()
+                }
+                load(); vs()
+              }
+
+              fun vs() {
+                val v = wv ?: return
+                if (vis) { v.onResume(); v.resumeTimers(); if (gpu) vd?.surface = surfaceHolder.surface else v.vis(true) }
+                else { if (gpu) vd?.surface = null else v.vis(false); v.onPause(); v.pauseTimers() }
               }
 
               fun sens() {
@@ -187,34 +241,21 @@ jobs:
               override fun onCreate(h: SurfaceHolder) {
                 super.onCreate(h); setTouchEventsEnabled(true); ensure(this@WP); rd()
                 WebView.setWebContentsDebuggingEnabled(true)
-                wv = WV(applicationContext)
-                wv.setBackgroundColor(Color.BLACK)
-                wv.isVerticalScrollBarEnabled = false; wv.isHorizontalScrollBarEnabled = false; wv.overScrollMode = View.OVER_SCROLL_NEVER
-                val a = WebViewAssetLoader.Builder().addPathHandler("/wp/", InternalStoragePathHandler(applicationContext, File(filesDir, "wp"))).build()
-                wv.webViewClient = object : WebViewClient() {
-                  override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? = a.shouldInterceptRequest(r.url)
-                  override fun onPageFinished(v: WebView, u: String) { js("document.documentElement.style.overflow='hidden'") }
-                }
-                wv.webChromeClient = WebChromeClient()
-                wv.settings.apply {
-                  javaScriptEnabled = true; domStorageEnabled = true; mediaPlaybackRequiresUserGesture = false
-                  mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW; allowFileAccess = false; allowContentAccess = false
-                }
                 sp.registerOnSharedPreferenceChangeListener(this)
               }
 
               override fun onSurfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {
                 super.onSurfaceChanged(h, f, w, ht)
-                wv.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(ht, View.MeasureSpec.EXACTLY))
-                wv.layout(0, 0, w, ht); wv.att(); wv.vis(vis)
-                if (!ld) { ld = true; load() }
+                if (w == sw && ht == sh && wv != null) return
+                sw = w; sh = ht; start()
               }
+
+              override fun onSurfaceDestroyed(h: SurfaceHolder) { stop(); sw = 0; super.onSurfaceDestroyed(h) }
 
               override fun onVisibilityChanged(v: Boolean) {
                 vis = v; ch.removeFrameCallback(cb)
-                if (v) { wv.onResume(); wv.resumeTimers(); if (wv.on) wv.vis(true); ch.postFrameCallback(cb) }
-                else { if (wv.on) wv.vis(false); wv.onPause(); wv.pauseTimers() }
-                sens()
+                if (v) ch.postFrameCallback(cb)
+                vs(); sens()
               }
 
               fun tick() {
@@ -227,17 +268,18 @@ jobs:
                     js("(function(){window.wpTilt={x:$nx,y:$ny};dispatchEvent(new DeviceOrientationEvent('deviceorientation',{alpha:0,beta:$b,gamma:$g}));dispatchEvent(new CustomEvent('wptilt',{detail:{x:$nx,y:$ny}}))})()")
                   }
                 }
-                draw()
+                if (!gpu) draw()
               }
 
               fun draw() {
+                val v = wv ?: return
                 val s = surfaceHolder; var c: Canvas? = null
-                try { c = if (hw && Build.VERSION.SDK_INT >= 26) s.lockHardwareCanvas() else s.lockCanvas(); if (c != null) wv.draw(c) }
+                try { c = s.lockCanvas(); if (c != null) v.draw(c) }
                 catch (e: Exception) {}
                 finally { try { c?.let { s.unlockCanvasAndPost(it) } } catch (e: Exception) {} }
               }
 
-              override fun onTouchEvent(e: MotionEvent) { wv.dispatchTouchEvent(e); super.onTouchEvent(e) }
+              override fun onTouchEvent(e: MotionEvent) { wv?.dispatchTouchEvent(e); super.onTouchEvent(e) }
 
               override fun onOffsetsChanged(x: Float, y: Float, xs: Float, ys: Float, xp: Int, yp: Int) {
                 js("window.wpScroll={x:$x,y:$y};dispatchEvent(new CustomEvent('wpscroll',{detail:{x:$x,y:$y}}))")
@@ -245,12 +287,14 @@ jobs:
 
               override fun onSensorChanged(e: SensorEvent) { gx = e.values[0]; gy = e.values[1]; gz = e.values[2] }
               override fun onAccuracyChanged(s: Sensor?, a: Int) {}
-              override fun onSharedPreferenceChanged(s: SharedPreferences, k: String?) { rd(); if (k == "rev") load(); if (k == "tilt") sens() }
+              override fun onSharedPreferenceChanged(s: SharedPreferences, k: String?) {
+                rd(); if (k == "rev") load(); if (k == "tilt") sens(); if (k == "gpu") start()
+              }
 
               override fun onDestroy() {
                 vis = false; ch.removeFrameCallback(cb); sm.unregisterListener(this)
                 sp.unregisterOnSharedPreferenceChangeListener(this)
-                wv.det(); wv.destroy(); super.onDestroy()
+                stop(); super.onDestroy()
               }
             }
           }
@@ -297,7 +341,7 @@ jobs:
               })
               l.addView(fb)
               l.addView(sw("Tilt / gyro parallax", "tilt", true))
-              l.addView(sw("Mode GPU (eksperimental)", "hw", false))
+              l.addView(sw("Mode GPU (WebGL, disarankan)", "gpu", true))
               l.addView(btn("Set sebagai Wallpaper") {
                 try {
                   startActivity(Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER)
