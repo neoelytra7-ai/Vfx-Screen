@@ -32,6 +32,7 @@ jobs:
 
       - name: Generate project
         run: |
+          rm -rf hw && mkdir hw && cd hw
           P=app/src/main
           mkdir -p $P/java/com/htmlwp/app $P/res/xml $P/res/values $P/res/drawable $P/assets
 
@@ -336,9 +337,10 @@ jobs:
           EOF
 
       - name: Build
+        working-directory: hw
         run: gradle :app:assembleRelease --no-daemon -q
 
       - uses: actions/upload-artifact@v4
         with:
           name: HtmlWall-${{ github.run_number }}
-          path: app/build/outputs/apk/release/*.apk
+          path: hw/app/build/outputs/apk/release/*.apk
