@@ -120,19 +120,30 @@ jobs:
           cat > $P/java/com/htmlwp/app/WP.kt <<'EOF'
           package com.htmlwp.app
           import android.app.Presentation
+          import android.content.BroadcastReceiver
           import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
           import android.content.SharedPreferences
+          import android.graphics.Bitmap
           import android.graphics.Canvas
           import android.graphics.Color
+          import android.graphics.Matrix
           import android.hardware.*
           import android.hardware.display.DisplayManager
           import android.hardware.display.VirtualDisplay
           import android.net.Uri
+          import android.os.Build
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.PowerManager
           import android.service.wallpaper.WallpaperService
           import android.view.*
           import android.webkit.*
           import androidx.webkit.WebViewAssetLoader
           import androidx.webkit.WebViewAssetLoader.InternalStoragePathHandler
+          import androidx.webkit.WebViewCompat
+          import androidx.webkit.WebViewFeature
           import java.io.File
           import kotlin.math.*
 
@@ -144,6 +155,12 @@ jobs:
               c.getSharedPreferences("p", 0).edit().putString("entry", "index.html").apply()
             }
           }
+
+          // Pembatas FPS untuk requestAnimationFrame: satu gerbang per vsync, cancelAnimationFrame tetap benar
+          fun fpsJs(f: Int) = "(function(){if(window.__fps)return;var r=requestAnimationFrame.bind(window),c=cancelAnimationFrame.bind(window),iv=1000/$f,l=0,lt=-1,go=false,m={},n=0;" +
+            "window.__fps=function(f){iv=1000/f};" +
+            "window.requestAnimationFrame=function(cb){var id=++n;m[id]=r(function t(ts){if(!(id in m))return;if(ts!==lt){lt=ts;go=ts-l>=iv-2;if(go)l=ts}if(go){delete m[id];cb(ts)}else m[id]=r(t)});return id};" +
+            "window.cancelAnimationFrame=function(id){if(id in m){c(m[id]);delete m[id]}}})();"
 
           class WV(c: Context) : WebView(c) {
             var soft = false; var on = false
@@ -160,57 +177,83 @@ jobs:
               val sp = getSharedPreferences("p", 0)
               val ch = Choreographer.getInstance()
               val sm = getSystemService(SENSOR_SERVICE) as SensorManager
+              val pm = getSystemService(POWER_SERVICE) as PowerManager
+              val hd = Handler(Looper.getMainLooper())
               var wv: WV? = null; var vd: VirtualDisplay? = null; var pr: Presentation? = null
-              var vis = false; var gpu = true; var last = 0L; var fps = 60; var sw = 0; var sh = 0
+              var vis = false; var gpu = true; var last = 0L; var fps = 60; var src = ""
+              var sw = 0; var sh = 0; var ow = 0; var oh = 0; var fw = 0; var fh = 0
+              var ps = false; var th = 0
               var gx = 0f; var gy = 0f; var gz = 0f; var lb = 999.0; var lg = 999.0
+              val idle = Runnable { stop() }
+              val pw = object : BroadcastReceiver() { override fun onReceive(c: Context, i: Intent) { ps = pm.isPowerSaveMode; eff() } }
+              val tl: Any? = if (Build.VERSION.SDK_INT >= 29) PowerManager.OnThermalStatusChangedListener { s -> th = s; eff() } else null
               val cb = object : Choreographer.FrameCallback {
                 override fun doFrame(t: Long) {
                   if (!vis) return
-                  if (t - last >= 1_000_000_000L / fps - 3_000_000L) { last = t; tick() }
+                  val r = if (gpu) min(fps, 30) else fps
+                  if (t - last >= 1_000_000_000L / r - 3_000_000L) { last = t; tick() }
                   ch.postFrameCallback(this)
                 }
               }
 
-              fun rd() { fps = sp.getInt("fps", 60) }
               fun js(s: String) { wv?.evaluateJavascript(s, null) }
+              fun scl() = if (gpu && sp.getBoolean("gpu", true)) sp.getInt("scale", 75) / 100f else 1f
+              fun k() = if (gpu && fw > 0 && ow > 0) sw.toFloat() / ow else 1f
 
-              fun load() {
+              // FPS efektif: pilihan user, dipangkas saat hemat baterai / suhu naik
+              fun eff() {
+                var f = sp.getInt("fps", 60)
+                if (sp.getBoolean("auto", true)) {
+                  if (ps) f = min(f, 30)
+                  f = when { th >= 4 -> min(f, 10); th >= 3 -> min(f, 20); th >= 2 -> min(f, 30); else -> f }
+                }
+                fps = f; js("window.__fps&&__fps($f)")
+              }
+
+              fun load(force: Boolean) {
                 val v = wv ?: return
                 val u = sp.getString("url", "") ?: ""
-                v.loadUrl(if (u.isNotEmpty()) u else "https://appassets.androidplatform.net/wp/" + Uri.encode(sp.getString("entry", "index.html"), "/"))
+                val t = if (u.isNotEmpty()) u else "https://appassets.androidplatform.net/wp/" + Uri.encode(sp.getString("entry", "index.html"), "/")
+                if (force || t != src) { src = t; v.loadUrl(t) }
               }
 
               fun mk(c: Context): WV {
                 val v = WV(c)
                 v.setBackgroundColor(Color.BLACK)
                 v.isVerticalScrollBarEnabled = false; v.isHorizontalScrollBarEnabled = false; v.overScrollMode = View.OVER_SCROLL_NEVER
+                v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
                 val a = WebViewAssetLoader.Builder().addPathHandler("/wp/", InternalStoragePathHandler(applicationContext, File(filesDir, "wp"))).build()
                 v.webViewClient = object : WebViewClient() {
                   override fun shouldInterceptRequest(w: WebView, r: WebResourceRequest): WebResourceResponse? = a.shouldInterceptRequest(r.url)
-                  override fun onPageFinished(w: WebView, u: String) { w.evaluateJavascript("document.documentElement.style.overflow='hidden'", null) }
+                  override fun onPageStarted(w: WebView, u: String?, b: Bitmap?) { w.evaluateJavascript(fpsJs(fps) + "__fps($fps)", null) }
+                  override fun onPageFinished(w: WebView, u: String?) { w.evaluateJavascript("document.documentElement.style.overflow='hidden'", null) }
+                  override fun onRenderProcessGone(w: WebView, d: RenderProcessGoneDetail): Boolean { hd.post { start() }; return true }
                 }
                 v.webChromeClient = WebChromeClient()
                 v.settings.apply {
                   javaScriptEnabled = true; domStorageEnabled = true; mediaPlaybackRequiresUserGesture = false
                   mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW; allowFileAccess = false; allowContentAccess = false
+                  setSupportZoom(false); setGeolocationEnabled(false); safeBrowsingEnabled = false
                 }
+                try { if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) WebViewCompat.addDocumentStartJavaScript(v, fpsJs(fps), setOf("*")) } catch (e: Exception) {}
                 return v
               }
 
               fun stop() {
+                hd.removeCallbacks(idle)
                 try { pr?.dismiss() } catch (e: Exception) {}; pr = null
                 try { vd?.release() } catch (e: Exception) {}; vd = null
-                wv?.let { it.det(); try { it.destroy() } catch (e: Exception) {} }; wv = null
+                wv?.let { it.det(); try { it.destroy() } catch (e: Exception) {} }; wv = null; src = ""
               }
 
               // GPU: WebView hidup di window asli (Presentation) pada VirtualDisplay yang menulis ke surface wallpaper
-              // Software: WebView di-draw manual ke canvas (fallback, tanpa WebGL)
+              // Software: WebView di-draw manual ke canvas (cadangan, tanpa WebGL)
               fun start() {
                 stop(); if (sw <= 0) return
                 gpu = sp.getBoolean("gpu", true)
                 if (gpu) try {
                   val d = (getSystemService(DISPLAY_SERVICE) as DisplayManager)
-                    .createVirtualDisplay("hw", sw, sh, resources.displayMetrics.densityDpi, surfaceHolder.surface, 0)
+                    .createVirtualDisplay("hw", sw, sh, (resources.displayMetrics.densityDpi * k()).roundToInt(), surfaceHolder.surface, 0)
                   vd = d
                   val p = Presentation(this@WP, d.display, android.R.style.Theme_Material_NoActionBar_Fullscreen)
                   val v = mk(p.context); wv = v
@@ -220,17 +263,36 @@ jobs:
                 } catch (e: Throwable) { stop(); gpu = false }
                 if (!gpu) {
                   val v = mk(applicationContext); v.soft = true; wv = v
-                  v.measure(View.MeasureSpec.makeMeasureSpec(sw, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(sh, View.MeasureSpec.EXACTLY))
-                  v.layout(0, 0, sw, sh); v.att()
+                  lay(v); v.att()
                 }
-                load(); vs()
+                eff(); load(true); vs(); loop()
+              }
+
+              fun lay(v: WV) {
+                v.measure(View.MeasureSpec.makeMeasureSpec(sw, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(sh, View.MeasureSpec.EXACTLY))
+                v.layout(0, 0, sw, sh)
+              }
+
+              // Surface (baru/berubah): pakai ulang WebView yang sudah hidup, jangan reload halaman
+              fun surf() {
+                val v = wv
+                if (v == null) { start(); return }
+                if (gpu) vd?.let { it.resize(sw, sh, (resources.displayMetrics.densityDpi * k()).roundToInt()) } else lay(v)
+                vs()
               }
 
               fun vs() {
                 val v = wv ?: return
-                if (vis) { v.onResume(); v.resumeTimers(); if (gpu) vd?.surface = surfaceHolder.surface else v.vis(true) }
-                else { if (gpu) vd?.surface = null else v.vis(false); v.onPause(); v.pauseTimers() }
+                if (vis) {
+                  v.onResume(); v.resumeTimers()
+                  if (gpu) { if (sw > 0) vd?.surface = surfaceHolder.surface } else v.vis(true)
+                } else {
+                  if (gpu) vd?.surface = null else v.vis(false)
+                  v.onPause(); v.pauseTimers()
+                }
               }
+
+              fun loop() { ch.removeFrameCallback(cb); if (vis && (!gpu || sp.getBoolean("tilt", true))) ch.postFrameCallback(cb) }
 
               fun sens() {
                 sm.unregisterListener(this)
@@ -239,23 +301,32 @@ jobs:
               }
 
               override fun onCreate(h: SurfaceHolder) {
-                super.onCreate(h); setTouchEventsEnabled(true); ensure(this@WP); rd()
+                super.onCreate(h); setTouchEventsEnabled(true); ensure(this@WP)
                 WebView.setWebContentsDebuggingEnabled(true)
-                sp.registerOnSharedPreferenceChangeListener(this)
+                ps = pm.isPowerSaveMode
+                registerReceiver(pw, IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED))
+                if (Build.VERSION.SDK_INT >= 29) pm.addThermalStatusListener(mainExecutor, tl as PowerManager.OnThermalStatusChangedListener)
+                eff(); sp.registerOnSharedPreferenceChangeListener(this)
               }
 
               override fun onSurfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {
                 super.onSurfaceChanged(h, f, w, ht)
-                if (w == sw && ht == sh && wv != null) return
-                sw = w; sh = ht; start()
+                val s = scl()
+                // turunkan resolusi buffer; dinaikkan lagi oleh hardware scaler (hemat GPU & baterai)
+                if (s < 1f && !(w == fw && ht == fh)) { ow = w; oh = ht; fw = (w * s).roundToInt(); fh = (ht * s).roundToInt(); h.setFixedSize(fw, fh); return }
+                if (s >= 1f && fw != 0) { fw = 0; fh = 0; h.setSizeFromLayout(); return }
+                sw = w; sh = ht; surf()
               }
 
-              override fun onSurfaceDestroyed(h: SurfaceHolder) { stop(); sw = 0; super.onSurfaceDestroyed(h) }
+              override fun onSurfaceDestroyed(h: SurfaceHolder) {
+                sw = 0; vd?.surface = null; super.onSurfaceDestroyed(h)
+              }
 
               override fun onVisibilityChanged(v: Boolean) {
-                vis = v; ch.removeFrameCallback(cb)
-                if (v) ch.postFrameCallback(cb)
-                vs(); sens()
+                vis = v; hd.removeCallbacks(idle)
+                if (!v) hd.postDelayed(idle, 600_000)   // lama tersembunyi (10 menit): bebaskan RAM/GPU
+                if (v && wv == null && sw > 0) start() else vs()
+                loop(); sens()
               }
 
               fun tick() {
@@ -273,13 +344,22 @@ jobs:
 
               fun draw() {
                 val v = wv ?: return
+                if (sw <= 0) return
                 val s = surfaceHolder; var c: Canvas? = null
                 try { c = s.lockCanvas(); if (c != null) v.draw(c) }
                 catch (e: Exception) {}
                 finally { try { c?.let { s.unlockCanvasAndPost(it) } } catch (e: Exception) {} }
               }
 
-              override fun onTouchEvent(e: MotionEvent) { wv?.dispatchTouchEvent(e); super.onTouchEvent(e) }
+              override fun onTouchEvent(e: MotionEvent) {
+                val v = wv
+                if (v != null) {
+                  val q = k()
+                  if (q != 1f) { val m = MotionEvent.obtain(e); m.transform(Matrix().apply { setScale(q, q) }); v.dispatchTouchEvent(m); m.recycle() }
+                  else v.dispatchTouchEvent(e)
+                }
+                super.onTouchEvent(e)
+              }
 
               override fun onOffsetsChanged(x: Float, y: Float, xs: Float, ys: Float, xp: Int, yp: Int) {
                 js("window.wpScroll={x:$x,y:$y};dispatchEvent(new CustomEvent('wpscroll',{detail:{x:$x,y:$y}}))")
@@ -287,13 +367,27 @@ jobs:
 
               override fun onSensorChanged(e: SensorEvent) { gx = e.values[0]; gy = e.values[1]; gz = e.values[2] }
               override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+
               override fun onSharedPreferenceChanged(s: SharedPreferences, k: String?) {
-                rd(); if (k == "rev") load(); if (k == "tilt") sens(); if (k == "gpu") start()
+                when (k) {
+                  "fps", "auto" -> eff()
+                  "rev" -> load(true)
+                  "tilt" -> { sens(); loop() }
+                  "gpu" -> { stop(); fw = 0; fh = 0; surfaceHolder.setSizeFromLayout(); if (sw > 0) start() }
+                  "scale" -> if (sw > 0 && gpu) {
+                    val sc = scl()
+                    if (fw == 0) { ow = sw; oh = sh }
+                    if (sc < 1f) { fw = (ow * sc).roundToInt(); fh = (oh * sc).roundToInt(); surfaceHolder.setFixedSize(fw, fh) }
+                    else { fw = 0; fh = 0; surfaceHolder.setSizeFromLayout() }
+                  }
+                }
               }
 
               override fun onDestroy() {
                 vis = false; ch.removeFrameCallback(cb); sm.unregisterListener(this)
                 sp.unregisterOnSharedPreferenceChangeListener(this)
+                try { unregisterReceiver(pw) } catch (e: Exception) {}
+                if (Build.VERSION.SDK_INT >= 29) try { pm.removeThermalStatusListener(tl as PowerManager.OnThermalStatusChangedListener) } catch (e: Exception) {}
                 stop(); super.onDestroy()
               }
             }
@@ -325,10 +419,10 @@ jobs:
               super.onCreate(b); sp = getSharedPreferences("p", 0); ensure(this)
               val l = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 96, 48, 48) }
               val u = EditText(this).apply { hint = "https://... (opsional)"; setSingleLine(); setText(sp.getString("url", "")) }
-              val fb = Button(this)
-              fun lab() { fb.text = "FPS: " + sp.getInt("fps", 60) }
+              val fb = Button(this); val sb = Button(this)
+              fun lab() { fb.text = "FPS maks: " + sp.getInt("fps", 60); sb.text = "Resolusi render: " + sp.getInt("scale", 75) + "%" }
               lab()
-              fb.setOnClickListener { sp.edit().putInt("fps", when (sp.getInt("fps", 60)) { 30 -> 45; 45 -> 60; else -> 30 }).apply(); lab() }
+              fb.setOnClickListener { sp.edit().putInt("fps", when (sp.getInt("fps", 60)) { 20 -> 30; 30 -> 45; 45 -> 60; else -> 20 }).apply(); lab() }
               l.addView(TextView(this).apply { text = "HtmlWall"; textSize = 26f })
               l.addView(btn("Pilih file .html / .zip") {
                 startActivityForResult(Intent(Intent.ACTION_GET_CONTENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), 1)
@@ -339,7 +433,9 @@ jobs:
                 File(filesDir, "wp").deleteRecursively(); ensure(this); u.setText("")
                 sp.edit().putString("entry", "index.html").putString("url", "").putInt("rev", rev()).apply()
               })
-              l.addView(fb)
+              sb.setOnClickListener { sp.edit().putInt("scale", when (sp.getInt("scale", 75)) { 100 -> 75; 75 -> 50; else -> 100 }).apply(); lab() }
+              l.addView(fb); l.addView(sb)
+              l.addView(sw("Adaptif (hemat baterai & suhu)", "auto", true))
               l.addView(sw("Tilt / gyro parallax", "tilt", true))
               l.addView(sw("Mode GPU (WebGL, disarankan)", "gpu", true))
               l.addView(btn("Set sebagai Wallpaper") {
