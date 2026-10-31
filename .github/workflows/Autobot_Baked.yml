@@ -1,0 +1,1150 @@
+name: Build Autobot APK
+on:
+  push:
+  workflow_dispatch:
+env:
+  BLENDER: 4.2.3
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      m: ${{ steps.p.outputs.m }}
+    steps:
+      - id: p
+        run: |
+          if [ "${{ inputs.preview }}" = "true" ]; then echo 'm={"shard":[0],"n":[1]}' >> $GITHUB_OUTPUT
+          else echo 'm={"shard":[0,1,2,3,4,5,6,7,8,9],"n":[10]}' >> $GITHUB_OUTPUT; fi
+
+  render:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.plan.outputs.m) }}
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: blender
+          key: blender-${{ env.BLENDER }}
+      - name: Setup Blender
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 libxkbcommon0 libsm6 libegl1 webp
+          if [ ! -x blender/blender ]; then
+            curl -L --retry 5 -o b.tar.xz https://download.blender.org/release/Blender4.2/blender-${BLENDER}-linux-x64.tar.xz
+            mkdir -p blender && tar -xf b.tar.xz -C blender --strip-components=1 && rm b.tar.xz
+          fi
+      - name: Write scene
+        run: |
+          cat > intro.py << 'EOF'
+          import bpy, bmesh, math, os, sys, random, time
+          from mathutils import Vector, Matrix, Euler
+          from bpy_extras.object_utils import world_to_camera_view
+
+          A = sys.argv[sys.argv.index('--') + 1:]
+          SH, NSH, OUT = int(A[0]), int(A[1]), A[2]
+          PREVIEW = os.environ.get('PREVIEW') == '1'
+          SPP = int(os.environ.get('SPP', '32' if PREVIEW else '128'))
+          RW, RH = (360, 780) if PREVIEW else (720, 1560)
+          NF, FPS = 450, 30
+          R = math.radians
+          rnd = random.Random(11)
+          os.makedirs(OUT, exist_ok=True)
+
+          bpy.ops.wm.read_factory_settings(use_empty=True)
+          sc = bpy.context.scene
+          sc.frame_start, sc.frame_end = 1, NF
+          sc.render.fps = FPS
+
+          # ============================================================ materials
+          MAT = {}
+          def mk(name):
+              m = bpy.data.materials.new(name); m.use_nodes = True
+              nt = m.node_tree; nt.nodes.clear(); MAT[name] = m
+              return m, nt, nt.nodes, nt.links
+
+          def bsdf(N, vals):
+              n = N.new('ShaderNodeBsdfPrincipled')
+              for k, v in vals.items():
+                  if k in n.inputs: n.inputs[k].default_value = v
+              return n
+
+          def paint(name, col, wear=1.0):
+              m, nt, N, L = mk(name)
+              out = N.new('ShaderNodeOutputMaterial')
+              bv = N.new('ShaderNodeBevel'); bv.samples = 6; bv.inputs['Radius'].default_value = 0.025
+              geo = N.new('ShaderNodeNewGeometry')
+              dt = N.new('ShaderNodeVectorMath'); dt.operation = 'DOT_PRODUCT'
+              L.new(bv.outputs['Normal'], dt.inputs[0]); L.new(geo.outputs['Normal'], dt.inputs[1])
+              sb = N.new('ShaderNodeMath'); sb.operation = 'SUBTRACT'; sb.inputs[0].default_value = 1.0
+              L.new(dt.outputs['Value'], sb.inputs[1])
+              er = N.new('ShaderNodeValToRGB')
+              er.color_ramp.elements[0].position = 0.003; er.color_ramp.elements[1].position = 0.06
+              L.new(sb.outputs[0], er.inputs['Fac'])
+              tc = N.new('ShaderNodeTexCoord'); nz = N.new('ShaderNodeTexNoise')
+              nz.inputs['Scale'].default_value = 14; nz.inputs['Detail'].default_value = 9
+              L.new(tc.outputs['Object'], nz.inputs['Vector'])
+              nr = N.new('ShaderNodeValToRGB')
+              nr.color_ramp.elements[0].position = 0.64; nr.color_ramp.elements[1].position = 0.74
+              L.new(nz.outputs['Fac'], nr.inputs['Fac'])
+              ml = N.new('ShaderNodeMath'); ml.operation = 'MULTIPLY'; ml.inputs[1].default_value = 0.6 * wear
+              L.new(nr.outputs['Color'], ml.inputs[0])
+              ad = N.new('ShaderNodeMath'); ad.operation = 'ADD'; ad.use_clamp = True
+              L.new(er.outputs['Color'], ad.inputs[0]); L.new(ml.outputs[0], ad.inputs[1])
+              pb = bsdf(N, {'Base Color': col + (1,), 'Metallic': 0.5, 'Roughness': 0.32,
+                            'Coat Weight': 1.0, 'Coat Roughness': 0.05})
+              sb2 = bsdf(N, {'Base Color': (0.62, 0.62, 0.66, 1), 'Metallic': 1.0, 'Roughness': 0.3})
+              for b in (pb, sb2): L.new(bv.outputs['Normal'], b.inputs['Normal'])
+              mx = N.new('ShaderNodeMixShader')
+              L.new(ad.outputs[0], mx.inputs[0]); L.new(pb.outputs[0], mx.inputs[1]); L.new(sb2.outputs[0], mx.inputs[2])
+              L.new(mx.outputs[0], out.inputs['Surface'])
+
+          def mat(name, col, metal=0.0, rough=0.5, em=None, es=0.0, extra=None, bump=0.0):
+              m, nt, N, L = mk(name)
+              out = N.new('ShaderNodeOutputMaterial')
+              v = {'Base Color': col + (1,), 'Metallic': metal, 'Roughness': rough}
+              if em: v['Emission Color'] = em + (1,); v['Emission Strength'] = es
+              if extra: v.update(extra)
+              b = bsdf(N, v); b.name = 'E'
+              if bump > 0:
+                  tx = N.new('ShaderNodeTexNoise'); tx.inputs['Scale'].default_value = 160; tx.inputs['Detail'].default_value = 5
+                  tc = N.new('ShaderNodeTexCoord'); L.new(tc.outputs['Object'], tx.inputs['Vector'])
+                  bp = N.new('ShaderNodeBump'); bp.inputs['Strength'].default_value = bump; bp.inputs['Distance'].default_value = 0.01
+                  L.new(tx.outputs['Fac'], bp.inputs['Height']); L.new(bp.outputs['Normal'], b.inputs['Normal'])
+              L.new(b.outputs[0], out.inputs['Surface'])
+              return m
+
+          def drv(m, sock, expr):
+              nt = m.node_tree; n = nt.nodes['E']
+              idx = list(n.inputs).index(n.inputs[sock])
+              fc = nt.driver_add('nodes["E"].inputs[%d].default_value' % idx)
+              fc.driver.type = 'SCRIPTED'; fc.driver.expression = expr
+
+          paint('R', (0.62, 0.025, 0.02))
+          paint('B', (0.03, 0.09, 0.45))
+          paint('Y', (0.85, 0.55, 0.03), 1.4)
+          mat('S', (0.62, 0.63, 0.66), 1.0, 0.24, bump=0.05)
+          mat('G', (0.07, 0.075, 0.085), 0.9, 0.38, bump=0.08)
+          mat('K', (0.012, 0.012, 0.014), 0.0, 0.72)
+          mat('D', (0.003, 0.003, 0.004), 0.3, 0.5)
+          mat('W', (1, 1, 1), 0, 0.5, em=(1, 0.95, 0.85), es=40)
+          mat('C', (0.1, 0.8, 0.9), 0, 0.4, em=(0.1, 0.9, 1.0), es=6)
+          mat('GL', (0.4, 0.8, 0.95), 0.0, 0.03, extra={'Transmission Weight': 1.0, 'IOR': 1.45})
+          eye = mat('EYE', (0.1, 0.9, 1), 0, 0.3, em=(0.15, 0.95, 1.0), es=0)
+          drv(eye, 'Emission Strength', 'min(1,max(0,(frame-196)/10))*16')
+          pla = mat('PLA', (1, 0.5, 0.1), 0, 0.5, em=(1.0, 0.45, 0.12), es=0)
+          drv(pla, 'Emission Strength', 'min(1,max(0,(frame-246)/8))*22')
+
+          # ============================================================ builder
+          LINK, ABS, BUF, JG = {}, {}, {}, {}
+          def J(name, parent, pos, base=None, sg=1):
+              e = bpy.data.objects.new(name, None); e.empty_display_size = 0.05
+              sc.collection.objects.link(e)
+              pa = ABS[parent] if parent else Vector((0, 0, 0))
+              ABS[name] = Vector(pos); e.location = Vector(pos) - pa
+              if parent: e.parent = LINK[parent]
+              LINK[name] = e
+              if base: JG.setdefault(base, []).append((name, sg))
+              return name
+
+          def put(link, m, bm, pos, rot=(0, 0, 0)):
+              M = Matrix.Translation(Vector(pos) - ABS[link]) @ Euler([R(a) for a in rot], 'XYZ').to_matrix().to_4x4()
+              bmesh.ops.transform(bm, matrix=M, verts=list(bm.verts))
+              V, F = BUF.setdefault((link, m), ([], []))
+              n = len(V); bm.verts.index_update()
+              vs = list(bm.verts)
+              V.extend(tuple(v.co) for v in vs)
+              for f in bm.faces: F.append([v.index + n for v in f.verts])
+              bm.free()
+
+          def bx(sz, bev, tp):
+              bm = bmesh.new(); bmesh.ops.create_cube(bm, size=1.0)
+              for v in bm.verts:
+                  v.co.x *= sz[0]; v.co.y *= sz[1]; v.co.z *= sz[2]
+                  if v.co.z > 0: v.co.x *= tp[0]; v.co.y *= tp[1]
+              b = min(bev, 0.4 * min(sz))
+              if b > 0.003: bmesh.ops.bevel(bm, geom=list(bm.edges), offset=b, segments=1, affect='EDGES')
+              return bm
+
+          def box(l, m, sz, pos, rot=(0, 0, 0), bev=0.03, tp=(1, 1)): put(l, m, bx(sz, bev, tp), pos, rot)
+
+          AXR = {'z': (0, 0, 0), 'x': (0, 90, 0), 'y': (90, 0, 0)}
+          def cyl(l, m, r0, r1, L_, pos, ax='z', n=14, rot=None):
+              bm = bmesh.new()
+              bmesh.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=n, radius1=r0, radius2=r1, depth=L_)
+              put(l, m, bm, pos, rot if rot else AXR[ax])
+
+          def cab(l, m, a, b, r, n=6):
+              a, b = Vector(a), Vector(b); d = b - a; ln = d.length
+              if ln < 1e-4: return
+              q = Vector((0, 0, 1)).rotation_difference(d.normalized()).to_euler()
+              cyl(l, m, r, r, ln, (a + b) / 2, rot=tuple(math.degrees(x) for x in q), n=n)
+
+          def tube(l, m, pts, r):
+              for i in range(len(pts) - 1): cab(l, m, pts[i], pts[i + 1], r)
+
+          def prism(l, m, poly, d, pos, rot=(0, 0, 0), bev=0.03):
+              bm = bmesh.new()
+              vs = [bm.verts.new((x, y, -d / 2)) for x, y in poly]
+              f = bm.faces.new(vs)
+              ret = bmesh.ops.extrude_face_region(bm, geom=[f])
+              nv = [e for e in ret['geom'] if isinstance(e, bmesh.types.BMVert)]
+              bmesh.ops.translate(bm, vec=Vector((0, 0, d)), verts=nv)
+              bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+              if bev > 0.003: bmesh.ops.bevel(bm, geom=list(bm.edges), offset=min(bev, 0.35 * d), segments=1, affect='EDGES')
+              put(l, m, bm, pos, rot)
+
+          def gear(l, m, Ro, Ri, teeth, th, pos, ax='z'):
+              bm = bmesh.new(); pts = []
+              for i in range(teeth * 4):
+                  a = 2 * math.pi * i / (teeth * 4)
+                  r = Ro if (i % 4) in (1, 2) else Ri
+                  pts.append((r * math.cos(a), r * math.sin(a)))
+              vs = [bm.verts.new((x, y, -th / 2)) for x, y in pts]
+              f = bm.faces.new(vs)
+              ret = bmesh.ops.extrude_face_region(bm, geom=[f])
+              nv = [e for e in ret['geom'] if isinstance(e, bmesh.types.BMVert)]
+              bmesh.ops.translate(bm, vec=Vector((0, 0, th)), verts=nv)
+              bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+              put(l, m, bm, pos, AXR[ax])
+
+          def bolt(l, pos, ax='y', r=0.035): cyl(l, 'S', r, r * 0.8, 0.035, pos, ax, 6)
+
+          def detail(l, m, c, w, h, ax, sg, seed, n=10, off=0.0):
+              r = random.Random(seed)
+              for i in range(n):
+                  u = r.uniform(-.42, .42) * w; v = r.uniform(-.42, .42) * h
+                  sx = r.uniform(.05, .2); sz = r.uniform(.04, .16); t = r.uniform(.015, .05)
+                  mm = m if r.random() < .7 else r.choice(['G', 'S', 'D'])
+                  if ax == 'y': box(l, mm, (sx, t, sz), (c[0] + u, c[1] + sg * (off + t / 2), c[2] + v), bev=.008)
+                  else: box(l, mm, (t, sx, sz), (c[0] + sg * (off + t / 2), c[1] + u, c[2] + v), bev=.008)
+              for a in (-1, 1):
+                  for b in (-1, 1):
+                      u = a * (w / 2 - .07); v = b * (h / 2 - .07)
+                      if ax == 'y': bolt(l, (c[0] + u, c[1] + sg * (off + .015), c[2] + v), 'y')
+                      else: bolt(l, (c[0] + sg * (off + .015), c[1] + u, c[2] + v), 'x')
+              if ax == 'y': box(l, 'D', (w * .92, .012, .014), (c[0], c[1] + sg * off, c[2] + h * .12), bev=0)
+              else: box(l, 'D', (.012, w * .92, .014), (c[0] + sg * off, c[1], c[2] + h * .12), bev=0)
+
+          def louvers(l, m, c, w, n, step, ax='y', t=0.05):
+              for i in range(n):
+                  p = (c[0], c[1], c[2] - i * step)
+                  if ax == 'y': box(l, m, (w, t, step * .45), p, bev=.006)
+                  else: box(l, m, (t, w, step * .45), p, bev=.006)
+
+          def rivets(l, p0, d, n, ax='y'):
+              for i in range(n): bolt(l, (p0[0] + d[0] * i, p0[1] + d[1] * i, p0[2] + d[2] * i), ax, .03)
+
+          # ============================================================ robot rig
+          J('lift', None, (0, 0, 0))
+          J('pelvis', 'lift', (0, 0, 2.85))
+          J('waist', 'pelvis', (0, 0, 3.25), 'waist')
+          J('neck', 'waist', (0, 0, 4.95), 'neck')
+          GEARS = []
+          for s in (1, -1):
+              x = 'p' if s > 0 else 'm'
+              J('sh' + x, 'waist', (s * 1.55, 0, 4.55), 'sh', s)
+              J('el' + x, 'sh' + x, (s * 1.62, 0, 3.4), 'el', s)
+              J('wr' + x, 'el' + x, (s * 1.62, 0, 2.25), 'wr', s)
+              J('pm' + x, 'wr' + x, (s * 1.62, -0.02, 1.8))
+              for i, dx in enumerate((-.2, -.07, .07, .2)):
+                  J('f1_%d%s' % (i, x), 'wr' + x, (s * 1.62 + dx, -0.02, 1.8), 'f1', s)
+                  J('f2_%d%s' % (i, x), 'f1_%d%s' % (i, x), (s * 1.62 + dx, -0.02, 1.5), 'f2', s)
+              J('f1_4' + x, 'wr' + x, (s * 1.62 - s * .3, -0.12, 1.95), 'f1', s)
+              J('f2_4' + x, 'f1_4' + x, (s * 1.62 - s * .3, -0.12, 1.72), 'f2', s)
+              J('wg' + x, 'waist', (s * 0.8, 1.0, 4.5), 'wg', s)
+              J('ws' + x, 'waist', (s * 0.58, -0.62, 4.85), 'ws', s)
+              J('bt' + x, 'waist', (s * 0.55, 1.0, 3.9), 'bt', s)
+              J('plb' + x, 'bt' + x, (s * 0.55, 1.0, 3.15))
+              J('ant' + x, 'neck', (s * 0.55, 0.1, 5.75), 'ant', s)
+              J('hp' + x, 'pelvis', (s * 0.62, 0, 2.75), 'hp', s)
+              J('kn' + x, 'hp' + x, (s * 0.62, -0.05, 1.5), 'kn', s)
+              J('ks' + x, 'hp' + x, (s * 0.62, -0.5, 1.9), 'ks', s)
+              J('cf' + x, 'kn' + x, (s * 0.62, 0.72, 1.4), 'cf', s)
+              J('an' + x, 'kn' + x, (s * 0.62, 0.0, 0.45), 'an', s)
+              J('toe' + x, 'an' + x, (s * 0.62, -0.45, 0.17), 'toe', s)
+              J('plf' + x, 'an' + x, (s * 0.62, 0.5, 0.2))
+              for gi, (gp, gpos, ax) in enumerate([('wg' + x, (s * 1.4, 1.1, 4.0), 'y'), ('waist', (s * 0.75, -0.64, 3.62), 'y')]):
+                  nm = 'gr%d%s' % (gi, x); J(nm, gp, gpos); GEARS.append((nm, ax, s))
+          J('gr9', 'pelvis', (0, -0.55, 3.0)); GEARS.append(('gr9', 'y', 1))
+          J('gr8', 'waist', (0, 0.9, 3.6)); GEARS.append(('gr8', 'y', -1))
+          J('bar', None, (0, 0, 0))
+          LIFTOB = LINK['lift']
+
+          # ---- torso
+          w = 'waist'
+          box(w, 'R', (2.3, 1.25, 1.25), (0, 0, 4.3), bev=.1, tp=(.86, .9))
+          box(w, 'G', (1.6, .9, .55), (0, 0, 3.48), bev=.06)
+          for i in range(6): box(w, 'K', (1.66, .94, .04), (0, 0, 3.25 + i * .1), bev=.005)
+          box(w, 'S', (2.0, .3, .1), (0, -.55, 3.7), bev=.03)
+          for s in (1, -1):
+              box(w, 'R', (.24, 1.0, 1.0), (s * 1.18, 0, 4.25), bev=.05)
+              box(w, 'G', (.2, .5, .5), (s * 1.3, 0, 4.2), bev=.03)
+              cyl(w, 'G', .46, .46, .5, (s * 1.4, 0, 4.55), 'x', 20)
+              cyl(w, 'S', .3, .3, .54, (s * 1.4, 0, 4.55), 'x', 16)
+              rivets(w, (s * 1.66, -.3, 4.2), (0, .1, 0), 7, 'x')
+              detail(w, 'R', (s * 1.31, 0, 4.25), 1.0, 1.0, 'x', s, 10 + s, 14, 0)
+              for i in range(5): box(w, 'D', (.04, .06, .14), (s * 1.3, 0.3 + i * .08, 3.9), bev=.004)
+              cab(w, 'K', (s * .3, .38, 3.35), (s * .36, .45, 3.95), .045)
+              cab(w, 'S', (s * .3, .38, 3.45), (s * .3, .38, 3.9), .03)
+              cyl(w, 'G', .09, .09, .5, (s * .3, .38, 3.62), 'z', 10)
+              cyl(w, 'S', .05, .05, .5, (s * .3, .38, 3.88), 'z', 10)
+              cyl(w, 'S', .5, .5, .55, (s * .4, 1.05, 3.3), 'z', 6) if False else None
+          box(w, 'G', (1.5, .55, 1.1), (0, .85, 4.3), bev=.06)
+          louvers(w, 'D', (0, 1.13, 4.7), 1.2, 6, .13, 'y')
+          for s in (1, -1):
+              cyl(w, 'S', .2, .2, .9, (s * .5, .95, 4.4), 'z', 14); cyl(w, 'G', .22, .22, .06, (s * .5, .95, 4.88), 'z', 14)
+              rivets(w, (s * .5 - .15, 1.14, 3.7), (.1, 0, 0), 4, 'y')
+          detail(w, 'R', (0, 1.13, 4.0), 1.4, .6, 'y', 1, 31, 12, 0)
+          detail(w, 'R', (0, -.625, 4.45), 2.0, 1.1, 'y', -1, 32, 8, 0)
+          box(w, 'C', (.5, .04, .06), (0, -.65, 3.85), bev=0)
+          for i in range(7): box(w, 'D', (1.4, .05, .035), (0, -.62, 3.72 - i * .03) if False else (0, -.6, 3.58 + i * .0), bev=0) if False else None
+          for i in range(6): box(w, 'D', (1.0, .04, .035), (0, -.58, 3.9 + i * .06), bev=0.004)
+          cyl(w, 'G', .27, .27, .5, (0, 0, 4.95), 'z', 14); cyl(w, 'S', .3, .3, .06, (0, 0, 4.78), 'z', 14)
+          rivets(w, (-.5, -.64, 3.5), (.14, 0, 0), 8, 'y')
+          # windshields
+          for s in (1, -1):
+              x = 'p' if s > 0 else 'm'; l = 'ws' + x
+              box(l, 'GL', (.95, .06, .78), (s * .58, -.66, 4.45), bev=.01)
+              box(l, 'S', (1.0, .1, .06), (s * .58, -.66, 4.86), bev=.02); box(l, 'S', (1.0, .1, .06), (s * .58, -.66, 4.04), bev=.02)
+              box(l, 'S', (.06, .1, .8), (s * .58 + .5, -.66, 4.45), bev=.02); box(l, 'S', (.06, .1, .8), (s * .58 - .48, -.66, 4.45), bev=.02)
+              cyl(l, 'G', .04, .04, .98, (s * .58, -.64, 4.88), 'x', 8)
+          # ---- pelvis
+          p = 'pelvis'
+          box(p, 'B', (1.7, 1.0, .55), (0, 0, 2.92), bev=.08)
+          box(p, 'S', (1.9, 1.05, .12), (0, 0, 3.2), bev=.03)
+          box(p, 'G', (.5, .3, .5), (0, -.55, 2.72), bev=.04)
+          for s in (1, -1):
+              box(p, 'B', (.3, .9, .5), (s * .95, 0, 2.9), bev=.04)
+              box(p, 'B', (.6, .1, .6), (s * .45, .56, 2.8), bev=.03)
+              cyl(p, 'G', .36, .36, .5, (s * .62, 0, 2.72), 'x', 18)
+              cab(p, 'K', (s * .25, -.5, 3.1), (s * .5, -.55, 2.75), .04)
+              cyl(p, 'S', .06, .06, .4, (s * .3, -.52, 2.95), 'z', 8)
+          detail(p, 'B', (0, -.5, 2.92), 1.6, .5, 'y', -1, 41, 12, 0)
+          detail(p, 'B', (0, .5, 2.9), 1.6, .5, 'y', 1, 42, 10, 0)
+          rivets(p, (-.8, -.55, 3.2), (.2, 0, 0), 9, 'y')
+          # ---- head
+          h = 'neck'
+          box(h, 'B', (.95, .95, .95), (0, 0, 5.5), bev=.09, tp=(.9, .9))
+          box(h, 'S', (.62, .1, .55), (0, -.5, 5.42), bev=.04)
+          box(h, 'D', (.5, .04, .14), (0, -.56, 5.58), bev=0)
+          box(h, 'EYE', (.2, .04, .07), (-.17, -.585, 5.58), rot=(0, 0, -6), bev=0)
+          box(h, 'EYE', (.2, .04, .07), (.17, -.585, 5.58), rot=(0, 0, 6), bev=0)
+          for i in range(5): box(h, 'D', (.36, .04, .025), (0, -.56, 5.35 - i * .05), bev=0)
+          box(h, 'B', (.12, .6, .3), (0, -.12, 6.0), bev=.03)
+          cyl(h, 'G', .25, .25, .3, (0, 0, 5.05), 'z', 12)
+          for s in (1, -1):
+              box(h, 'G', (.14, .34, .42), (s * .54, 0, 5.5), bev=.03)
+              cyl(h, 'S', .1, .1, .1, (s * .62, 0, 5.5), 'x', 10)
+              box(h, 'S', (.05, .3, .3), (s * .48, -.3, 5.3), bev=.01)
+              rivets(h, (s * .48, -.3, 5.8), (0, .08, 0), 5, 'x')
+              x = 'p' if s > 0 else 'm'
+              cyl('ant' + x, 'S', .03, .025, .6, (s * .55, .1, 6.05), 'z', 8)
+              cyl('ant' + x, 'C', .045, .045, .08, (s * .55, .1, 6.38), 'z', 8)
+              cyl('ant' + x, 'G', .07, .07, .1, (s * .55, .1, 5.75), 'z', 8)
+          detail(h, 'B', (0, -.48, 5.75), .8, .3, 'y', -1, 51, 6, 0)
+          rivets(h, (-.4, -.48, 5.9), (.2, 0, 0), 5, 'y')
+          # ---- arms
+          for s in (1, -1):
+              x = 'p' if s > 0 else 'm'
+              l = 'sh' + x
+              cyl(l, 'G', .38, .38, .66, (s * 1.62, 0, 4.55), 'x', 18)
+              box(l, 'R', (.85, 1.0, .72), (s * 1.78, 0, 4.7), bev=.08)
+              box(l, 'R', (.62, .62, 1.0), (s * 1.62, 0, 3.95), bev=.06, tp=(.9, .9))
+              box(l, 'S', (.2, .66, .8), (s * 1.95, 0, 3.95), bev=.03)
+              for i in range(4): box(l, 'D', (.3, .64, .03), (s * 1.62, 0, 4.14 - i * .13), bev=0)
+              cyl(l, 'S', .05, .05, .9, (s * 1.35, -.34, 4.0), 'z', 8)
+              cyl(l, 'G', .09, .09, .5, (s * 1.35, -.34, 4.25), 'z', 10)
+              cab(l, 'K', (s * 1.3, .3, 4.45), (s * 1.38, .34, 3.55), .045)
+              cab(l, 'K', (s * 1.34, .33, 4.45), (s * 1.42, .37, 3.6), .035)
+              detail(l, 'R', (s * 1.78, 0, 4.7), .9, .6, 'y', -1, 60 + s, 14, .5)
+              detail(l, 'R', (s * 1.62, -.31, 3.95), .6, .9, 'y', -1, 62 + s, 10, 0)
+              rivets(l, (s * 1.4, -.52, 4.9), (s * .1, 0, 0), 6, 'y')
+              l = 'el' + x
+              cyl(l, 'G', .33, .33, .64, (s * 1.62, 0, 3.4), 'x', 16)
+              cyl(l, 'S', .2, .2, .7, (s * 1.62, 0, 3.4), 'x', 12)
+              box(l, 'R', (.72, .85, 1.05), (s * 1.62, 0, 2.75), bev=.07, tp=(.9, .88))
+              box(l, 'B', (.18, .9, .9), (s * 2.0, 0, 2.75), bev=.04)
+              box(l, 'G', (.4, .3, .5), (s * 1.62, -.5, 2.9), bev=.03)
+              for i in range(5): box(l, 'D', (.36, .04, .05), (s * 1.62, -.66, 3.0 - i * .1), bev=0)
+              cab(l, 'S', (s * 1.4, .4, 3.3), (s * 1.42, .42, 2.45), .035)
+              cyl(l, 'G', .06, .06, .6, (s * 1.3, -.38, 2.8), 'z', 8)
+              detail(l, 'R', (s * 1.62, -.43, 2.75), .7, .9, 'y', -1, 70 + s, 12, 0)
+              detail(l, 'B', (s * 2.09, 0, 2.75), .8, .8, 'x', s, 72 + s, 8, 0)
+              rivets(l, (s * 1.35, -.44, 3.2), (s * .1, 0, 0), 6, 'y')
+              l = 'wr' + x
+              cyl(l, 'G', .2, .2, .5, (s * 1.62, 0, 2.2), 'x', 12)
+              box(l, 'G', (.58, .3, .42), (s * 1.62, -.02, 2.0), bev=.04)
+              box(l, 'S', (.5, .26, .06), (s * 1.62, -.02, 2.26), bev=.01)
+              rivets(l, (s * 1.45, -.17, 2.1), (s * .07, 0, 0), 5, 'y')
+              for i, dx in enumerate((-.2, -.07, .07, .2)):
+                  box('f1_%d%s' % (i, x), 'K', (.105, .11, .31), (s * 1.62 + dx, -.02, 1.64), bev=.015)
+                  box('f1_%d%s' % (i, x), 'G', (.12, .06, .2), (s * 1.62 + dx, -.07, 1.66), bev=.01)
+                  box('f2_%d%s' % (i, x), 'K', (.095, .1, .27), (s * 1.62 + dx, -.02, 1.36), bev=.015)
+                  box('f2_%d%s' % (i, x), 'S', (.09, .05, .1), (s * 1.62 + dx, -.06, 1.25), bev=.01)
+              box('f1_4' + x, 'K', (.12, .12, .24), (s * 1.62 - s * .3, -.12, 1.83), bev=.015)
+              box('f2_4' + x, 'K', (.1, .1, .22), (s * 1.62 - s * .3, -.12, 1.6), bev=.015)
+          # ---- wings (door wings) + thrusters
+          for s in (1, -1):
+              x = 'p' if s > 0 else 'm'
+              l = 'wg' + x
+              cyl(l, 'S', .07, .07, 1.8, (s * .8, 1.0, 4.5), 'z', 8)
+              box(l, 'R', (1.3, .1, 1.7), (s * 1.45, 1.0, 4.5), bev=.04)
+              for i in range(5): box(l, 'G', (.05, .15, 1.5), (s * (.95 + i * .25), 1.0, 4.5), bev=.01)
+              box(l, 'S', (1.3, .14, .06), (s * 1.45, 1.0, 5.33), bev=.01)
+              detail(l, 'R', (s * 1.45, 1.05, 4.5), 1.2, 1.5, 'y', 1, 80 + s, 14, 0)
+              rivets(l, (s * .9, .94, 3.8), (s * .1, 0, 0), 12, 'y')
+              l = 'bt' + x
+              box(l, 'G', (.5, .5, .5), (s * .55, 1.0, 3.9), bev=.04)
+              cyl(l, 'G', .3, .22, .6, (s * .55, 1.0, 3.45), 'z', 20)
+              cyl(l, 'D', .22, .22, .08, (s * .55, 1.0, 3.17), 'z', 20)
+              for i in range(6):
+                  a = i * math.pi / 3
+                  box(l, 'S', (.04, .04, .5), (s * .55 + .27 * math.cos(a), 1.0 + .27 * math.sin(a), 3.5), bev=0)
+              cyl('plb' + x, 'PLA', .26, .02, 2.2, (s * .55, 1.0, 2.05), 'z', 16)
+              cyl('plb' + x, 'W', .13, .01, 1.4, (s * .55, 1.0, 2.45), 'z', 12)
+          # ---- legs
+          for s in (1, -1):
+              x = 'p' if s > 0 else 'm'
+              l = 'hp' + x
+              box(l, 'B', (.72, .8, 1.2), (s * .62, 0, 2.1), bev=.07, tp=(.92, .92))
+              box(l, 'R', (.55, .15, .9), (s * .62, -.46, 2.15), bev=.04)
+              box(l, 'G', (.2, .3, .7), (s * .98, 0, 2.1), bev=.03)
+              cyl(l, 'S', .05, .05, .9, (s * .4, -.35, 2.15), 'z', 8)
+              cyl(l, 'G', .09, .09, .5, (s * .4, -.35, 2.4), 'z', 10)
+              cab(l, 'K', (s * .5, .42, 2.6), (s * .5, .4, 1.7), .05)
+              detail(l, 'R', (s * .62, -.54, 2.15), .55, .9, 'y', -1, 90 + s, 12, 0)
+              detail(l, 'B', (s * 1.08, 0, 2.1), .8, 1.0, 'x', s, 92 + s, 10, 0)
+              rivets(l, (s * .45, -.55, 2.6), (s * .08, 0, 0), 5, 'y')
+              l = 'kn' + x
+              cyl(l, 'G', .33, .33, .7, (s * .62, -.05, 1.5), 'x', 18)
+              cyl(l, 'S', .2, .2, .76, (s * .62, -.05, 1.5), 'x', 12)
+              box(l, 'B', (.75, .95, 1.05), (s * .62, .05, .95), bev=.07, tp=(.85, .85))
+              box(l, 'R', (.6, .5, .9), (s * .62, .55, 1.05), bev=.06)
+              box(l, 'S', (.5, .1, .8), (s * .62, -.48, .95), bev=.03)
+              cab(l, 'S', (s * .45, .8, 1.35), (s * .5, .5, .55), .05)
+              cyl(l, 'G', .08, .08, .5, (s * .45, .75, 1.1), 'z', 8)
+              for i in range(5): box(l, 'D', (.4, .04, .035), (s * .62, -.54, 1.2 - i * .1), bev=0)
+              detail(l, 'B', (s * 1.0, .05, .95), .9, .9, 'x', s, 100 + s, 12, 0)
+              detail(l, 'R', (s * .62, .81, 1.05), .55, .8, 'y', 1, 102 + s, 10, 0)
+              rivets(l, (s * .4, -.54, 1.4), (s * .08, 0, 0), 6, 'y')
+              l = 'ks' + x
+              box(l, 'R', (.62, .22, .5), (s * .62, -.52, 1.65), bev=.06)
+              box(l, 'S', (.4, .06, .3), (s * .62, -.65, 1.65), bev=.02)
+              cyl(l, 'G', .04, .04, .64, (s * .62, -.5, 1.92), 'x', 8)
+              l = 'cf' + x
+              box(l, 'R', (.5, .08, .8), (s * .62, .82, 1.0), bev=.02)
+              cyl(l, 'G', .04, .04, .54, (s * .62, .8, 1.42), 'x', 8)
+              louvers(l, 'D', (s * .62, .87, 1.3), .36, 5, .13, 'y', .03)
+              l = 'an' + x
+              cyl(l, 'G', .25, .25, .64, (s * .62, 0, .45), 'x', 14)
+              box(l, 'G', (.8, .7, .35), (s * .62, .15, .22), bev=.05)
+              box(l, 'K', (.84, 1.3, .06), (s * .62, -.15, .03), bev=.01)
+              cyl(l, 'G', .17, .13, .3, (s * .62, .5, .3), 'z', 12)
+              cyl('plf' + x, 'PLA', .15, .01, 1.2, (s * .62, .5, -.4), 'z', 12)
+              l = 'toe' + x
+              box(l, 'B', (.8, .55, .28), (s * .62, -.72, .16), bev=.05, tp=(.9, .8))
+              for i in range(4): box(l, 'D', (.7, .03, .06), (s * .62, -.98 + i * .0, .1 + i * 0.0 + (i - 1.5) * .0), bev=0) if False else None
+              rivets(l, (s * .4, -.99, .2), (s * .14, 0, 0), 4, 'y')
+          # ---- gears (micro mechanism, spinning)
+          for nm, ax, s in GEARS:
+              gear(nm, 'S', .17, .12, 10, .06, ABS[nm], ax)
+              cyl(nm, 'D', .05, .05, .09, ABS[nm], ax, 8)
+          # ---- emblem plates
+          EMB = [(26, 26, 42, 34, 46, 46, 32, 48), (82, 26, 66, 34, 62, 46, 76, 48),
+                 (50, 32, 58, 32, 62, 46, 54, 50, 46, 46), (32, 52, 46, 50, 48, 64, 40, 70),
+                 (76, 52, 62, 50, 60, 64, 68, 70), (50, 54, 58, 54, 60, 66, 54, 72, 48, 66), (42, 74, 66, 74, 54, 86)]
+          PM = ['R', 'R', 'R', 'R', 'R', 'Y', 'S']
+          TG = [('shm', (-1.85, -.2, 5.05), .55), ('shp', (1.85, -.2, 5.05), .55), ('neck', (0, -.52, 5.95), .45),
+                ('waist', (-.85, -.72, 4.2), .8), ('waist', (.85, -.72, 4.2), .8), ('waist', (0, -.76, 4.25), .55),
+                ('pelvis', (0, -.55, 3.05), .6)]
+          ES, EY = 0.075, -2.0
+          PLT = []
+          for i, pts in enumerate(EMB):
+              xs, ys = pts[0::2], pts[1::2]; cx, cy_ = sum(xs) / len(xs), sum(ys) / len(ys)
+              poly = [((px - cx) * ES, -(py - cy_) * ES) for px, py in zip(xs, ys)]
+              par, fpos, fs = TG[i]
+              nm = 'pl%d' % i; J(nm, par, fpos)
+              prism(nm, PM[i], poly, .22, fpos, (90, 0, 0), bev=.035)
+              PLT.append((nm, par, fpos, fs, ((cx - 54) * ES, EY, -(cy_ - 54) * ES)))
+          # ---- grab bar
+          box('bar', 'D', (16, .22, .26), (0, 0, .2), bev=.02)
+          cyl('bar', 'S', .12, .12, 16, (0, 0, 0), 'x', 18)
+          box('bar', 'C', (16, .03, .04), (0, -.12, -.03), bev=0)
+          for i in range(-14, 15):
+              box('bar', 'G', (.08, .26, .3), (i * .55, 0, .18), bev=.01)
+              bolt('bar', (i * .55, -.14, .2), 'y', .04)
+
+          # ============================================================ finalize meshes
+          for (l, mn), (V, F) in BUF.items():
+              me = bpy.data.meshes.new('m_%s_%s' % (l, mn)); bm = bmesh.new()
+              vs = [bm.verts.new(v) for v in V]
+              for f in F:
+                  try: bm.faces.new([vs[i] for i in f])
+                  except ValueError: pass
+              for e in bm.edges:
+                  if len(e.link_faces) == 2 and e.calc_face_angle(0) > 0.5: e.smooth = False
+              for f in bm.faces: f.smooth = True
+              bm.to_mesh(me); bm.free()
+              me.materials.append(MAT[mn])
+              ob = bpy.data.objects.new('o_%s_%s' % (l, mn), me)
+              sc.collection.objects.link(ob); ob.parent = LINK[l]
+          print('robot built, mesh objects:', len(BUF), 'parts:', sum(len(v[1]) for v in BUF.values()), 'faces')
+
+          # ============================================================ animation helpers
+          def key(ob, f, loc=None, rot=None, scl=None):
+              if loc is not None: ob.location = loc; ob.keyframe_insert('location', frame=f)
+              if rot is not None: ob.rotation_euler = rot; ob.keyframe_insert('rotation_euler', frame=f)
+              if scl is not None: ob.scale = scl; ob.keyframe_insert('scale', frame=f)
+
+          def interp(ob, kind):
+              if ob.animation_data and ob.animation_data.action:
+                  for fc in ob.animation_data.action.fcurves:
+                      for k in fc.keyframe_points: k.interpolation = kind
+
+          def noise(ob, path, idx, strength, scale, f0, f1):
+              if not (ob.animation_data and ob.animation_data.action): return
+              for fc in ob.animation_data.action.fcurves:
+                  if fc.data_path == path and fc.array_index == idx:
+                      m = fc.modifiers.new('NOISE'); m.strength = strength; m.scale = scale
+                      m.use_restricted_range = True; m.frame_start = f0; m.frame_end = f1; m.blend_in = 12; m.blend_out = 12
+
+          POSES = {
+           'FOLD': dict(waist=(40, 0, 0), neck=(-30, 0, 0), neckz=-.8, sh=(-75, -10, 0), el=(-130, 0, 0), wr=(-20, 0, 0), hp=(-95, -4, 0), kn=(125, 0, 0),
+                        an=(-35, 0, 0), toe=(0, 0, 0), wg=(0, 0, 0), ws=(0, 0, 0), bt=(60, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(-70, 0, 0), f1=(-80, 0, 0), f2=(-90, 0, 0)),
+           'OPEN1': dict(waist=(15, 0, 0), neck=(-10, 0, 0), neckz=-.3, sh=(-35, -18, 0), el=(-70, 0, 0), wr=(-10, 0, 0), hp=(-45, -6, 0), kn=(65, 0, 0),
+                        an=(-18, 0, 0), toe=(0, 0, 0), wg=(0, 0, 14), ws=(-45, 0, 0), bt=(25, 0, 0), ks=(-60, 0, 0), cf=(40, 0, 0), ant=(-30, 0, 0), f1=(-12, 0, 0), f2=(-15, 0, 0)),
+           'LOCK': dict(waist=(-5, 0, 0), neck=(8, 0, 0), neckz=.05, sh=(12, -10, 0), el=(-14, 0, 0), wr=(6, 0, 0), hp=(-3, -3, 0), kn=(4, 0, 0),
+                        an=(-2, 0, 0), toe=(0, 0, 0), wg=(0, 0, 28), ws=(0, 0, 0), bt=(0, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(4, 0, 0), f1=(-14, 0, 0), f2=(-20, 0, 0)),
+           'STAND': dict(waist=(-2, 0, 0), neck=(3, 0, 0), neckz=0, sh=(8, -8, 0), el=(-12, 0, 0), wr=(5, 0, 0), hp=(-2, -2, 0), kn=(3, 0, 0),
+                        an=(-1, 0, 0), toe=(0, 0, 0), wg=(0, 0, 24), ws=(0, 0, 0), bt=(0, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(0, 0, 0), f1=(-16, 0, 0), f2=(-22, 0, 0)),
+           'FLY': dict(waist=(8, 0, 0), neck=(-6, 0, 0), neckz=0, sh=(18, -14, 0), el=(-25, 0, 0), wr=(0, 0, 0), hp=(12, -4, 0), kn=(18, 0, 0),
+                        an=(25, 0, 0), toe=(10, 0, 0), wg=(0, 0, 40), ws=(0, 0, 0), bt=(0, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(8, 0, 0), f1=(-30, 0, 0), f2=(-40, 0, 0)),
+           'FLYR': dict(waist=(4, 0, 0), neck=(-8, 0, 0), neckz=0, sh=(-95, -14, 0), el=(-30, 0, 0), wr=(0, 0, 0), hp=(10, -4, 0), kn=(16, 0, 0),
+                        an=(25, 0, 0), toe=(10, 0, 0), wg=(0, 0, 42), ws=(0, 0, 0), bt=(0, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(8, 0, 0), f1=(-8, 0, 0), f2=(-10, 0, 0)),
+           'GRAB': dict(waist=(2, 0, 0), neck=(-8, 0, 0), neckz=0, sh=(-168, -8, 0), el=(-10, 0, 0), wr=(-5, 0, 0), hp=(6, -4, 0), kn=(10, 0, 0),
+                        an=(20, 0, 0), toe=(8, 0, 0), wg=(0, 0, 44), ws=(0, 0, 0), bt=(0, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(8, 0, 0), f1=(-5, 0, 0), f2=(-8, 0, 0)),
+           'GRABC': dict(waist=(2, 0, 0), neck=(-8, 0, 0), neckz=0, sh=(-168, -8, 0), el=(-10, 0, 0), wr=(-5, 0, 0), hp=(6, -4, 0), kn=(10, 0, 0),
+                        an=(20, 0, 0), toe=(8, 0, 0), wg=(0, 0, 44), ws=(0, 0, 0), bt=(0, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(8, 0, 0), f1=(-75, 0, 0), f2=(-85, 0, 0)),
+           'PULL': dict(waist=(-4, 0, 0), neck=(5, 0, 0), neckz=0, sh=(-172, -6, 0), el=(-22, 0, 0), wr=(-5, 0, 0), hp=(-4, -4, 0), kn=(8, 0, 0),
+                        an=(15, 0, 0), toe=(6, 0, 0), wg=(0, 0, 48), ws=(0, 0, 0), bt=(0, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(8, 0, 0), f1=(-75, 0, 0), f2=(-85, 0, 0)),
+           'PULL2': dict(waist=(-2, 0, 0), neck=(3, 0, 0), neckz=0, sh=(-172, -6, 0), el=(-8, 0, 0), wr=(-5, 0, 0), hp=(-2, -4, 0), kn=(6, 0, 0),
+                        an=(15, 0, 0), toe=(6, 0, 0), wg=(0, 0, 40), ws=(0, 0, 0), bt=(0, 0, 0), ks=(0, 0, 0), cf=(0, 0, 0), ant=(8, 0, 0), f1=(-75, 0, 0), f2=(-85, 0, 0)),
+          }
+          TL = [(1, 'FOLD'), (40, 'FOLD'), (118, 'OPEN1'), (170, 'LOCK'), (188, 'STAND'), (228, 'STAND'), (262, 'FLY'),
+                (296, 'FLYR'), (312, 'GRAB'), (326, 'GRABC'), (334, 'PULL'), (428, 'PULL'), (450, 'PULL2')]
+          DELAY = dict(waist=0, sh=3, el=7, wr=10, hp=2, kn=6, an=10, toe=12, neck=16, wg=18, ws=0, ks=4, cf=8, bt=14, ant=20, f1=12, f2=15)
+          for f, pn in TL:
+              P = POSES[pn]
+              for base, v in P.items():
+                  if base == 'neckz': continue
+                  ff = f + (DELAY.get(base, 0) if f < 200 else 0)
+                  for nm, sg in JG[base]:
+                      key(LINK[nm], ff, rot=(R(v[0]), R(v[1] * sg), R(v[2] * sg)))
+              nb = Vector((0, 0, 4.95 - 3.25))
+              key(LINK['neck'], f + (DELAY['neck'] if f < 200 else 0), loc=nb + Vector((0, 0, P['neckz'])))
+
+          # lift (world placement, scale, weight)
+          LIFTOB.location = (0, -0.9, -1.6)
+          def lift_keys(RZ):
+              ad = LIFTOB.animation_data
+              if ad: LIFTOB.animation_data_clear()
+              for f, z in [(1, -1.6), (40, -1.6), (118, -2.5), (188, -3.0), (228, -3.0), (256, -2.9), (296, RZ - 1.2), (312, RZ),
+                           (324, RZ + .12), (334, RZ), (360, RZ - 1.8), (395, RZ - 9), (428, RZ - 16.5), (450, RZ - 20)]:
+                  key(LIFTOB, f, loc=(0, -0.9, z))
+              for f, s_ in [(1, .62), (40, .62), (118, .86), (188, 1.0)]: key(LIFTOB, f, scl=(s_, s_, s_))
+              noise(LIFTOB, 'location', 0, .035, 5, 252, 336); noise(LIFTOB, 'location', 1, .02, 7, 252, 336)
+              key(LIFTOB, 1, rot=(0, 0, 0))
+              for f, rx in [(228, 0), (262, R(-5)), (300, R(-3)), (326, 0)]: key(LIFTOB, f, rot=(rx, 0, 0))
+              key(LIFTOB, 450, rot=(0, 0, 0))
+          def liftz(RZ, f):
+              pts = [(1, -1.6), (40, -1.6), (118, -2.5), (188, -3.0), (228, -3.0), (256, -2.9), (296, RZ - 1.2), (312, RZ),
+                     (324, RZ + .12), (334, RZ), (360, RZ - 1.8), (395, RZ - 9), (428, RZ - 16.5), (450, RZ - 20)]
+              for (a, za), (b, zb) in zip(pts, pts[1:]):
+                  if a <= f <= b: return za + (zb - za) * (f - a) / (b - a)
+              return pts[-1][1]
+          RZ = 0.5
+          lift_keys(RZ)
+          sc.frame_set(1)
+          # plates: start (emblem) -> end (armor)
+          for nm, par, fpos, fs, wpos in PLT:
+              ob = LINK[nm]; Mw = LINK[par].matrix_world.copy()
+              Ls = Mw.inverted() @ Matrix.Translation(Vector(wpos))
+              l0, r0, s0 = Ls.decompose()
+              lf = Vector(fpos) - ABS[par]
+              d0 = 40 + PLT.index((nm, par, fpos, fs, wpos)) * 5
+              key(ob, 1, loc=l0, rot=r0.to_euler(), scl=s0); key(ob, d0, loc=l0, rot=r0.to_euler(), scl=s0)
+              mid = (l0 + lf) / 2 + Vector((0, -0.7, 0.3)); mid.x = l0.x + (lf.x - l0.x) * .5
+              key(ob, d0 + 40, loc=mid, rot=Euler((R(rnd.uniform(-25, 25)), 0, R(rnd.uniform(-30, 30)))), scl=(1, 1, 1))
+              key(ob, 170 + PLT.index((nm, par, fpos, fs, wpos)) * 3, loc=lf + Vector((0, -.05, 0)), rot=(0, 0, 0), scl=(fs, fs, fs))
+              key(ob, 182 + PLT.index((nm, par, fpos, fs, wpos)) * 3, loc=lf, rot=(0, 0, 0), scl=(fs, fs, fs))
+          # measure hand at grab -> solve lift height so hands reach just above the top edge
+          sc.frame_set(326)
+          hz = (LINK['pmp'].matrix_world.translation.z + LINK['pmm'].matrix_world.translation.z) / 2
+          RZ += 7.9 - hz
+          lift_keys(RZ)
+          sc.frame_set(326)
+          hp_ = (LINK['pmp'].matrix_world.translation + LINK['pmm'].matrix_world.translation) / 2
+          BAR0 = Vector((0, hp_.y + 0.34, hp_.z + 0.04))
+          BARB = LINK['bar']
+          key(BARB, 1, loc=BAR0); key(BARB, 326, loc=BAR0)
+          for f in range(330, 451, 4): key(BARB, f, loc=BAR0 + Vector((0, 0, liftz(RZ, f) - liftz(RZ, 326))))
+          for f in range(330, 451, 4): pass
+          # gears spin
+          for nm, ax, s in GEARS:
+              ob = LINK[nm]; i_ = 1 if ax == 'y' else 2
+              for f, a in [(1, 0), (NF, s * 6 * math.pi)]:
+                  r_ = [0, 0, 0]; r_[i_] = a; key(ob, f, rot=tuple(r_))
+              interp(ob, 'LINEAR')
+          # plumes
+          for x in 'pm':
+              for nm in ('plb' + x, 'plf' + x):
+                  ob = LINK[nm]
+                  for f, v in [(1, 0), (246, 0), (262, 1.0), (330, 1.0), (338, .75), (428, .7), (446, 0)]: key(ob, f, scl=(v if v else .001,) * 3)
+                  noise(ob, 'scale', 2, .12, 3, 250, 440)
+          # lights / camera / world
+          tgt = bpy.data.objects.new('tgt', None); sc.collection.objects.link(tgt); tgt.location = (0, -0.9, 3)
+          rig = bpy.data.objects.new('rig', None); sc.collection.objects.link(rig); rig.location = (0, 0, 3)
+          cc = rig.constraints.new('COPY_LOCATION'); cc.target = LIFTOB; cc.use_x = False; cc.use_y = False; cc.use_z = True; cc.use_offset = True
+          tc_ = tgt.constraints.new('COPY_LOCATION'); tc_.target = rig; tc_.use_x = False; tc_.use_y = False; tc_.use_z = True
+          def light(name, loc, en, col, size):
+              d = bpy.data.lights.new(name, 'AREA'); d.energy = en; d.color = col; d.shape = 'RECTANGLE'; d.size = size[0]; d.size_y = size[1]
+              o = bpy.data.objects.new(name, d); sc.collection.objects.link(o); o.location = loc; o.parent = rig
+              t = o.constraints.new('TRACK_TO'); t.target = tgt; t.track_axis = 'TRACK_NEGATIVE_Z'; t.up_axis = 'UP_Y'
+          light('key', (-5, -8, 3), 4200, (1.0, 0.93, 0.85), (6, 6))
+          light('rim', (6, 3.5, 2), 2600, (0.35, 0.75, 1.0), (3, 6))
+          light('rim2', (-6, 3, 0), 1500, (1.0, 0.5, 0.25), (3, 6))
+          light('fill', (5, -7, -3), 900, (0.6, 0.7, 1.0), (6, 6))
+          light('top', (0, -3, 9), 1200, (1, 1, 1), (8, 3))
+          w_ = bpy.data.worlds.new('W'); sc.world = w_; w_.use_nodes = True
+          bg = w_.node_tree.nodes['Background']; bg.inputs['Color'].default_value = (0.03, 0.04, 0.06, 1); bg.inputs['Strength'].default_value = 0.8
+          cam = bpy.data.cameras.new('C'); cam.lens = 40; cam.sensor_width = 36; cam.sensor_fit = 'HORIZONTAL'
+          cam.clip_start = .1; cam.clip_end = 100
+          try:
+              cam.dof.use_dof = True; cam.dof.focus_distance = 7.1; cam.dof.aperture_fstop = 5.6
+          except Exception: pass
+          co = bpy.data.objects.new('C', cam); sc.collection.objects.link(co)
+          co.location = (0, -8, 0); co.rotation_euler = (R(90), 0, 0); sc.camera = co
+
+          # ============================================================ track + smoke schedule
+          VENTS = [('wgp', Vector((1.2, 1.1, 5.2))), ('wgm', Vector((-1.2, 1.1, 5.2))), ('hpp', Vector((.62, .45, 2.5))), ('hpm', Vector((-.62, .45, 2.5))),
+                   ('waist', Vector((.4, 1.1, 4.8))), ('waist', Vector((-.4, 1.1, 4.8))), ('knp', Vector((.62, .6, 1.5))), ('knm', Vector((-.62, .6, 1.5))),
+                   ('shp', Vector((1.8, 0, 5.1))), ('shm', Vector((-1.8, 0, 5.1)))]
+          NZ = ['plbp', 'plbm', 'plfp', 'plfm']
+          track, EM = [], []
+          for f in range(1, NF + 1):
+              sc.frame_set(f)
+              v = world_to_camera_view(sc, co, BARB.matrix_world.translation)
+              evt = 0
+              if f in (100, 126, 142, 158, 174, 184): evt = 1
+              if f == 252: evt = 2
+              if f == 326: evt = 3
+              track.append((f, 1 - v.y, evt))
+              def wp(l, p):  # world position of a robot-space point attached to link l
+                  return LINK[l].matrix_world @ (p - ABS[l])
+              if 96 <= f <= 190 and f % 5 == 0:
+                  l, p = rnd.choice(VENTS); EM.append((f, 'steam', wp(l, p), Vector((rnd.uniform(-.4, .4), rnd.uniform(.2, .6), 1)).normalized()))
+              if 248 <= f <= 272 and f % 2 == 0:
+                  for n_ in NZ[2:]: EM.append((f, 'burst', LINK[n_].matrix_world.translation.copy(), Vector((rnd.uniform(-1, 1), rnd.uniform(-1, 1), .15)).normalized()))
+              if 252 <= f <= 332 and f % 3 == 0:
+                  for n_ in NZ: EM.append((f, 'jet', LINK[n_].matrix_world.translation.copy(), (LINK[n_].matrix_world.to_3x3() @ Vector((0, 0, -1))).normalized()))
+              if 334 <= f <= 430 and f % 4 == 0:
+                  for n_ in NZ[:2]: EM.append((f, 'jet2', LINK[n_].matrix_world.translation.copy(), (LINK[n_].matrix_world.to_3x3() @ Vector((0, 0, -1))).normalized()))
+              if f in (140, 160, 180):  # chest steam bursts at lock
+                  for l, p in VENTS[:6]: EM.append((f, 'steam', wp(l, p), Vector((rnd.uniform(-.4, .4), rnd.uniform(.2, .6), 1)).normalized()))
+          print('emissions:', len(EM))
+          if SH == 0 and not PREVIEW:
+              with open(os.path.join(OUT, 'track.csv'), 'w') as fh:
+                  for f, b, e in track: fh.write('%d,%.5f,%d\n' % (f, b, e))
+
+          # ============================================================ smoke (path-traced volumes)
+          def smoke_mat():
+              m, nt, N, L = mk('SMK'); out = N.new('ShaderNodeOutputMaterial')
+              tc = N.new('ShaderNodeTexCoord'); oi = N.new('ShaderNodeObjectInfo')
+              tn = N.new('ShaderNodeValue'); tn.name = 'T'
+              fc = nt.driver_add('nodes["T"].outputs[0].default_value'); fc.driver.type = 'SCRIPTED'; fc.driver.expression = 'frame*0.045'
+              ad = N.new('ShaderNodeMath'); ad.operation = 'MULTIPLY_ADD'; ad.inputs[1].default_value = 30.0
+              L.new(oi.outputs['Random'], ad.inputs[0]); L.new(tn.outputs[0], ad.inputs[2])
+              nz = N.new('ShaderNodeTexNoise'); nz.noise_dimensions = '4D'
+              nz.inputs['Scale'].default_value = 1.8; nz.inputs['Detail'].default_value = 6; nz.inputs['Roughness'].default_value = 0.55
+              L.new(tc.outputs['Object'], nz.inputs['Vector']); L.new(ad.outputs[0], nz.inputs['W'])
+              ln = N.new('ShaderNodeVectorMath'); ln.operation = 'LENGTH'; L.new(tc.outputs['Object'], ln.inputs[0])
+              r1 = N.new('ShaderNodeMapRange'); r1.inputs['From Min'].default_value = .3; r1.inputs['From Max'].default_value = 1.0
+              r1.inputs['To Min'].default_value = 1.0; r1.inputs['To Max'].default_value = 0.0; L.new(ln.outputs['Value'], r1.inputs['Value'])
+              r2 = N.new('ShaderNodeMapRange'); r2.inputs['From Min'].default_value = .38; r2.inputs['From Max'].default_value = .72
+              L.new(nz.outputs['Fac'], r2.inputs['Value'])
+              m1 = N.new('ShaderNodeMath'); m1.operation = 'MULTIPLY'; L.new(r1.outputs['Result'], m1.inputs[0]); L.new(r2.outputs['Result'], m1.inputs[1])
+              sp = N.new('ShaderNodeSeparateColor'); L.new(oi.outputs['Color'], sp.inputs['Color'])
+              m2 = N.new('ShaderNodeMath'); m2.operation = 'MULTIPLY'; L.new(m1.outputs[0], m2.inputs[0]); L.new(sp.outputs['Red'], m2.inputs[1])
+              m3 = N.new('ShaderNodeMath'); m3.operation = 'MULTIPLY'; m3.inputs[1].default_value = 5.0; L.new(m2.outputs[0], m3.inputs[0])
+              pv = N.new('ShaderNodeVolumePrincipled'); pv.inputs['Color'].default_value = (.8, .8, .82, 1); pv.inputs['Anisotropy'].default_value = .35
+              L.new(m3.outputs[0], pv.inputs['Density']); L.new(pv.outputs['Volume'], out.inputs['Volume'])
+              return m
+          sm = smoke_mat()
+          sme = bpy.data.meshes.new('puff'); bmx = bmesh.new(); bmesh.ops.create_icosphere(bmx, subdivisions=2, radius=1.0); bmx.to_mesh(sme); bmx.free()
+          sme.materials.append(sm)
+          KIND = {'steam': (.1, .5, 40, .03, 1.0, .3), 'burst': (.35, 1.9, 70, .05, 1.6, .15), 'jet': (.25, 1.2, 55, .12, 1.3, .3), 'jet2': (.25, 1.0, 50, .08, 1.0, .3)}
+          for i, (f, kd, pos, dr) in enumerate(EM):
+              r0, r1_, life, spd, dens, rise = KIND[kd]
+              ob = bpy.data.objects.new('pf%d' % i, sme); sc.collection.objects.link(ob)
+              ob.rotation_euler = (rnd.uniform(0, 6), rnd.uniform(0, 6), rnd.uniform(0, 6))
+              p1 = pos + dr * spd * life * .6 + Vector((rnd.uniform(-.3, .3), rnd.uniform(-.2, .2), rise * life * .02))
+              ob.hide_render = True; ob.keyframe_insert('hide_render', frame=max(0, f - 1))
+              ob.hide_render = False; ob.keyframe_insert('hide_render', frame=f)
+              ob.hide_render = True; ob.keyframe_insert('hide_render', frame=f + life + 1)
+              key(ob, f, loc=pos); key(ob, f + life, loc=p1)
+              key(ob, f, scl=(r0,) * 3); key(ob, f + life, scl=(r1_,) * 3)
+              for ff, d in [(f, 0), (f + 5, dens), (f + int(life * .55), dens * .6), (f + life, 0)]:
+                  ob.color = (d, d, d, 1); ob.keyframe_insert('color', frame=ff)
+          print('puffs:', len(EM))
+
+          # ============================================================ render
+          cy = sc.cycles
+          sc.render.engine = 'CYCLES'
+          cy.device = 'CPU'; cy.samples = SPP; cy.use_denoising = True
+          try: cy.denoiser = 'OPENIMAGEDENOISE'
+          except Exception: pass
+          cy.use_adaptive_sampling = True; cy.adaptive_threshold = 0.02
+          cy.max_bounces = 8; cy.diffuse_bounces = 2; cy.glossy_bounces = 5; cy.transmission_bounces = 6
+          cy.volume_bounces = 1; cy.transparent_max_bounces = 8
+          try: cy.volume_step_rate = 1.6; cy.volume_max_steps = 64
+          except Exception: pass
+          sc.render.film_transparent = True
+          sc.render.resolution_x, sc.render.resolution_y, sc.render.resolution_percentage = RW, RH, 100
+          sc.render.image_settings.file_format = 'PNG'; sc.render.image_settings.color_mode = 'RGBA'; sc.render.image_settings.color_depth = '8'
+          sc.render.use_motion_blur = True
+          try: sc.render.motion_blur_shutter = 0.4
+          except Exception: pass
+          try:
+              sc.view_settings.view_transform = 'AgX'
+              sc.view_settings.look = 'Medium High Contrast'
+          except Exception: pass
+          sc.view_settings.exposure = float(os.environ.get('EXPO', '0'))
+          frames = [1, 45, 90, 125, 160, 200, 250, 290, 318, 340, 380, 420] if PREVIEW else [f for f in range(1, NF + 1) if f % NSH == SH]
+          t0 = time.time()
+          for i, f in enumerate(frames):
+              sc.frame_set(f)
+              sc.render.filepath = os.path.join(OUT, '%04d.png' % f)
+              bpy.ops.render.render(write_still=True)
+              print('frame', f, '(%d/%d)' % (i + 1, len(frames)), '%.1fs elapsed' % (time.time() - t0), flush=True)
+
+          EOF
+      - name: Path trace (Cycles CPU)
+        run: |
+          export PREVIEW=${{ inputs.preview && '1' || '0' }}
+          blender/blender -b --factory-startup -noaudio -P intro.py -- ${{ matrix.shard }} ${{ matrix.n }} out
+      - name: Encode WebP
+        if: ${{ !inputs.preview }}
+        run: |
+          cd out
+          ls *.png | xargs -P 4 -I{} sh -c 'cwebp -quiet -q 78 -alpha_q 85 -m 4 {} -o $(basename {} .png).webp'
+          rm -f *.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.preview && 'preview' || format('frames-{0}', matrix.shard) }}
+          path: out
+          if-no-files-found: error
+
+  build:
+    needs: render
+    if: ${{ !inputs.preview }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: frames-*
+          path: intro_frames
+          merge-multiple: true
+      - name: Generate project
+        run: |
+          set -e
+          rm -rf app/src app/build.gradle app/build.gradle.kts build.gradle.kts settings.gradle.kts
+          J=app/src/main/java/com/autobot/app
+          R=app/src/main/res
+          mkdir -p $J $R/values $R/values-v31 $R/drawable $R/mipmap-anydpi-v26
+          mkdir -p app/src/main/assets/intro
+          cp intro_frames/*.webp intro_frames/track.csv app/src/main/assets/intro/
+
+          cat > settings.gradle << 'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'Autobot'
+          include ':app'
+          EOF
+
+          cat > build.gradle << 'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle << 'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.autobot.app'
+            androidResources { noCompress 'webp', 'csv' }
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.autobot.app'
+              minSdk 26
+              targetSdk 34
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+            <application
+              android:label="Autobot"
+              android:icon="@mipmap/ic_launcher"
+              android:theme="@style/T"
+              android:hardwareAccelerated="true">
+              <activity
+                android:name=".MainActivity"
+                android:exported="true"
+                android:screenOrientation="portrait"
+                android:configChanges="orientation|screenSize|keyboardHidden">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+
+          cat > $R/values/colors.xml << 'EOF'
+          <resources><color name="bg">#0A0A0F</color></resources>
+          EOF
+
+          cat > $R/values/styles.xml << 'EOF'
+          <resources>
+            <style name="T" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+              <item name="android:windowIsTranslucent">true</item>
+              <item name="android:windowBackground">@android:color/transparent</item>
+              <item name="android:windowAnimationStyle">@null</item>
+              <item name="android:windowDisablePreview">true</item>
+              <item name="android:statusBarColor">@android:color/transparent</item>
+              <item name="android:navigationBarColor">@android:color/transparent</item>
+            </style>
+          </resources>
+          EOF
+
+          cat > $R/values-v31/styles.xml << 'EOF'
+          <resources>
+            <style name="T" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+              <item name="android:windowIsTranslucent">true</item>
+              <item name="android:windowBackground">@android:color/transparent</item>
+              <item name="android:windowAnimationStyle">@null</item>
+              <item name="android:windowDisablePreview">true</item>
+              <item name="android:statusBarColor">@android:color/transparent</item>
+              <item name="android:navigationBarColor">@android:color/transparent</item>
+              <item name="android:windowSplashScreenBackground">@android:color/transparent</item>
+              <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash_empty</item>
+            </style>
+          </resources>
+          EOF
+
+          cat > $R/mipmap-anydpi-v26/ic_launcher.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@color/bg"/>
+            <foreground android:drawable="@drawable/ic_fg"/>
+          </adaptive-icon>
+          EOF
+
+          cat > $R/drawable/ic_splash_empty.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="1dp" android:height="1dp" android:viewportWidth="1" android:viewportHeight="1">
+            <path android:fillColor="#00000000" android:pathData="M0,0h1v1h-1z"/>
+          </vector>
+          EOF
+
+          cat > $R/drawable/ic_fg.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp" android:height="108dp"
+            android:viewportWidth="108" android:viewportHeight="108">
+            <group android:scaleX="0.85" android:scaleY="0.85" android:pivotX="54" android:pivotY="54">
+              <path android:fillColor="#E53935" android:pathData="M26,26L42,34L46,46L32,48Z"/>
+              <path android:fillColor="#E53935" android:pathData="M82,26L66,34L62,46L76,48Z"/>
+              <path android:fillColor="#E53935" android:pathData="M50,32L58,32L62,46L54,50L46,46Z"/>
+              <path android:fillColor="#E53935" android:pathData="M32,52L46,50L48,64L40,70Z"/>
+              <path android:fillColor="#E53935" android:pathData="M76,52L62,50L60,64L68,70Z"/>
+              <path android:fillColor="#E53935" android:pathData="M50,54L58,54L60,66L54,72L48,66Z"/>
+              <path android:fillColor="#E53935" android:pathData="M42,74L66,74L54,86Z"/>
+            </group>
+          </vector>
+          EOF
+
+          cat > $J/MainActivity.java << 'EOF'
+          package com.autobot.app;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Intent;
+          import android.graphics.PixelFormat;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.*;
+          import android.widget.*;
+
+          public class MainActivity extends Activity {
+            WindowManager wm;
+            View overlay;
+            boolean started;
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+              if (Build.VERSION.SDK_INT >= 28)
+                getWindow().getAttributes().layoutInDisplayCutoutMode =
+                  WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+              wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+              if (Settings.canDrawOverlays(this)) go(true); else ask();
+            }
+
+            void ask() {
+              new AlertDialog.Builder(this)
+                .setTitle("Izin overlay")
+                .setMessage("Autobot butuh izin tampil di atas aplikasi lain supaya animasi pembuka berjalan transparan di atas layarmu.")
+                .setCancelable(false)
+                .setPositiveButton("Izinkan", (d, w) -> startActivityForResult(
+                  new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())), 7))
+                .setNegativeButton("Lewati", (d, w) -> go(false))
+                .show();
+            }
+
+            @Override protected void onActivityResult(int rq, int rs, Intent d) {
+              super.onActivityResult(rq, rs, d);
+              if (rq == 7 && !started) go(Settings.canDrawOverlays(this));
+            }
+
+            FrameLayout ui() {
+              FrameLayout f = new FrameLayout(this);
+              f.setBackgroundColor(0xFF10131A);
+              TextView t = new TextView(this);
+              t.setText("AUTOBOT\nUI siap");
+              t.setTextColor(0xFF9FB3C8);
+              t.setTextSize(22);
+              t.setGravity(Gravity.CENTER);
+              f.addView(t, new FrameLayout.LayoutParams(-1, -1));
+              return f;
+            }
+
+            void go(boolean ov) {
+              started = true;
+              final FrameLayout ui = ui();
+              ui.setVisibility(View.INVISIBLE);
+              final TransformView tv = new TransformView(this, ty -> {
+                if (ui.getVisibility() != View.VISIBLE) ui.setVisibility(View.VISIBLE);
+                ui.setTranslationY(ty);
+              });
+              FrameLayout root = new FrameLayout(this);
+              root.addView(ui, new FrameLayout.LayoutParams(-1, -1));
+              root.addView(tv, new FrameLayout.LayoutParams(-1, -1));
+              if (ov) {
+                WindowManager.LayoutParams lp = new WindowManager.LayoutParams(-1, -1,
+                  WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                  | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                  | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                  PixelFormat.TRANSLUCENT);
+                lp.gravity = Gravity.TOP | Gravity.START;
+                if (Build.VERSION.SDK_INT >= 28)
+                  lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                overlay = root;
+                wm.addView(root, lp);
+              } else {
+                setContentView(root);
+              }
+              tv.setOnEnd(() -> {
+                FrameLayout real = ui();
+                setContentView(real);
+                final View o = overlay;
+                overlay = null;
+                if (o != null) real.post(() -> { try { wm.removeView(o); } catch (Exception e) { } });
+              });
+            }
+
+            @Override protected void onDestroy() {
+              if (overlay != null) { try { wm.removeView(overlay); } catch (Exception e) { } overlay = null; }
+              super.onDestroy();
+            }
+          }
+          EOF
+
+          cat > $J/TransformView.java << 'EOF'
+          package com.autobot.app;
+
+          import android.content.Context;
+          import android.content.res.AssetManager;
+          import android.graphics.*;
+          import android.view.*;
+          import java.io.*;
+          import java.util.*;
+          import java.util.concurrent.*;
+
+          public class TransformView extends View {
+            public interface Sheet { void y(float ty); }
+
+            static final int FW = 720, FH = 1560, FPS = 30, AHEAD = 8, PRE = 6, KEEP = 4;
+            final Sheet sheet;
+            final Paint pt = new Paint(Paint.FILTER_BITMAP_FLAG);
+            final ConcurrentHashMap<Integer, Bitmap> ready = new ConcurrentHashMap<>();
+            final ConcurrentLinkedQueue<Bitmap> pool = new ConcurrentLinkedQueue<>();
+            float[] bar = new float[0];
+            int[] evt = new int[0];
+            int n, lastEvt = -1;
+            volatile int cur, shown = -1;
+            volatile boolean alive = true;
+            boolean started, ended;
+            long t0, lastTick;
+            Thread dec;
+            Runnable onEnd;
+
+            public TransformView(Context c, Sheet s) { super(c); sheet = s; }
+
+            public void setOnEnd(Runnable r) { onEnd = r; }
+
+            void load() {
+              ArrayList<float[]> rows = new ArrayList<>();
+              try (BufferedReader br = new BufferedReader(new InputStreamReader(getContext().getAssets().open("intro/track.csv")))) {
+                String ln;
+                while ((ln = br.readLine()) != null) {
+                  String[] p = ln.trim().split(",");
+                  if (p.length >= 3) rows.add(new float[]{Float.parseFloat(p[1]), Integer.parseInt(p[2])});
+                }
+              } catch (Exception e) { }
+              n = rows.size();
+              bar = new float[n]; evt = new int[n];
+              for (int i = 0; i < n; i++) { bar[i] = rows.get(i)[0]; evt[i] = (int) rows.get(i)[1]; }
+              dec = new Thread(() -> {
+                AssetManager am = getContext().getAssets();
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inMutable = true;
+                o.inPreferredConfig = Bitmap.Config.ARGB_8888;
+                for (int i = 0; i < n && alive; i++) {
+                  while (alive && i > cur + AHEAD) {
+                    try { Thread.sleep(3); } catch (InterruptedException e) { return; }
+                  }
+                  int s = shown - KEEP;
+                  for (Integer k : ready.keySet()) {
+                    if (k < s) { Bitmap b = ready.remove(k); if (b != null) pool.add(b); }
+                  }
+                  Bitmap re = pool.poll();
+                  Bitmap b = null;
+                  try (InputStream in = am.open(String.format(Locale.US, "intro/%04d.webp", i + 1))) {
+                    o.inBitmap = re;
+                    b = BitmapFactory.decodeStream(in, null, o);
+                  } catch (Throwable e) {
+                    o.inBitmap = null;
+                    try (InputStream in2 = am.open(String.format(Locale.US, "intro/%04d.webp", i + 1))) {
+                      b = BitmapFactory.decodeStream(in2, null, o);
+                    } catch (Throwable e2) { }
+                  }
+                  if (b != null) ready.put(i, b);
+                }
+              }, "intro-dec");
+              dec.start();
+            }
+
+            @Override protected void onAttachedToWindow() {
+              super.onAttachedToWindow();
+              load();
+              postInvalidateOnAnimation();
+            }
+
+            @Override protected void onDetachedFromWindow() {
+              alive = false;
+              if (dec != null) dec.interrupt();
+              super.onDetachedFromWindow();
+            }
+
+            void finish() {
+              if (ended) return;
+              ended = true;
+              alive = false;
+              sheet.y(0);
+              setVisibility(GONE);
+              if (onEnd != null) onEnd.run();
+            }
+
+            @Override protected void onDraw(Canvas c) {
+              if (ended) return;
+              int w = getWidth(), h = getHeight();
+              if (w == 0 || h == 0) { postInvalidateOnAnimation(); return; }
+              if (n < 2) { finish(); return; }
+              if (!started) {
+                if (ready.size() >= PRE) { started = true; t0 = System.nanoTime(); }
+                else { postInvalidateOnAnimation(); return; }
+              }
+              float f = (System.nanoTime() - t0) * FPS / 1e9f;
+              int i = (int) f;
+              if (i >= n - 1) { finish(); return; }
+              cur = i;
+              float fr = f - i;
+              float sc = Math.max(w / (float) FW, h / (float) FH);
+              float dx = (w - FW * sc) / 2f, dy = (h - FH * sc) / 2f;
+              float bn = bar[i] + (bar[i + 1] - bar[i]) * fr;
+              sheet.y(Math.min(0f, dy + bn * FH * sc - h));
+              for (int j = lastEvt + 1; j <= i; j++) {
+                if (evt[j] == 1) {
+                  long now = System.nanoTime();
+                  if (now - lastTick > 60000000L) { lastTick = now; performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); }
+                } else if (evt[j] == 2) performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                else if (evt[j] == 3) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+              }
+              lastEvt = i;
+              Bitmap b = null;
+              for (int k = i; k >= Math.max(shown, 0) && b == null; k--) {
+                b = ready.get(k);
+                if (b != null) shown = k;
+              }
+              if (b == null && shown >= 0) b = ready.get(shown);
+              if (b != null) {
+                c.save();
+                c.translate(dx, dy);
+                c.scale(sc, sc);
+                c.drawBitmap(b, 0, 0, pt);
+                c.restore();
+              }
+              postInvalidateOnAnimation();
+            }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - name: Rename
+        run: cp app/build/outputs/apk/debug/app-debug.apk Autobot.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Autobot
+          path: Autobot.apk
+          if-no-files-found: error
