@@ -1,4 +1,4 @@
-# Slime Canvas 4.0 (stage 1: glass slime, per-layer liquify, stacked sliders with limits, lasso erase outline, stabilizer)
+# Slime Canvas 5.0 (glass slime, per-layer liquify, stacked sliders + limits, stabilizer, lasso erase outline, project saves, gallery home)
 # Single-file pipeline: this YAML contains the whole Android app (Kotlin) + build + sign + release.
 # Edit the source blocks in the 'src' step and push: every push builds an updatable APK.
 name: apk
@@ -189,6 +189,7 @@ jobs:
                   }
                   T.load(getSharedPreferences("t", 0))
                   U.loadHist(getSharedPreferences("t", 0))
+                  GV.load(getSharedPreferences("t", 0))
                   setContent { Root() }
               }
           }
@@ -198,9 +199,14 @@ jobs:
               val ctx = LocalContext.current
               val st = remember { BenchState().also { it.res = loadBench(ctx) } }
               var eng by remember { mutableStateOf<Engine?>(null) }
+              var pid by remember { mutableStateOf("") }
               val e = eng
-              if (e == null) Home(st) { c -> eng = Engine(c.w, c.h, c.paper, c.pat, c.layers, c.budget) }
-              else App(e) { eng = null }
+              if (e == null) Home(
+                  st,
+                  { c -> pid = Proj.newId(); eng = Engine(c.w, c.h, c.paper, c.pat, c.layers, c.budget) },
+                  { m -> pid = m.id; eng = Engine(m.w, m.h, m.paper, m.pat, m.layers, m.budget).also { it.pending = Proj.dir(ctx, m.id) } }
+              )
+              else App(e, pid) { eng = null }
           }
           EOF_SRC
           mkdir -p app/src/main/kotlin/dev/canvas
@@ -519,6 +525,8 @@ jobs:
               val lasso = java.util.concurrent.CopyOnWriteArrayList<Float>()
               var lassoN by mutableIntStateOf(0)
               var advOk by mutableStateOf(true)        // shader blends available on this gpu
+              @Volatile var pending: java.io.File? = null   // project folder to load when the surface is created
+              @Volatile var edits = 0                       // strokes / actions since opening (autosave only when something happened)
               @Volatile var onThumbs: ((List<Bitmap>) -> Unit)? = null
               private val et: Tool get() = if (inv && tool == Tool.BRUSH) Tool.ERASER else tool
               private var pBL: P? = null
@@ -777,7 +785,12 @@ jobs:
                   G.glGenFramebuffers(1, a, 0); tFbo = a[0]
                   map = Layer(dTex, dFbo); clearMap()
                   layers.clear(); uStack.clear(); rStack.clear(); tiles = 0; step = null; warped = false; warpL = null; cur = 0
-                  addLayer(true); paintPaper(layers[0]); addLayer()
+                  val pd = pending
+                  if (pd == null || !loadProject(pd)) {
+                      for (l in layers.toList()) delGl(l)
+                      layers.clear(); cur = 0
+                      addLayer(true); paintPaper(layers[0]); addLayer()
+                  }
               }
               override fun onSurfaceChanged(g: GL10?, w: Int, h: Int) { vw = w; vh = h }
 
@@ -852,7 +865,7 @@ jobs:
                   if (fxOn) return
                   commitStep()
                   if (warped && et != Tool.LIQUIFY && warpL === layers[cur]) bakeWarp()
-                  busy = true
+                  busy = true; if (et != Tool.PICK) edits++
                   x0 = x; y0 = y; sx = x; sy = y; lx = x; ly = y; acc = 0f; pdx = x; pdy = y; vS = 0f
                   when (et) {
                       Tool.FILL -> fill(x.toInt(), y.toInt())
@@ -1345,6 +1358,61 @@ jobs:
                   for (t in intArrayOf(sT, aT, bT)) delTex(t)
                   G.glDeleteFramebuffers(3, intArrayOf(sF, aF, bF), 0)
                   if (cb != null) android.os.Handler(android.os.Looper.getMainLooper()).post { cb(outL) }
+              }
+
+              /** Save every layer as a PNG (+ meta.json + thumb.png) into [dir]. GL thread; the screen freezes for a moment on big canvases. */
+              fun saveProject(dir: java.io.File, thumbSize: Int = 320): Boolean {
+                  return try {
+                      bakeWarp()
+                      dir.mkdirs()
+                      val js = org.json.JSONArray()
+                      for ((i, l) in layers.withIndex()) {
+                          val bb = ByteBuffer.allocateDirect(W * H * 4).order(ByteOrder.nativeOrder())
+                          G.glBindFramebuffer(G.GL_FRAMEBUFFER, l.fbo)
+                          G.glReadPixels(0, 0, W, H, G.GL_RGBA, G.GL_UNSIGNED_BYTE, bb); bb.rewind()
+                          val b0 = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888); b0.copyPixelsFromBuffer(bb)
+                          val mt = Matrix(); mt.preScale(1f, -1f)
+                          val b = Bitmap.createBitmap(b0, 0, 0, W, H, mt, false); b0.recycle()
+                          java.io.File(dir, "L" + i + ".png").outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                          b.recycle()
+                          js.put(org.json.JSONObject().put("show", l.show).put("alpha", l.alpha.toDouble()).put("blend", l.blend))
+                      }
+                      val snap = snapshot()
+                      val tw = if (W >= H) thumbSize else max(1, thumbSize * W / H)
+                      val th = if (W >= H) max(1, thumbSize * H / W) else thumbSize
+                      val tb = Bitmap.createScaledBitmap(snap, tw, th, true)
+                      if (tb !== snap) snap.recycle()
+                      java.io.File(dir, "thumb.png").outputStream().use { tb.compress(Bitmap.CompressFormat.PNG, 90, it) }
+                      tb.recycle()
+                      val meta = org.json.JSONObject().put("w", W).put("h", H).put("paper", paper).put("pat", paperPat)
+                          .put("maxLayers", maxLayers).put("budget", tileBudget).put("cur", cur).put("time", System.currentTimeMillis()).put("layers", js)
+                      java.io.File(dir, "meta.json").writeText(meta.toString())
+                      true
+                  } catch (t: Throwable) { false }
+              }
+
+              private fun loadProject(dir: java.io.File): Boolean {
+                  return try {
+                      val mj = org.json.JSONObject(java.io.File(dir, "meta.json").readText())
+                      val ja = mj.getJSONArray("layers")
+                      for (i in 0 until ja.length()) {
+                          val raw = android.graphics.BitmapFactory.decodeFile(java.io.File(dir, "L" + i + ".png").path) ?: return false
+                          addLayer()
+                          val lj = ja.getJSONObject(i)
+                          val l = layers[cur]
+                          val mt = Matrix(); mt.preScale(1f, -1f)
+                          val b = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, mt, false)
+                          if (b !== raw) raw.recycle()
+                          G.glActiveTexture(G.GL_TEXTURE0); G.glBindTexture(G.GL_TEXTURE_2D, l.tex)
+                          android.opengl.GLUtils.texSubImage2D(G.GL_TEXTURE_2D, 0, 0, 0, b)
+                          b.recycle()
+                          l.show = lj.getBoolean("show"); l.alpha = lj.getDouble("alpha").toFloat(); l.blend = lj.getInt("blend")
+                      }
+                      if (layers.isEmpty()) return false
+                      cur = mj.optInt("cur", layers.size - 1).coerceIn(0, layers.size - 1)
+                      sync()
+                      true
+                  } catch (t: Throwable) { false }
               }
 
               /** Import a picture as a new layer (aspect-fit, centered). GL thread. */
@@ -1868,7 +1936,7 @@ jobs:
           }
 
           // ───────────────────────── procedural icons (no assets, drawn + animated in code) ─────────────────────────
-          enum class Ik { BR, ER, SM, BL, DG, BN, LQ, FL, GR, LN, RC, OV, PK, MV, UN, RE, LY, CO, BS, MN, SV, SY, EY, EN, PL, MI, DP, TR, UP, DN, MG, CX, CV, OK, TH, FX, CP, HM, LK, IM, GD, DC, LS }
+          enum class Ik { BR, ER, SM, BL, DG, BN, LQ, FL, GR, LN, RC, OV, PK, MV, UN, RE, LY, CO, BS, MN, SV, SY, EY, EN, PL, MI, DP, TR, UP, DN, MG, CX, CV, OK, TH, FX, CP, HM, LK, IM, GD, DC, LS, GS }
 
           /** ph = animation phase 0..1 (looping while active, one-shot on tap). */
           fun DrawScope.ic(k: Ik, c: Color, c2: Color, ph: Float) {
@@ -2002,6 +2070,7 @@ jobs:
                       for (k in 0..5) drawArc(c, k * 60f + 8f, 38f, false, o(4f, 6f), Size(16f * u, 12f * u), style = st)
                       dot(18f + w * 1.5f, 18.5f, 1.8f, c2); l(17f, 15f, 18.5f, 17f, c2)
                   }
+                  Ik.GS -> { for (i in 0..2) for (j in 0..2) dot(6f + i * 6f, 6f + j * 6f, 1.7f + (if (i == 1 && j == 1) w else 0f)) }
                   else -> {}
               }
           }
@@ -2283,7 +2352,7 @@ jobs:
           @Composable
           fun MenuPanel(
               e: Engine, sym: () -> Unit, save: () -> Unit, theme: () -> Unit, hide: () -> Unit, img: () -> Unit, guide: () -> Unit,
-              inspire: () -> Unit, saveHome: () -> Unit, home: () -> Unit
+              inspire: () -> Unit, proj: () -> Unit, saveHome: () -> Unit, home: () -> Unit
           ) {
               val rv = U.rev
               var sure by remember { mutableStateOf(false) }
@@ -2291,7 +2360,7 @@ jobs:
                   Tx("leave this canvas?", T.ac, sz = 10f)
                   Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(d(8f))) {
                       Pill("SAVE & LEAVE", true, Ik.SV) { saveHome() }
-                      Pill("LEAVE (ART VANISHES)", false, Ik.HM) { home() }
+                      Pill("LEAVE WITHOUT SAVING", false, Ik.HM) { home() }
                       Pill("STAY") { sure = false }
                   }
               } else {
@@ -2299,7 +2368,8 @@ jobs:
                       Pill("SYM " + SYM[e.symMode], e.symMode != 0, Ik.SY) { sym() }
                       Pill("GUIDE " + GUIDE_N[e.guide], e.guide != 0, Ik.GD) { guide() }
                       Pill("IMAGE", false, Ik.IM) { img() }
-                      Pill("SAVE", false, Ik.SV) { save() }
+                      Pill("PROJECT", false, Ik.LY) { proj() }
+                      Pill("EXPORT PNG", false, Ik.SV) { save() }
                       Pill("IDEA", false, Ik.DC) { inspire() }
                       Pill("STYLE", false, Ik.TH) { theme() }
                       Pill(if (e.rotLock) "ROT LOCKED" else "ROT FREE", e.rotLock, Ik.LK) { e.rotLock = !e.rotLock; U.bump() }
@@ -2367,7 +2437,7 @@ jobs:
           }
 
           @Composable
-          fun App(e: Engine, onHome: () -> Unit) {
+          fun App(e: Engine, pid: String, onHome: () -> Unit) {
               val ctx = LocalContext.current
               val density = LocalDensity.current
               val v = remember { CanvasView(ctx, e) }
@@ -2390,6 +2460,13 @@ jobs:
               fun feel(m: Int, s: String, ms: Long = 1500L) {
                   job[0]?.cancel(); mood = m; say = s; sayOn = true
                   job[0] = scope.launch { delay(ms); mood = 0; sayOn = false }
+              }
+              fun saveProj(then: () -> Unit) {
+                  feel(2, "saving project...", 8000L)
+                  v.gl {
+                      val ok = e.saveProject(Proj.dir(ctx, pid))
+                      Handler(Looper.getMainLooper()).post { feel(if (ok) 3 else 4, if (ok) "project saved!" else "save failed :(", 1800L); if (ok) conf++; then() }
+                  }
               }
               val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u ->
                   if (u != null) {
@@ -2424,7 +2501,7 @@ jobs:
                   else if (!hud) hud = true
                   else {
                       val n = System.currentTimeMillis()
-                      if (n - backT < 2000) onHome() else { backT = n; feel(4, "back again to leave") }
+                      if (n - backT < 2000) { if (e.edits > 0 || Proj.dir(ctx, pid).exists()) saveProj { onHome() } else onHome() } else { backT = n; feel(4, "back again to save & leave") }
                   }
               }
               val m = if (!hud) 5 else if (e.busy) 2 else mood
@@ -2503,13 +2580,8 @@ jobs:
                                           },
                                           guide = { e.guide = (e.guide + 1) % GUIDE_N.size; U.bump(); feel(1, "guide " + GUIDE_N[e.guide].lowercase()) },
                                           inspire = { feel(1, idea(), 4200L) },
-                                          saveHome = {
-                                              v.gl {
-                                                  val b = e.snapshot()
-                                                  Thread { saveBmp(ctx, b); Handler(Looper.getMainLooper()).post { onHome() } }.start()
-                                              }
-                                              feel(3, "saving...")
-                                          },
+                                          proj = { saveProj { } },
+                                          saveHome = { saveProj { onHome() } },
                                           home = { onHome() }
                                       )
                                       6 -> ThemePanel { T.save(ctx.getSharedPreferences("t", 0)); panel = 0; feel(3, "so cute!") }
@@ -3964,6 +4036,358 @@ jobs:
               }
           }
           EOF_SRC
+          cat > app/src/main/kotlin/dev/canvas/Projects.kt <<'EOF_SRC'
+          package dev.canvas
+
+          import android.content.Context
+          import android.content.SharedPreferences
+          import android.graphics.BitmapFactory
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.RoundRect
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.ImageBitmap
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.PathEffect
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.asImageBitmap
+          import androidx.compose.ui.graphics.drawscope.DrawScope
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.drawscope.clipPath
+          import androidx.compose.ui.graphics.drawscope.rotate
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.unit.IntOffset
+          import androidx.compose.ui.unit.IntSize
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import org.json.JSONObject
+          import java.io.File
+          import kotlin.math.cos
+          import kotlin.math.hypot
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.sin
+
+          // ───────────────────────── project files: filesDir/projects/<id>/{meta.json, L0.png.., thumb.png} ─────────────────────────
+          class ProjMeta(val id: String, val w: Int, val h: Int, val paper: Int, val pat: Int, val layers: Int, val budget: Int, val time: Long)
+
+          object Proj {
+              fun root(ctx: Context): File { val f = File(ctx.filesDir, "projects"); f.mkdirs(); return f }
+              fun dir(ctx: Context, id: String): File = File(root(ctx), id)
+              fun newId(): String = java.lang.Long.toString(System.currentTimeMillis(), 36)
+              fun list(ctx: Context): List<ProjMeta> {
+                  val out = ArrayList<ProjMeta>()
+                  val ds = root(ctx).listFiles() ?: return out
+                  for (d in ds) {
+                      val mf = File(d, "meta.json")
+                      if (!mf.exists()) continue
+                      try {
+                          val j = JSONObject(mf.readText())
+                          out.add(ProjMeta(d.name, j.getInt("w"), j.getInt("h"), j.getInt("paper"), j.getInt("pat"), j.getInt("maxLayers"), j.getInt("budget"), j.getLong("time")))
+                      } catch (t: Throwable) { }
+                  }
+                  out.sortByDescending { it.time }
+                  return out
+              }
+              fun delete(ctx: Context, id: String) { dir(ctx, id).deleteRecursively() }
+          }
+
+          // ───────────────────────── gallery view settings ─────────────────────────
+          object GV {
+              var cols by mutableIntStateOf(3)
+              var rows by mutableIntStateOf(3)
+              var mode by mutableIntStateOf(0)          // 0 grid, 1 spider web, 2 scatter, 3 bento (big / little)
+              var gap by mutableFloatStateOf(8f)
+              var page by mutableIntStateOf(0)
+              fun cap(): Int = if (mode == 3) max(1, (cols * rows * .65f).toInt()) else cols * rows
+              fun load(p: SharedPreferences) {
+                  cols = p.getInt("g_cols", 3); rows = p.getInt("g_rows", 3); mode = p.getInt("g_mode", 0); gap = p.getFloat("g_gap", 8f)
+              }
+              fun save(p: SharedPreferences) {
+                  p.edit().putInt("g_cols", cols).putInt("g_rows", rows).putInt("g_mode", mode).putFloat("g_gap", gap).apply()
+              }
+          }
+          val GV_N = listOf("GRID", "WEB", "SCATTER", "BENTO")
+
+          // ───────────────────────── layouts ─────────────────────────
+          class Cell(val pts: FloatArray, val cx: Float, val cy: Float, val w: Float, val h: Float, val rot: Float, val kind: Int)   // kind 0 rounded rect, 1 quad, 2 card
+          class GLay(val cells: List<Cell>, val verts: FloatArray?, val vc: Int, val vr: Int)
+
+          private fun hs(a: Int, b: Int, c: Int): Float {
+              var h = (a * 73856093) xor (b * 19349663) xor (c * 83492791)
+              h = h xor (h ushr 13); h *= 1274126177; h = h xor (h ushr 16)
+              return (h and 0xFFFF) / 65535f
+          }
+
+          fun galleryLayout(mode: Int, W: Float, H: Float, cols: Int, rows: Int, gap: Float, n: Int): GLay {
+              val cells = ArrayList<Cell>()
+              val cw = max(8f, (W - gap * (cols + 1)) / cols); val ch = max(8f, (H - gap * (rows + 1)) / rows)
+              if (mode == 1) {                       // spider web: a jittered net, every project is one mesh of it
+                  val vc = cols + 1; val vr = rows + 1
+                  val v = FloatArray(vc * vr * 2)
+                  val ox = 6f; val oy = 6f
+                  val sx = (W - 2f * ox) / cols; val sy = (H - 2f * oy) / rows
+                  for (r in 0 until vr) for (c in 0 until vc) {
+                      var x = ox + c * sx; var y = oy + r * sy
+                      if (c in 1 until cols) x += (hs(r, c, 1) - .5f) * .6f * sx      // border vertices only slide along the border
+                      if (r in 1 until rows) y += (hs(r, c, 2) - .5f) * .6f * sy
+                      v[(r * vc + c) * 2] = x; v[(r * vc + c) * 2 + 1] = y
+                  }
+                  for (i in 0 until n) {
+                      val c = i % cols; val r = i / cols
+                      if (r >= rows) break
+                      val a = (r * vc + c) * 2; val b = (r * vc + c + 1) * 2; val d = ((r + 1) * vc + c + 1) * 2; val e = ((r + 1) * vc + c) * 2
+                      val q = floatArrayOf(v[a], v[a + 1], v[b], v[b + 1], v[d], v[d + 1], v[e], v[e + 1])
+                      val mx = (q[0] + q[2] + q[4] + q[6]) / 4f; val my = (q[1] + q[3] + q[5] + q[7]) / 4f
+                      var rad = 0f
+                      for (k in 0..3) rad += hypot(q[k * 2] - mx, q[k * 2 + 1] - my)
+                      rad /= 4f
+                      val sh = if (rad > 1f) (1f - (gap * .5f + 2f) / rad).coerceIn(.4f, 1f) else 1f
+                      var mnx = 1e9f; var mxx = -1e9f; var mny = 1e9f; var mxy = -1e9f
+                      for (k in 0..3) {
+                          q[k * 2] = mx + (q[k * 2] - mx) * sh; q[k * 2 + 1] = my + (q[k * 2 + 1] - my) * sh
+                          mnx = min(mnx, q[k * 2]); mxx = max(mxx, q[k * 2]); mny = min(mny, q[k * 2 + 1]); mxy = max(mxy, q[k * 2 + 1])
+                      }
+                      cells.add(Cell(q, (mnx + mxx) / 2f, (mny + mxy) / 2f, mxx - mnx, mxy - mny, 0f, 1))
+                  }
+                  return GLay(cells, v, vc, vr)
+              }
+              if (mode == 2) {                       // scatter: tilted, overlapping polaroids
+                  for (i in 0 until n) {
+                      val c = i % cols; val r = i / cols
+                      if (r >= rows) break
+                      val bx = gap + c * (cw + gap) + cw / 2f; val by = gap + r * (ch + gap) + ch / 2f
+                      val sz = min(cw, ch) * 1.18f
+                      cells.add(Cell(floatArrayOf(), bx + (hs(i, 3, 1) - .5f) * .35f * cw, by + (hs(i, 3, 2) - .5f) * .35f * ch, sz, sz, (hs(i, 3, 3) - .5f) * 22f, 2))
+                  }
+                  return GLay(cells, null, 0, 0)
+              }
+              if (mode == 3) {                       // bento: some tiles big, most little
+                  val occ = BooleanArray(cols * rows)
+                  fun free(c: Int, r: Int, w: Int, h: Int): Boolean {
+                      if (c + w > cols || r + h > rows) return false
+                      for (yy in r until r + h) for (xx in c until c + w) if (occ[yy * cols + xx]) return false
+                      return true
+                  }
+                  for (i in 0 until n) {
+                      var pc = -1; var pr = -1
+                      for (idx in 0 until cols * rows) if (!occ[idx]) { pc = idx % cols; pr = idx / cols; break }
+                      if (pc < 0) break
+                      var w = 1; var h = 1
+                      if (i % 5 == 0 && free(pc, pr, 2, 2)) { w = 2; h = 2 } else if (i % 3 == 1 && free(pc, pr, 2, 1)) { w = 2 }
+                      for (yy in pr until pr + h) for (xx in pc until pc + w) occ[yy * cols + xx] = true
+                      val x = gap + pc * (cw + gap); val y = gap + pr * (ch + gap)
+                      val tw = w * cw + (w - 1) * gap; val th = h * ch + (h - 1) * gap
+                      cells.add(Cell(floatArrayOf(), x + tw / 2f, y + th / 2f, tw, th, 0f, 0))
+                  }
+                  return GLay(cells, null, 0, 0)
+              }
+              for (i in 0 until n) {                 // plain grid
+                  val c = i % cols; val r = i / cols
+                  if (r >= rows) break
+                  cells.add(Cell(floatArrayOf(), gap + c * (cw + gap) + cw / 2f, gap + r * (ch + gap) + ch / 2f, cw, ch, 0f, 0))
+              }
+              return GLay(cells, null, 0, 0)
+          }
+
+          private fun cellPath(c: Cell): Path {
+              val p = Path()
+              if (c.kind == 1) {
+                  p.moveTo(c.pts[0], c.pts[1])
+                  for (k in 1..3) p.lineTo(c.pts[k * 2], c.pts[k * 2 + 1])
+                  p.close()
+              } else {
+                  val rad = min(c.w, c.h) * .12f
+                  p.addRoundRect(RoundRect(c.cx - c.w / 2f, c.cy - c.h / 2f, c.cx + c.w / 2f, c.cy + c.h / 2f, rad, rad))
+              }
+              return p
+          }
+
+          private fun hit(c: Cell, x: Float, y: Float): Boolean {
+              var px = x; var py = y
+              if (c.rot != 0f) {
+                  val a = -c.rot * 0.0174533f; val dx = x - c.cx; val dy = y - c.cy
+                  px = c.cx + dx * cos(a) - dy * sin(a); py = c.cy + dx * sin(a) + dy * cos(a)
+              }
+              if (c.kind == 1) {
+                  var inside = false
+                  var j = 3
+                  for (i in 0..3) {
+                      val xi = c.pts[i * 2]; val yi = c.pts[i * 2 + 1]; val xj = c.pts[j * 2]; val yj = c.pts[j * 2 + 1]
+                      if ((yi > py) != (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi + 1e-6f) + xi) inside = !inside
+                      j = i
+                  }
+                  return inside
+              }
+              return kotlin.math.abs(px - c.cx) <= c.w / 2f && kotlin.math.abs(py - c.cy) <= c.h / 2f
+          }
+
+          private fun DrawScope.drawCrop(img: ImageBitmap, x: Float, y: Float, w: Float, h: Float) {
+              val iw = img.width.toFloat(); val ih = img.height.toFloat()
+              val k = max(w / iw, h / ih)
+              val sw = w / k; val sh = h / k
+              drawImage(
+                  img, IntOffset(((iw - sw) / 2f).toInt(), ((ih - sh) / 2f).toInt()), IntSize(max(1, sw.toInt()), max(1, sh.toInt())),
+                  IntOffset(x.toInt(), y.toInt()), IntSize(max(1, w.toInt()), max(1, h.toInt()))
+              )
+          }
+
+          private fun DrawScope.drawGallery(lay: GLay, shown: List<ProjMeta>, thumbs: Map<String, ImageBitmap>, mode: Int) {
+              val ac = T.ac; val ac2 = T.ac2; val edge = Color(0xFF2149AA)
+              val dash = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
+              for ((i, c) in lay.cells.withIndex()) {
+                  val p = shown.getOrNull(i)
+                  val img = if (p != null) thumbs[p.id + "_" + p.time] else null
+                  rotate(c.rot, Offset(c.cx, c.cy)) {
+                      val x = c.cx - c.w / 2f; val y = c.cy - c.h / 2f
+                      if (c.kind == 2 && p != null) {
+                          drawRect(Color.Black.copy(alpha = .3f), Offset(x + 4f, y + 6f), Size(c.w, c.h))
+                          drawRect(Color(0xFFF4FAFF), Offset(x, y), Size(c.w, c.h))
+                          val ins = c.w * .06f
+                          if (img != null) drawCrop(img, x + ins, y + ins, c.w - 2f * ins, c.h - ins * 3.2f)
+                          else drawRect(T.panel2, Offset(x + ins, y + ins), Size(c.w - 2f * ins, c.h - ins * 3.2f))
+                      } else {
+                          val path = cellPath(c)
+                          if (p != null) {
+                              clipPath(path) { if (img != null) drawCrop(img, x, y, c.w, c.h) else drawRect(T.panel2, Offset(x, y), Size(c.w, c.h)) }
+                              if (mode != 1) drawPath(path, edge.copy(alpha = .85f), style = Stroke(2.5f))
+                          } else if (i == shown.size) {
+                              drawPath(path, ac.copy(alpha = .12f))
+                              drawPath(path, ac.copy(alpha = .8f), style = Stroke(2.5f, pathEffect = dash))
+                              val r = min(c.w, c.h) * .16f
+                              drawLine(ac, Offset(c.cx - r, c.cy), Offset(c.cx + r, c.cy), 5f, StrokeCap.Round)
+                              drawLine(ac, Offset(c.cx, c.cy - r), Offset(c.cx, c.cy + r), 5f, StrokeCap.Round)
+                          } else {
+                              drawPath(path, ac.copy(alpha = .05f))
+                              drawPath(path, ac.copy(alpha = .22f), style = Stroke(1.5f, pathEffect = dash))
+                          }
+                      }
+                  }
+              }
+              val v = lay.verts
+              if (v != null) {                       // the web itself: strands sag toward the middle, dew drops sit on the knots
+                  val mx = size.width / 2f; val my = size.height / 2f
+                  val strand = Path()
+                  fun edge2(a: Int, b: Int) {
+                      val x1 = v[a * 2]; val y1 = v[a * 2 + 1]; val x2 = v[b * 2]; val y2 = v[b * 2 + 1]
+                      val mxx = (x1 + x2) / 2f; val myy = (y1 + y2) / 2f
+                      val len = hypot(x2 - x1, y2 - y1)
+                      val tx = mx - mxx; val ty = my - myy; val tl = hypot(tx, ty) + 1e-4f
+                      strand.moveTo(x1, y1)
+                      strand.quadraticBezierTo(mxx + tx / tl * len * .09f, myy + ty / tl * len * .09f, x2, y2)
+                  }
+                  for (r in 0 until lay.vr) for (c in 0 until lay.vc) {
+                      val a = r * lay.vc + c
+                      if (c + 1 < lay.vc) edge2(a, a + 1)
+                      if (r + 1 < lay.vr) edge2(a, a + lay.vc)
+                  }
+                  drawPath(strand, Color.White.copy(alpha = .75f), style = Stroke(2.2f, cap = StrokeCap.Round))
+                  drawPath(strand, ac2.copy(alpha = .55f), style = Stroke(1.1f, cap = StrokeCap.Round))
+                  for (k in 0 until lay.vr * lay.vc) {
+                      val x = v[k * 2]; val y = v[k * 2 + 1]
+                      drawCircle(Color(0xFFC6E5FA).copy(alpha = .85f), 5f, Offset(x, y))
+                      drawCircle(edge.copy(alpha = .7f), 5f, Offset(x, y), style = Stroke(1.3f))
+                      drawCircle(Color.White, 1.6f, Offset(x - 1.6f, y - 1.8f))
+                  }
+              }
+          }
+
+          @Composable
+          fun ProjGallery(mod: Modifier, items: List<ProjMeta>, onOpen: (ProjMeta) -> Unit, onNew: () -> Unit, onDelete: (ProjMeta) -> Unit) {
+              val ctx = LocalContext.current
+              val rv = U.rev
+              val cap = GV.cap()
+              val pages = max(1, (items.size + cap - 1) / cap)
+              if (GV.page >= pages) GV.page = pages - 1
+              val page = GV.page
+              val shown = items.drop(page * cap).take(cap)
+              var opts by remember { mutableStateOf(false) }
+              var del by remember { mutableStateOf<ProjMeta?>(null) }
+              val thumbs = remember { mutableStateMapOf<String, ImageBitmap>() }
+              LaunchedEffect(shown.map { it.id + it.time }) {
+                  for (p in shown) {
+                      val key = p.id + "_" + p.time
+                      if (!thumbs.containsKey(key)) {
+                          val bm = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(File(Proj.dir(ctx, p.id), "thumb.png").path) }
+                          if (bm != null) thumbs[key] = bm.asImageBitmap()
+                      }
+                  }
+              }
+              Column(mod.glass(rs(.9f)).padding(d(8f)), verticalArrangement = Arrangement.spacedBy(d(6f))) {
+                  Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(d(6f))) {
+                      Tx("PROJECTS", T.ac, sz = 12f)
+                      Tx(items.size.toString() + " saved", T.ink.copy(alpha = .6f), sz = 9f)
+                      Spacer(Modifier.weight(1f))
+                      if (pages > 1) {
+                          Pill("<", false) { if (page > 0) GV.page = page - 1 }
+                          Tx((page + 1).toString() + "/" + pages, T.ink, sz = 10f)
+                          Pill(">", false) { if (page < pages - 1) GV.page = page + 1 }
+                      }
+                      IB(Ik.GS, opts, sz = 34f, anim = false) { opts = !opts }
+                  }
+                  if (opts) {
+                      Column(Modifier.fillMaxWidth().glass(rs(.7f)).padding(d(10f)), verticalArrangement = Arrangement.spacedBy(d(6f))) {
+                          Tx("GALLERY VIEW", T.ac, sz = 10f)
+                          Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(d(6f))) {
+                              GV_N.forEachIndexed { i, n -> Pill(n, GV.mode == i) { GV.mode = i; GV.page = 0 } }
+                          }
+                          R2(PP("COLUMNS", 1f, 6f, 1f, false, { GV.cols.toFloat() }, { GV.cols = (it + .5f).toInt().coerceIn(1, 6); GV.page = 0 }))
+                          R2(PP("ROWS", 1f, 8f, 1f, false, { GV.rows.toFloat() }, { GV.rows = (it + .5f).toInt().coerceIn(1, 8); GV.page = 0 }))
+                          R2(PP("GAP", 0f, 24f, 1f, false, { GV.gap }, { GV.gap = it }))
+                          Pill("DONE", true, Ik.OK) { opts = false; GV.save(ctx.getSharedPreferences("t", 0)) }
+                      }
+                  }
+                  Box(Modifier.weight(1f).fillMaxWidth()) {
+                      Canvas(
+                          Modifier.fillMaxSize().pointerInput(shown, GV.mode, GV.cols, GV.rows, GV.gap) {
+                              detectTapGestures(
+                                  onTap = { o ->
+                                      val lay = galleryLayout(GV.mode, size.width.toFloat(), size.height.toFloat(), GV.cols, GV.rows, GV.gap * density, cap)
+                                      var k = lay.cells.size - 1
+                                      while (k >= 0) {
+                                          if (hit(lay.cells[k], o.x, o.y)) {
+                                              val p = shown.getOrNull(k)
+                                              if (p != null) onOpen(p) else if (k == shown.size) onNew()
+                                              k = -1
+                                          }
+                                          k--
+                                      }
+                                  },
+                                  onLongPress = { o ->
+                                      val lay = galleryLayout(GV.mode, size.width.toFloat(), size.height.toFloat(), GV.cols, GV.rows, GV.gap * density, cap)
+                                      var k = lay.cells.size - 1
+                                      while (k >= 0) {
+                                          if (hit(lay.cells[k], o.x, o.y)) { val p = shown.getOrNull(k); if (p != null) del = p; k = -1 }
+                                          k--
+                                      }
+                                  }
+                              )
+                          }
+                      ) {
+                          val lay = galleryLayout(GV.mode, size.width, size.height, GV.cols, GV.rows, GV.gap * density, cap)
+                          drawGallery(lay, shown, thumbs, GV.mode)
+                      }
+                  }
+                  val dp = del
+                  if (dp != null) {
+                      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(d(8f))) {
+                          Tx("delete this project?", T.ink, sz = 10f)
+                          Pill("DELETE", true, Ik.UN) { onDelete(dp); del = null }
+                          Pill("KEEP") { del = null }
+                      }
+                  }
+              }
+          }
+          EOF_SRC
           cat > app/src/main/kotlin/dev/canvas/Home.kt <<'EOF_SRC'
           package dev.canvas
 
@@ -4002,7 +4426,9 @@ jobs:
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
           import androidx.compose.ui.viewinterop.AndroidView
+          import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.delay
+          import kotlinx.coroutines.withContext
           import kotlinx.coroutines.launch
           import kotlin.math.max
           import kotlin.math.sin
@@ -4172,14 +4598,50 @@ jobs:
               Pill("START DRAWING", true, Ik.BR) { onStart(Cfg(w, h, PAPERS[paperI].toInt(), PAPER_PATS[patI].second, cap, TIERS[rec.coerceIn(0, 4)].budget)) }
           }
 
+          /** Title with big / little letters, two lines, each letter bobbing on its own phase */
           @Composable
-          fun Home(st: BenchState, onStart: (Cfg) -> Unit) {
+          fun ArtTitle() {
+              val ts = loopState(2600, "tt")
+              val f1 = floatArrayOf(40f, 27f, 36f, 25f, 42f)
+              val f2 = floatArrayOf(19f, 28f, 17f, 25f, 21f, 30f)
+              val ff = FONTS[T.fnt.toInt().coerceIn(0, FONTS.size - 1)]
+              Column(horizontalAlignment = Alignment.Start) {
+                  Row(verticalAlignment = Alignment.Bottom) {
+                      "slime".forEachIndexed { i, ch ->
+                          Text(
+                              ch.toString(), color = if (i % 2 == 0) T.ac else T.ac2, fontSize = (f1[i] * T.sc).sp, fontFamily = ff, letterSpacing = T.ls.sp,
+                              modifier = Modifier.graphicsLayer { translationY = sin(ts.value * 6.2832f + i * .7f) * 4f * density }
+                          )
+                      }
+                  }
+                  Row(Modifier.padding(start = d(18f)), verticalAlignment = Alignment.Top) {
+                      "canvas".forEachIndexed { i, ch ->
+                          Text(
+                              ch.toString(), color = if (i % 2 == 0) T.ac2 else T.ac, fontSize = (f2[i] * T.sc).sp, fontFamily = ff, letterSpacing = T.ls.sp,
+                              modifier = Modifier.graphicsLayer { translationY = sin(ts.value * 6.2832f + 2f + i * .6f) * 3f * density }
+                          )
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun ToolBtn(k: Ik, label: String, on: Boolean, f: () -> Unit) {
+              Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(d(2f))) {
+                  IB(k, on, sz = 50f, anim = false) { f() }
+                  Tx(label, if (on) T.ac else T.ink.copy(alpha = .8f), sz = 8f)
+              }
+          }
+
+          @Composable
+          fun Home(st: BenchState, onStart: (Cfg) -> Unit, onOpen: (ProjMeta) -> Unit) {
               val ctx = LocalContext.current
               val scope = rememberCoroutineScope()
-              var sheet by remember { mutableIntStateOf(0) }
+              var sheet by remember { mutableIntStateOf(0) }       // 0 none, 1 new canvas, 2 style, 3 device
               var lastS by remember { mutableIntStateOf(1) }
               var mood by remember { mutableIntStateOf(0) }
               var say by remember { mutableStateOf(greet()) }
+              var projects by remember { mutableStateOf<List<ProjMeta>>(emptyList()) }
               val res = st.res
               val ram = remember { (ramGb(ctx) * 1024f).toInt() }
               val fl = loopState(3000, "fl2")
@@ -4188,6 +4650,7 @@ jobs:
                   st.stage = 0; st.res = null; st.key++; st.running = true
               }
               SideEffect { if (sheet != 0) lastS = sheet }
+              LaunchedEffect(Unit) { projects = withContext(Dispatchers.IO) { Proj.list(ctx) } }
               LaunchedEffect(Unit) { if (st.res == null && !st.running) rerun() }
               LaunchedEffect(st.running) {
                   if (st.running) {
@@ -4205,39 +4668,49 @@ jobs:
                       AndroidView({ BenchView(ctx, st) { r -> st.res = r; st.running = false; saveBench(ctx, r) } }, Modifier.size(2.dp))
                   }
                   Column(
-                      Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(d(16f)),
-                      horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(d(10f))
+                      Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = d(12f), vertical = d(8f)),
+                      verticalArrangement = Arrangement.spacedBy(d(8f))
                   ) {
-                      Spacer(Modifier.height(d(14f)))
-                      Title()
-                      Box(Modifier.graphicsLayer { translationY = sin(fl.value * 6.2832f) * 5f * density }) {
-                          Mascot(mood, 132f, if (res != null) intArrayOf(1, 2, 3, 4, 5)[res.tier] else 0) {
-                              say = SAYS[(System.currentTimeMillis() % SAYS.size).toInt()]; mood = 1
-                              scope.launch { delay(1300); mood = if (st.running) 2 else 0 }
+                      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(d(10f))) {
+                          Box(Modifier.graphicsLayer { translationY = sin(fl.value * 6.2832f) * 4f * density }) {
+                              Mascot(mood, 92f, if (res != null) intArrayOf(1, 2, 3, 4, 5)[res.tier] else 0) {
+                                  say = SAYS[(System.currentTimeMillis() % SAYS.size).toInt()]; mood = 1
+                                  scope.launch { delay(1300); mood = if (st.running) 2 else 0 }
+                              }
+                          }
+                          Column(verticalArrangement = Arrangement.spacedBy(d(4f))) {
+                              ArtTitle()
+                              Tx(say, T.dk, Modifier.clip(RoundedCornerShape(50)).background(T.ac).padding(horizontal = d(10f), vertical = d(3f)), 9f)
+                              if (res != null && !st.running) Tx(TIERS[res.tier].name + " tier  -  " + res.score + "/100", T.ac2, sz = 9f)
                           }
                       }
-                      Tx(say, T.dk, Modifier.clip(RoundedCornerShape(50)).background(T.ac).padding(horizontal = d(14f), vertical = d(6f)), 11f)
-                      if (res != null && !st.running) Tx(TIERS[res.tier].name + " tier  -  " + res.score + "/100", T.ac2, sz = 12f)
-                      Row(horizontalArrangement = Arrangement.spacedBy(d(8f)), verticalAlignment = Alignment.CenterVertically) {
-                          Pill("NEW ART", sheet == 1, Ik.PL) { sheet = if (sheet == 1) 0 else 1 }
-                          Pill("STYLE", sheet == 2, Ik.TH) { sheet = if (sheet == 2) 0 else 2 }
-                          Pill("IDEA", false, Ik.DC) { say = idea(); mood = 1; scope.launch { delay(2800); mood = if (st.running) 2 else 0 } }
-                      }
+                      ProjGallery(
+                          Modifier.weight(1f).fillMaxWidth(), projects, onOpen, { sheet = 1 },
+                          { p -> Proj.delete(ctx, p.id); projects = projects.filter { it.id != p.id } }
+                      )
                       AnimatedVisibility(
                           visible = sheet != 0,
-                          enter = fadeIn() + scaleIn(spring(.55f, 380f), initialScale = .92f, transformOrigin = TransformOrigin(.5f, 0f)) + expandVertically(),
-                          exit = fadeOut() + scaleOut(targetScale = .94f, transformOrigin = TransformOrigin(.5f, 0f)) + shrinkVertically()
+                          enter = fadeIn() + scaleIn(spring(.55f, 380f), initialScale = .92f, transformOrigin = TransformOrigin(.5f, 1f)) + expandVertically(),
+                          exit = fadeOut() + scaleOut(targetScale = .94f, transformOrigin = TransformOrigin(.5f, 1f)) + shrinkVertically()
                       ) {
                           Column(
-                              Modifier.fillMaxWidth().glass(key = lastS).animateContentSize().padding(d(12f)),
+                              Modifier.fillMaxWidth().heightIn(max = d(380f)).glass(key = lastS).animateContentSize().verticalScroll(rememberScrollState()).padding(d(12f)),
                               verticalArrangement = Arrangement.spacedBy(d(8f))
                           ) {
                               if (lastS == 1) NewCanvas(res, ram, onStart)
-                              else ThemePanel { T.save(ctx.getSharedPreferences("t", 0)); sheet = 0 }
+                              else if (lastS == 2) ThemePanel { T.save(ctx.getSharedPreferences("t", 0)); sheet = 0 }
+                              else BenchCard(st) { rerun() }
                           }
                       }
-                      BenchCard(st) { rerun() }
-                      Spacer(Modifier.height(d(16f)))
+                      Row(
+                          Modifier.fillMaxWidth().glass(RoundedCornerShape(50)).padding(horizontal = d(14f), vertical = d(8f)),
+                          horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          ToolBtn(Ik.TH, "STYLE", sheet == 2) { sheet = if (sheet == 2) 0 else 2 }
+                          ToolBtn(Ik.PL, "NEW", sheet == 1) { sheet = if (sheet == 1) 0 else 1 }
+                          ToolBtn(Ik.DC, "IDEA", false) { say = idea(); mood = 1; scope.launch { delay(2800); mood = if (st.running) 2 else 0 } }
+                          ToolBtn(Ik.CP, "DEVICE", sheet == 3) { sheet = if (sheet == 3) 0 else 3 }
+                      }
                   }
               }
           }
