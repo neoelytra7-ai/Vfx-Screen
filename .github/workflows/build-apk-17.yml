@@ -1502,7 +1502,7 @@ jobs:
 
           // ------------------------------------------------------------------ preset tile (left vertical strip)
           class PresetTile(ctx: Context, private val idx: Int, private val name: String) : AView(ctx) {
-              var selected = false
+              var picked = false
                   set(v) { field = v; invalidate() }
               var accent = col("#7cff3a")
               var onPick: ((Int) -> Unit)? = null
@@ -1518,7 +1518,7 @@ jobs:
               override fun onDraw(c: Canvas) {
                   val w = width.toFloat(); val h = height.toFloat()
                   c.save(); c.scale(press.x, press.x, w / 2, h / 2)
-                  if (selected) Bevel.draw(c, 0f, 0f, w, h, col("#3d4a22"), col("#7cff3a"), col("#1f2810"), accent, dp(3), dp(2))
+                  if (picked) Bevel.draw(c, 0f, 0f, w, h, col("#3d4a22"), col("#7cff3a"), col("#1f2810"), accent, dp(3), dp(2))
                   else Bevel.draw(c, 0f, 0f, w, h, col("#3c3c3c"), col("#8b8b8b"), col("#333333"), Color.BLACK, dp(3), dp(2))
                   val s = dp(9); val gx = (w - 2 * s) / 2; val gy = dp(7)
                   for (i in 0 until 4) { bp.color = sw[i]; val x = gx + (i % 2) * s; val y = gy + (i / 2) * s; c.drawRect(x, y, x + s, y + s, bp) }
@@ -4233,7 +4233,7 @@ jobs:
 
               private fun pickLook(i: Int, user: Boolean) {
                   cam.p.look = i
-                  for ((k, t) in tiles.withIndex()) t.selected = (k == i)
+                  for ((k, t) in tiles.withIndex()) t.picked = (k == i)
                   if (i == 0) tv.setLayerType(View.LAYER_TYPE_NONE, null)
                   else tv.setLayerType(View.LAYER_TYPE_HARDWARE, Paint().apply { colorFilter = Look.filter(i) })
                   if (user) toast("LOOK · " + Look.name(i), if (i == 1) "Scene-adaptive grade is baked into SR / HDR+ shots" else "Live preview + baked into SR / HDR+ JPEGs (DNG stays untouched)", "ai")
