@@ -5443,7 +5443,7 @@ jobs:
               AnimatedVisibility(visible = on, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
                   Box(
                       Modifier.fillMaxSize().background(Color.Black.copy(alpha = .62f))
-                          .pointerInput(Unit) { androidx.compose.foundation.gestures.detectTapGestures { close() } },
+                          .pointerInput(Unit) { detectTapGestures { close() } },
                       contentAlignment = Alignment.Center
                   ) {
                       androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
