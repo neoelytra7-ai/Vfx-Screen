@@ -426,25 +426,13 @@ jobs:
               setRequestedOrientation(v);
             }
 
-            // resolusi render: WebView dikecilkan lalu di-scale balik ke layar penuh
+            // resolusi render: WebView TETAP full-size (viewport CSS / window.innerWidth-Height
+            // dan skala UI HTML ga pernah berubah). Yang diturunkan cuma devicePixelRatio yang
+            // dibaca JS lewat poly.js, jadi canvas/game yang render berdasar devicePixelRatio
+            // bakal gambar di resolusi lebih rendah, sementara DOM & layout sekitar tetap sama.
             void setRes(int p) {
               res = Math.max(25, Math.min(100, p));
-              fl.post(() -> {
-                if (w == null) return;
-                int W = fl.getWidth(), H = fl.getHeight();
-                if (W <= 0 || H <= 0) return;
-                if (res == 100) {
-                  w.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
-                  w.setScaleX(1f);
-                  w.setScaleY(1f);
-                } else {
-                  w.setLayoutParams(new FrameLayout.LayoutParams(W * res / 100, H * res / 100));
-                  w.setPivotX(0f);
-                  w.setPivotY(0f);
-                  w.setScaleX(100f / res);
-                  w.setScaleY(100f / res);
-                }
-              });
+              if (w != null) w.evaluateJavascript("window.__fxSetRes&&window.__fxSetRes(" + res + ")", null);
             }
 
             @Override public void onConfigurationChanged(Configuration c) {
@@ -862,6 +850,7 @@ jobs:
               }
               // menu di dalam projek
               @JavascriptInterface public String state() { return "{\"fs\":" + fsOn + ",\"res\":" + res + ",\"or\":\"" + ori + "\"}"; }
+              @JavascriptInterface public int res() { return res; }
               @JavascriptInterface public void hFs(boolean on) { runOnUiThread(() -> { setFs(on); savePref("fs", on); }); }
               @JavascriptInterface public void hRes(int p) { runOnUiThread(() -> { setRes(p); savePref("res", p); }); }
               @JavascriptInterface public void hOri(String o) { runOnUiThread(() -> { setOri(o); savePref("or", ori); }); }
@@ -1031,6 +1020,18 @@ jobs:
           (()=>{
           if(window.__fx||!window.Host)return;window.__fx=1;
           const H=Host,J=JSON.parse,E=(n,m)=>new DOMException(m||n,n);
+
+          /* render-resolution: turunin devicePixelRatio aja, JANGAN ubah ukuran WebView/viewport.
+             Canvas/game yang nentuin resolusi gambarnya dari devicePixelRatio bakal render lebih
+             kecil (hemat GPU), tapi window.innerWidth/innerHeight & skala UI HTML tetap sama persis. */
+          (()=>{
+           const base=self.devicePixelRatio||1;
+           let pct=100;
+           try{pct=H.res?H.res():100}catch(e){}
+           try{Object.defineProperty(window,'devicePixelRatio',{configurable:true,get:()=>base*pct/100})}catch(e){}
+           window.__fxSetRes=p=>{pct=p;try{dispatchEvent(new Event('resize'))}catch(e){}};
+          })();
+
           const CH=1<<20,MEM=48<<20,RT=H.root();
           const O=location.origin&&location.origin!=='null'?location.origin:'',FS=O+'/__fs/';
           const B=u=>{let s='';for(let i=0;i<u.length;i+=32768)s+=String.fromCharCode.apply(null,u.subarray(i,i+32768));return btoa(s)};
@@ -1469,17 +1470,16 @@ jobs:
             var r=h.attachShadow({mode:'open'});
             r.innerHTML='<style>'+
             '*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}'+
-            '#w{position:fixed;top:calc(6px + env(safe-area-inset-top,0px));right:6px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;transform-origin:top right;font:17px/1.15 "VT323",monospace;color:#fff}'+
+            '#w{position:fixed;top:50%;right:0;transform:translateY(-50%);font:17px/1.15 "VT323",monospace;color:#fff;pointer-events:none}'+
+            '#in{display:flex;align-items:center;transform-origin:right center;transform:translateX(calc(100% - 16px)) scale(var(--z,1));transition:transform .28s cubic-bezier(.2,.9,.2,1)}'+
+            '#w.o #in{transform:translateX(0) scale(var(--z,1))}'+
             'button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}'+
-            '#b{width:40px;height:40px;display:flex;align-items:center;justify-content:center;background:#4a3320;border:3px solid #000;box-shadow:inset 3px 3px 0 #8a5a2b,inset -3px -3px 0 #2a1a0c;opacity:.4;transition:opacity .25s,transform .15s cubic-bezier(.3,1.6,.5,1)}'+
-            '#b:active{transform:scale(.88)}#w.a #b,#w.o #b{opacity:1}'+
-            '#b i{display:block;width:18px;height:3px;background:#fff;box-shadow:0 6px 0 #fff,0 -6px 0 #fff;transition:transform .25s,box-shadow .25s}'+
-            '#w.o #b i{transform:rotate(45deg);box-shadow:0 0 0 #fff,0 0 0 #fff}'+
-            '#w.o #b i::after{content:"";display:block;width:18px;height:3px;background:#fff;transform:rotate(90deg)}'+
-            '#p{display:grid;grid-template-rows:0fr;opacity:0;transform:translateY(-6px) scale(.96);transform-origin:top right;transition:grid-template-rows .25s,opacity .2s,transform .25s cubic-bezier(.2,.9,.2,1);pointer-events:none}'+
-            '#w.o #p{grid-template-rows:1fr;opacity:1;transform:none;pointer-events:auto}'+
-            '#p>div{overflow:hidden;min-height:0;width:218px;background:#1a120af2;border:3px solid #000;box-shadow:inset 0 0 0 2px #5a3f22}'+
-            '#w:not(.o) #p>div{border-width:0;box-shadow:none}'+
+            '#b{flex:0 0 auto;width:16px;min-height:64px;display:flex;align-items:center;justify-content:center;background:#4a3320;border:3px solid #000;border-right:0;box-shadow:inset 2px 2px 0 #8a5a2b,inset -2px -2px 0 #2a1a0c;pointer-events:auto}'+
+            '#b:active{filter:brightness(.85)}'+
+            '#b i{display:block;width:3px;height:16px;background:#fcdb5a;box-shadow:0 7px 0 #fcdb5a,0 -7px 0 #fcdb5a;transition:transform .25s}'+
+            '#w.o #b i{transform:rotate(90deg)}'+
+            '#p{width:218px;max-height:78vh;overflow:auto;background:#1a120af2;border:3px solid #000;box-shadow:inset 0 0 0 2px #5a3f22;pointer-events:none}'+
+            '#w.o #p{pointer-events:auto}'+
             '.g>button{width:100%;display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#4a3320;border-bottom:3px solid #000;text-shadow:2px 2px 0 #000;font-size:19px}'+
             '.g>button::after{content:"\\25B8";color:#fcdb5a;transition:transform .2s}'+
             '.g.o>button::after{transform:rotate(90deg)}'+
@@ -1492,15 +1492,15 @@ jobs:
             '#f{position:fixed;top:calc(6px + env(safe-area-inset-top,0px));left:6px;background:#000c;color:#7cff3a;padding:2px 8px;font:19px "VT323",monospace;display:none;pointer-events:none}'+
             '</style>'+
             '<div id="f"></div>'+
-            '<div id="w"><button id="b"><i></i></button><div id="p"><div>'+
+            '<div id="w"><div id="in"><button id="b"><i></i></button><div id="p">'+
              '<div class="g" id="g1"><button>Resolusi</button><div class="gb"><div id="rs"></div></div></div>'+
              '<div class="g" id="g2"><button>Layar</button><div class="gb"><div id="ly"></div></div></div>'+
              '<div class="g" id="g3"><button>Alat</button><div class="gb"><div id="al"></div></div></div>'+
             '</div></div></div>';
             function $(s){return r.querySelector(s)}
             var w=$('#w'),idle;
-            function dim(){clearTimeout(idle);w.classList.add('a');idle=setTimeout(function(){w.classList.remove('a')},3000)}
-            function scale(){w.style.transform='scale('+((st.res||100)/100)+')'}
+            function dim(){clearTimeout(idle);idle=setTimeout(function(){w.classList.remove('o')},5000)}
+            function scale(){w.style.setProperty('--z',(st.res||100)/100)}
             function build(){
               $('#rs').innerHTML=RES.map(function(n){return '<button class="c'+(st.res===n?' on':'')+'" data-r="'+n+'">'+n+'%</button>'}).join('');
               $('#ly').innerHTML='<button class="c'+(st.fs?' on':'')+'" data-f="1" style="flex-basis:100%">Layar penuh: '+(st.fs?'ON':'OFF')+'</button>'+
