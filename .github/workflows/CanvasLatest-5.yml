@@ -446,7 +446,7 @@ jobs:
 
           private const val FS_XH = """#version 300 es
           precision highp float;
-          in vec2 vU;uniform sampler2D uT,uO;uniform vec2 uSz,uD;uniform vec4 uP,uC1,uC2,uC3;uniform float uM;out vec4 o;
+          in vec2 vU;uniform sampler2D uT,uO;uniform vec2 uSz,uD;uniform vec4 uP,uC1,uC2,uC3;uniform float uM,uZ;out vec4 o;
           """
 
           private const val FS_XB = """vec2 PX;
@@ -491,7 +491,7 @@ jobs:
           else if(m<22.5){vec2 q=uv*2.-1.;q*=1.+dot(q,q)*uP.z*.12;vec2 w=q*.5+.5;vec4 s=Sb(w);float ln=.5+.5*sin(w.y*uSz.y*uP.x*1.5708);s*=1.-uP.y*(1.-ln);r=s;}
           else if(m<23.5){float n=hh(floor(gl_FragCoord.xy/max(uP.y,1.))+uP.z)-.5;u.rgb+=n*uP.x;cm=true;}
           else if(m<24.5){float R=uP.x;float st=max(1.,floor(R/3.));float best=1.0e9;vec3 res=c.rgb;for(int sec=0;sec<4;sec++){vec2 sg=vec2((sec&1)==0?-1.:1.,sec<2?-1.:1.);vec3 mean=vec3(0.),sq=vec3(0.);float cnt=0.;for(int j=0;j<4;j++){for(int i=0;i<4;i++){vec3 c3=S(uv+vec2(float(i),float(j))*st*sg*PX).rgb;mean+=c3;sq+=c3*c3;cnt+=1.;}}mean/=cnt;float vr=dot(sq/cnt-mean*mean,vec3(1.));if(vr<best){best=vr;res=mean;}}r=vec4(min(res,vec3(c.a)),c.a);}
-          else if(m<25.5){float cs=28.;vec2 g=gl_FragCoord.xy/cs;vec2 ig=floor(g);float sp=0.;if(hh(ig+uP.z)<uP.x){vec2 ctr=ig+.2+.6*vec2(hh(ig+3.1),hh(ig+5.7));vec2 q=(g-ctr)/(uP.y*.5*(.5+hh(ig+9.)));float v=sqrt(abs(q.x))+sqrt(abs(q.y));sp=1.-smoothstep(.85,1.,v);}r=vec4(uC2.rgb*sp,sp)+c*(1.-sp);}
+          else if(m<25.5){float cs=28.*uZ;vec2 g=gl_FragCoord.xy/cs;vec2 ig=floor(g);float sp=0.;if(hh(ig+uP.z)<uP.x){vec2 ctr=ig+.2+.6*vec2(hh(ig+3.1),hh(ig+5.7));vec2 q=(g-ctr)/(uP.y*.5*(.5+hh(ig+9.)));float v=sqrt(abs(q.x))+sqrt(abs(q.y));sp=1.-smoothstep(.85,1.,v);}r=vec4(uC2.rgb*sp,sp)+c*(1.-sp);}
           else if(m<26.5){float mk=patMask(int(uP.x+.5),gl_FragCoord.xy,max(uP.y,4.))*uP.z;r=vec4(uC2.rgb*mk,mk)+c*(1.-mk);}
           else if(m<27.5){vec2 cn=vec2(uP.z,uP.w);vec2 q=(uv-cn)*A;float dd=length(q);float k=max(1.-dd/max(uP.y,.01),0.);float a=uP.x*k*k;vec2 q2=vec2(cos(a)*q.x-sin(a)*q.y,sin(a)*q.x+cos(a)*q.y);r=Sb(q2/A+cn);}
           else if(m<28.5){vec2 cn=vec2(uP.z,uP.w);vec2 q=(uv-cn)*A;float dd=length(q);float k=clamp(1.-dd/max(uP.y,.01),0.,1.);q*=1.-uP.x*k*k;r=Sb(q/A+cn);}
@@ -525,9 +525,9 @@ jobs:
           else if(m<56.5){vec4 og=texture(uO,uv);vec4 bl=S(uv);vec3 hv=r2h(clamp(uC2.rgb,0.,1.));hv.y=mix(hv.y,1.,uP.z);hv.z=1.;vec3 gc=h2r(hv);float glw=1.-exp(-bl.a*uP.x*2.2);glw*=1.-.5*uP.w;r=vec4(og.rgb+gc*glw,clamp(max(og.a,glw),0.,1.));r.rgb=min(r.rgb,vec3(r.a));}
           else if(m<57.5){float sz=max(uP.z,1.);vec2 q=floor(gl_FragCoord.xy/sz)+uP.w*17.13;int ty=int(uP.y+.5);bool gen=ty>=5;if(gen)ty-=5;vec3 nc=vec3(0.);if(ty==0){float lv=L(clamp(u.rgb,0.,1.));float sd=uP.x*(.04+.5*sqrt(max(lv,0.)*(1.-lv*.5)))*.35;nc=vec3(gaussn(q),gaussn(q+3.3),gaussn(q+6.6));float lu=nc.r*.6+nc.g*.3+nc.b*.1;nc=mix(vec3(lu),nc,.35)*sd;}else if(ty==1){nc=vec3(hh(q)-.5)*uP.x*.6;}else if(ty==2){nc=vec3(vnoise(q*.35)-.5)*uP.x*.8;}else if(ty==3){nc=vec3(fbm(q*.08)-.5)*uP.x*1.1;}else{nc=vec3(fract(52.9829189*fract(dot(q,vec2(.06711056,.00583715))))-.5)*uP.x*.6;}if(gen){u=vec4(clamp(vec3(.5)+nc*1.5,0.,1.),1.);}else{u.rgb+=nc*u.a;}cm=true;}
           else if(m<58.5){vec2 cn=vec2(uP.z,uP.w);float dd=length((uv-cn)*A);float coc=smoothstep(uP.y,uP.y+.35,dd)*uP.x;vec4 acc=vec4(0.);float ws=0.;for(int i=0;i<32;i++){float an=float(i)*2.39996;float rr=sqrt((float(i)+.5)/32.)*coc;vec4 tt=S(uv+vec2(cos(an),sin(an))*rr*PX);float w=1.+pow(L(tt.rgb),4.)*3.;acc+=tt*w;ws+=w;}r=acc/ws;}
-          else if(m<59.5){float cs=40.*uP.y;vec2 g=gl_FragCoord.xy/cs;vec2 ig=floor(g);float sp=0.;for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){vec2 cc=ig+vec2(float(i),float(j));if(hh(cc+uP.z)<uP.x){vec2 ctr=cc+vec2(hh(cc+3.1),hh(cc+5.7));float rad=.12+.25*hh(cc+9.3);float dd=length(g-ctr)/rad;sp+=exp(-dd*dd*mix(4.,1.2,uP.w))*(.3+.7*hh(cc+1.7));}}sp=clamp(sp,0.,1.);r=vec4(uC2.rgb*sp,sp)+c*(1.-sp);}
-          else if(m<60.5){float an=uP.z*.01745;mat2 Rm=mat2(cos(an),-sin(an),sin(an),cos(an));vec2 p=Rm*gl_FragCoord.xy;float cw=14.;float colx=floor(p.x/cw);float rnd=hh(vec2(colx,uP.w));float on=step(rnd,uP.x);float offy=hh(vec2(colx,7.7+uP.w))*uP.y*4.;float cyc=max(uP.y*3.,1.);float yy=mod(p.y+offy,cyc);float len=max(uP.y*(.4+.6*hh(vec2(colx,3.3))),1.);float st=on*step(yy,len)*smoothstep(0.,len*.6,yy)*(1.-smoothstep(1.5,3.,abs(p.x-(colx+.5)*cw)));r=vec4(uC2.rgb*st,st)+c*(1.-st);}
-          else if(m<61.5){float cs=34.*uP.y;vec2 g=gl_FragCoord.xy/cs;vec2 ig=floor(g);float sp=0.;vec3 col=vec3(0.);for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){vec2 cc=ig+vec2(float(i),float(j));if(hh(cc+uP.z)<uP.x){vec2 ctr=cc+vec2(.5+.35*(hh(cc+3.1)-.5)+.25*sin(cc.y*1.7),hh(cc+5.7));float dd=length((g-ctr)*vec2(1.,.7))/(.1+.22*hh(cc+9.3));float sv=exp(-dd*dd*2.);float tc=clamp(hh(cc+2.2)*(1.-uP.w*.9),0.,1.);col+=mix(vec3(1.,.82,.25),vec3(1.,.28,.05),tc)*sv;sp+=sv;}}sp=clamp(sp,0.,1.);col=min(col,vec3(sp));r=vec4(col,sp)+c*(1.-sp);}
+          else if(m<59.5){float cs=40.*uP.y*uZ;vec2 g=gl_FragCoord.xy/cs;vec2 ig=floor(g);float sp=0.;for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){vec2 cc=ig+vec2(float(i),float(j));if(hh(cc+uP.z)<uP.x){vec2 ctr=cc+vec2(hh(cc+3.1),hh(cc+5.7));float rad=.12+.25*hh(cc+9.3);float dd=length(g-ctr)/rad;sp+=exp(-dd*dd*mix(4.,1.2,uP.w))*(.3+.7*hh(cc+1.7));}}sp=clamp(sp,0.,1.);r=vec4(uC2.rgb*sp,sp)+c*(1.-sp);}
+          else if(m<60.5){float an=uP.z*.01745;mat2 Rm=mat2(cos(an),-sin(an),sin(an),cos(an));vec2 p=Rm*gl_FragCoord.xy;float cw=14.*uZ;float colx=floor(p.x/cw);float rnd=hh(vec2(colx,uP.w));float on=step(rnd,uP.x);float offy=hh(vec2(colx,7.7+uP.w))*uP.y*4.;float cyc=max(uP.y*3.,1.);float yy=mod(p.y+offy,cyc);float len=max(uP.y*(.4+.6*hh(vec2(colx,3.3))),1.);float st=on*step(yy,len)*smoothstep(0.,len*.6,yy)*(1.-smoothstep(1.5*uZ,3.*uZ,abs(p.x-(colx+.5)*cw)));r=vec4(uC2.rgb*st,st)+c*(1.-st);}
+          else if(m<61.5){float cs=34.*uP.y*uZ;vec2 g=gl_FragCoord.xy/cs;vec2 ig=floor(g);float sp=0.;vec3 col=vec3(0.);for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){vec2 cc=ig+vec2(float(i),float(j));if(hh(cc+uP.z)<uP.x){vec2 ctr=cc+vec2(.5+.35*(hh(cc+3.1)-.5)+.25*sin(cc.y*1.7),hh(cc+5.7));float dd=length((g-ctr)*vec2(1.,.7))/(.1+.22*hh(cc+9.3));float sv=exp(-dd*dd*2.);float tc=clamp(hh(cc+2.2)*(1.-uP.w*.9),0.,1.);col+=mix(vec3(1.,.82,.25),vec3(1.,.28,.05),tc)*sv;sp+=sv;}}sp=clamp(sp,0.,1.);col=min(col,vec3(sp));r=vec4(col,sp)+c*(1.-sp);}
           else{}
           if(cm)r=pmul(vec4(clamp(u.rgb,0.,1.),u.a));
           o=r;}"""
@@ -580,7 +580,7 @@ jobs:
               @Volatile var pending: java.io.File? = null   // project folder to load when the surface is created
               @Volatile var edits = 0                       // strokes / actions since opening (autosave only when something happened)
               @Volatile var onThumbs: ((List<Bitmap>) -> Unit)? = null
-              private val et: Tool get() = if (inv && tool == Tool.BRUSH) Tool.ERASER else tool
+              private val et: Tool get() = if (inv && (tool == Tool.BRUSH || tool == Tool.SMUDGE || tool == Tool.BLUR)) Tool.ERASER else tool
               private var pBL: P? = null
               private var warpL: Layer? = null            // the liquify warp only ever shows on (and is baked into) this layer
               // stabilizer: 1-euro filter -> optional pulled string -> quadratic-midpoint curve -> catch-up on lift
@@ -862,7 +862,7 @@ jobs:
               private fun drawLayers() {
                   G.glEnable(G.GL_BLEND)
                   for ((i, l) in layers.withIndex()) if (l.show) {
-                      blend(l.blend); G.glBindTexture(G.GL_TEXTURE_2D, if (fxOn && fxValid && i == cur) xTex else l.tex)
+                      blend(l.blend); G.glBindTexture(G.GL_TEXTURE_2D, if (fxOn && fxValid && i == cur) fxShow else l.tex)
                       G.glUniform1f(cp.u("uA"), l.alpha); G.glUniform1f(cp.u("uW"), if (warped && l === warpL) 1f else 0f)
                       val mv = tool == Tool.MOVE && i == cur
                       G.glUniform2f(cp.u("uO"), if (mv) mox else 0f, if (mv) moy else 0f); quad()
@@ -947,7 +947,11 @@ jobs:
                           val ln0 = lasso.size
                           if (ln0 < 2 || hypot(x - lasso[ln0 - 2], y - lasso[ln0 - 1]) >= 2f) { lasso.add(x); lasso.add(y); lassoN = lasso.size / 2 }
                       }
-                      Tool.GRAD, Tool.LINE, Tool.RECT, Tool.OVAL -> { sx = x; sy = y; shapePreview() }
+                      Tool.GRAD, Tool.LINE, Tool.RECT, Tool.OVAL -> {
+                          sx = x; sy = y
+                          val now = System.nanoTime(); val gap = (24L + (step?.t?.size ?: 0) * 2L).coerceAtMost(200L) * 1000000L
+                          if (now - pvT >= gap) { pvT = now; shapePreview(false) }   // the busier the canvas, the fewer preview frames
+                      }
                       else -> {
                           if (stabOn()) {
                               val now = System.nanoTime(); val dt = (now - stT) / 1e9f; stT = now
@@ -992,8 +996,11 @@ jobs:
           }
 
           /** gradient / line / box / oval: redrawn on the layer at every move (live preview); end() just keeps the last frame */
-          private fun shapePreview() {
+          private var pvT = 0L
+          private fun shapePreview(full: Boolean = true) {
               val st = step ?: return
+              val sp0 = pen.spacing
+              if (!full) pen.spacing = max(sp0, .2f)      // draft: far fewer dabs while the finger is still moving
               restoreTiles(st)
               when (et) {
                           Tool.GRAD -> gradient(x0, y0, sx, sy)
@@ -1002,10 +1009,12 @@ jobs:
                           Tool.OVAL -> {
                               val cx = (x0 + sx) / 2f; val cy = (y0 + sy) / 2f; val rx = abs(sx - x0) / 2f; val ry = abs(sy - y0) / 2f
                               lx = cx + rx; ly = cy; acc = 0f
-                              for (i in 1..72) { val t = i * 2f * PIF / 72f; seg(cx + rx * cos(t), cy + ry * sin(t), 1f) }
+                              val nn = if (full) 72 else 28
+                          for (i in 1..nn) { val t = i * 2f * PIF / nn; seg(cx + rx * cos(t), cy + ry * sin(t), 1f) }
                           }
                   else -> {}
               }
+              pen.spacing = sp0
           }
 
           /** Redraw the finished freehand stroke with the current pen: the rotary orb scales / fades the stroke you just drew while you drag it. */
@@ -1297,7 +1306,7 @@ jobs:
                   G.glBindFramebuffer(G.GL_FRAMEBUFFER, curF); G.glClearColor(0f, 0f, 0f, 0f); G.glClear(G.GL_COLOR_BUFFER_BIT)
                   for ((i, l) in layers.withIndex()) if (l.show) {
                       val wf = if (warped && l === warpL) 1f else 0f
-                      val src = if (fxOn && fxValid && i == cur) xTex else l.tex
+                      val src = if (fxOn && fxValid && i == cur) fxShow else l.tex
                       val mv = tool == Tool.MOVE && i == cur
                       val ox = if (mv) mox else 0f; val oy = if (mv) moy else 0f
                       if (l.blend < 4) {
@@ -1426,7 +1435,7 @@ jobs:
                   val aT = tex(G.GL_LINEAR, sz, sz); val aF = fbo(aT)
                   val bT = tex(G.GL_LINEAR, sz, sz); val bF = fbo(bT)
                   G.glUseProgram(px.id); G.glViewport(0, 0, sz, sz); G.glDisable(G.GL_BLEND)
-                  G.glUniform4f(px.u("uR"), 0f, 0f, 1f, 1f); G.glUniform2f(px.u("uSz"), sz.toFloat(), sz.toFloat())
+                  G.glUniform4f(px.u("uR"), 0f, 0f, 1f, 1f); G.glUniform2f(px.u("uSz"), sz.toFloat(), sz.toFloat()); G.glUniform1f(px.u("uZ"), 1f)
                   G.glUniform4f(px.u("uC1"), ch(pen.color2, 16), ch(pen.color2, 8), ch(pen.color2, 0), 1f)
                   G.glUniform4f(px.u("uC2"), ch(pen.color, 16), ch(pen.color, 8), ch(pen.color, 0), 1f)
                   G.glUniform4f(px.u("uC3"), 1f, 1f, 1f, 1f)
@@ -1534,6 +1543,11 @@ jobs:
               // ---------- FX: live preview on the active layer, APPLY = one undo step ----------
               private class St(val m: Int, val dx: Float, val dy: Float, val p: FloatArray)
               private var xTex = 0; private var xFbo = 0
+              // filter preview runs on a small copy (<= 1024 px); the full-size render happens only on APPLY
+              private var pvOn = false; private var pvW = 0; private var pvH = 0; private var pvS = 1f
+              private var pvSrc = 0; private var pvSrcF = 0; private var pvX = 0; private var pvXF = 0; private var pvB = 0; private var pvBF = 0
+              private var pvLayer: Layer? = null
+              private val fxShow: Int get() = if (pvOn) pvX else xTex
               private var fxIdx = -1; private var fxV = FloatArray(4)
               private var fxDirty = false; private var fxValid = false; private var fxTried = false
               var fxOk by mutableStateOf(true)
@@ -1544,20 +1558,33 @@ jobs:
                   bakeWarp()
                   if (!fxTried) { fxTried = true; pX = tryProg(FS_X); fxOk = pX != null }
                   if (pX == null) return
-                  xTex = tex(G.GL_LINEAR); xFbo = fbo(xTex); fxOn = true; fxIdx = -1; fxValid = false
+                  val sc = min(1f, 1024f / max(W, H))
+                  pvOn = sc < .999f; pvLayer = null
+                  if (pvOn) {
+                      pvS = sc; pvW = max(2, (W * sc).toInt()); pvH = max(2, (H * sc).toInt())
+                      pvSrc = tex(G.GL_LINEAR, pvW, pvH); pvSrcF = fbo(pvSrc); pvX = tex(G.GL_LINEAR, pvW, pvH); pvXF = fbo(pvX); pvB = tex(G.GL_LINEAR, pvW, pvH); pvBF = fbo(pvB)
+                  } else { xTex = tex(G.GL_LINEAR); xFbo = fbo(xTex) }
+                  fxOn = true; fxIdx = -1; fxValid = false
               }
               fun fxClose() {
                   if (!fxOn) return
-                  fxOn = false; fxValid = false; delTex(xTex); G.glDeleteFramebuffers(1, intArrayOf(xFbo), 0)
+                  fxOn = false; fxValid = false
+                  if (pvOn) { delTex(pvSrc); delTex(pvX); delTex(pvB); G.glDeleteFramebuffers(3, intArrayOf(pvSrcF, pvXF, pvBF), 0); pvOn = false }
+                  else { delTex(xTex); G.glDeleteFramebuffers(1, intArrayOf(xFbo), 0) }
               }
               fun fxSet(i: Int, v: FloatArray) { fxIdx = i; fxV = v; fxDirty = true }
               fun fxApply() {
                   if (!fxOn || !fxValid) { fxClose(); return }
-                  if (fxDirty) { fxDirty = false; fxRender() }
-                  val l = layers[cur]; beginStep(l); touch(0, 0, W, H)
+                  val l = layers[cur]
+                  fxDirty = false
+                  if (pvOn) { xTex = tex(G.GL_LINEAR); xFbo = fbo(xTex); fxRender(true) }   // full-quality pass, only now
+                  else fxRender(true)
+                  beginStep(l); touch(0, 0, W, H)
                   G.glBindFramebuffer(G.GL_FRAMEBUFFER, xFbo); G.glBindTexture(G.GL_TEXTURE_2D, l.tex)
                   G.glCopyTexSubImage2D(G.GL_TEXTURE_2D, 0, 0, 0, 0, 0, W, H)
-                  commitStep(); fxClose()
+                  commitStep()
+                  if (pvOn) { delTex(xTex); G.glDeleteFramebuffers(1, intArrayOf(xFbo), 0) }
+                  fxClose()
               }
 
               private fun gauss(rad: Float, o: ArrayList<St>) {
@@ -1588,26 +1615,42 @@ jobs:
                   }
                   return o
               }
-              private fun fxRender() {
+              private fun fxRender(full: Boolean = !pvOn) {
                   val px = pX ?: return
                   val f = FXS.getOrNull(fxIdx)
                   if (f == null) { fxValid = false; return }
-                  val plan = fxPlan(f, fxV); val n = plan.size; val l = layers[cur]
-                  G.glUseProgram(px.id); G.glViewport(0, 0, W, H); G.glDisable(G.GL_BLEND)
-                  G.glUniform4f(px.u("uR"), 0f, 0f, 1f, 1f); G.glUniform2f(px.u("uSz"), W.toFloat(), H.toFloat())
+                  val l = layers[cur]
+                  val sc = if (full) 1f else pvS
+                  val w = if (full) W else pvW; val h = if (full) H else pvH
+                  val outT = if (full) xTex else pvX; val outF = if (full) xFbo else pvXF
+                  val altT = if (full) sTex else pvB; val altF = if (full) sFbo else pvBF
+                  var src0 = l.tex
+                  if (!full) {
+                      if (pvLayer !== l) {
+                          G.glBindFramebuffer(G.GL_READ_FRAMEBUFFER, l.fbo); G.glBindFramebuffer(G.GL_DRAW_FRAMEBUFFER, pvSrcF)
+                          G.glBlitFramebuffer(0, 0, W, H, 0, 0, pvW, pvH, G.GL_COLOR_BUFFER_BIT, G.GL_LINEAR)
+                          pvLayer = l
+                      }
+                      src0 = pvSrc
+                  }
+                  val v2 = fxV.copyOf()
+                  if (sc < 1f) for (j in pxIdx(f.m)) if (j < 4 && v2[j] > 0f) v2[j] = max(v2[j] * sc, .5f)
+                  val plan = fxPlan(f, v2); val n = plan.size
+                  G.glUseProgram(px.id); G.glViewport(0, 0, w, h); G.glDisable(G.GL_BLEND)
+                  G.glUniform4f(px.u("uR"), 0f, 0f, 1f, 1f); G.glUniform2f(px.u("uSz"), w.toFloat(), h.toFloat()); G.glUniform1f(px.u("uZ"), sc)
                   G.glUniform4f(px.u("uC1"), ch(pen.color2, 16), ch(pen.color2, 8), ch(pen.color2, 0), 1f)
                   G.glUniform4f(px.u("uC2"), ch(pen.color, 16), ch(pen.color, 8), ch(pen.color, 0), 1f)
                   G.glUniform4f(px.u("uC3"), 1f, 1f, 1f, 1f)
                   G.glUniform1i(px.u("uT"), 0); G.glUniform1i(px.u("uO"), 1)
-                  G.glActiveTexture(G.GL_TEXTURE1); G.glBindTexture(G.GL_TEXTURE_2D, l.tex); G.glActiveTexture(G.GL_TEXTURE0)
-                  var src = l.tex
+                  G.glActiveTexture(G.GL_TEXTURE1); G.glBindTexture(G.GL_TEXTURE_2D, src0); G.glActiveTexture(G.GL_TEXTURE0)
+                  var src = src0
                   for ((i, s) in plan.withIndex()) {
                       val toX = (n - 1 - i) % 2 == 0
-                      G.glBindFramebuffer(G.GL_FRAMEBUFFER, if (toX) xFbo else sFbo)
+                      G.glBindFramebuffer(G.GL_FRAMEBUFFER, if (toX) outF else altF)
                       G.glBindTexture(G.GL_TEXTURE_2D, src)
                       G.glUniform1f(px.u("uM"), s.m.toFloat()); G.glUniform2f(px.u("uD"), s.dx, s.dy)
                       G.glUniform4f(px.u("uP"), s.p[0], s.p[1], s.p[2], s.p[3]); quad()
-                      src = if (toX) xTex else sTex
+                      src = if (toX) outT else altT
                   }
                   fxValid = true
               }
@@ -2924,6 +2967,7 @@ jobs:
                               e,
                               onAdjust = { if (e.restylePending.compareAndSet(false, true)) v.gl { e.restylePending.set(false); e.restyleLast() } },
                               onHold = { fromOrb = true; panel = 6 },
+                              onTap = { if (tool == Tool.BRUSH || tool == Tool.SMUDGE || tool == Tool.BLUR || tool == Tool.LASSO || tool == Tool.LIQUIFY) { e.inv = !e.inv; U.bump(); feel(1, if (e.inv) (if (tool == Tool.LIQUIFY) "restore mode" else "erase mode") else "draw mode") } },
                               onDouble = { fromOrb = true; U.from(if (U.tgt == 0) e.pen.color else e.pen.color2); panel = 3 }
                           )
                       }
@@ -3223,7 +3267,7 @@ jobs:
 
           // ═════════════════════════ rotary slime orb: drag up/down = brush size, left/right = opacity ═════════════════════════
           @Composable
-          fun RotOrb(e: Engine, onAdjust: () -> Unit = {}, onHold: () -> Unit = {}, onDouble: () -> Unit = {}) {
+          fun RotOrb(e: Engine, onAdjust: () -> Unit = {}, onHold: () -> Unit = {}, onDouble: () -> Unit = {}, onTap: () -> Unit = {}) {
               val rv = U.rev
               val p = e.pen
               val scope = rememberCoroutineScope()
@@ -3268,6 +3312,7 @@ jobs:
                   Canvas(
                       Modifier.size(d(68f)).systemGestureExclusion().pointerInput(Unit) {
                           detectTapGestures(
+                              onTap = { onTap() },
                               onDoubleTap = { if (T.od2 > .5f) onDouble() },
                               onLongPress = { if (T.ohd > .5f) { if (T.hap > .5f) hf.performHapticFeedback(HapticFeedbackType.LongPress); onHold() } }
                           )
@@ -3356,6 +3401,10 @@ jobs:
                       val rp = rr * (.14f + .42f * t1)
                       drawCircle(col.copy(alpha = p.opacity.coerceIn(.12f, 1f)), rp, Offset(cx, cy))
                       drawCircle(edge, rp, Offset(cx, cy), style = Stroke(2f))
+                                if (e.inv) {
+                                    drawCircle(Color(0xFFFF4D6D), rp + 3f, Offset(cx, cy), style = Stroke(3f))
+                                    drawLine(Color(0xFFFF4D6D), Offset(cx - rp, cy + rp), Offset(cx + rp, cy - rp), 3f, StrokeCap.Round)
+                                }
                       drawCircle(Color.White.copy(alpha = .8f), s * .015f, Offset(cx + cos(spinRad) * rr * .5f, cy + sin(spinRad) * rr * .5f))
                       rotate(-25f, Offset(cx + rr * .1f, cy - rr * .62f)) {
                           drawOval(Color.White.copy(alpha = .8f), Offset(cx - rr * .3f, cy - rr * .78f), Size(rr * .6f, rr * .22f))
@@ -3393,6 +3442,8 @@ jobs:
           import androidx.compose.foundation.layout.Column
           import androidx.compose.foundation.layout.Row
           import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.Spacer
           import androidx.compose.foundation.layout.size
           import androidx.compose.foundation.rememberScrollState
           import androidx.compose.runtime.*
@@ -3530,10 +3581,11 @@ jobs:
                   FXS[sel].ps.forEachIndexed { k, q ->
                       R2(PP(q.n, q.lo, q.hi, (q.hi - q.lo) / 100f, false, { vals[k] }, { x -> vals[k] = x; val a = vals.toFloatArray(); v.gl { e.fxSet(sel, a) } }))
                   }
-                  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(d(6f))) {
-                      Pill("APPLY", true, Ik.OK) { v.gl { e.fxApply() }; apply() }
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(d(6f)), verticalAlignment = Alignment.CenterVertically) {
                       Pill("RESET") { pick(sel) }
                       Pill("CANCEL") { cancel() }
+                      Spacer(Modifier.weight(1f))
+                      Pill("APPLY", true, Ik.OK) { v.gl { e.fxApply() }; apply() }
                   }
               }
           }
@@ -4345,7 +4397,7 @@ jobs:
               val t1 = (ln(p.size.coerceIn(smin, smax) / smin) / ln(smax / smin)).coerceIn(0f, 1f)
               val t2 = ((p.opacity - omin) / (omax - omin)).coerceIn(0f, 1f)
               val free = tool == Tool.BRUSH || tool == Tool.ERASER || tool == Tool.SMUDGE || tool == Tool.BLUR || tool == Tool.DODGE || tool == Tool.BURN
-              val cap = if (tool == Tool.BRUSH || tool == Tool.ERASER) "ERASER" else if (tool == Tool.LIQUIFY) "RESTORE" else if (tool == Tool.LASSO) "ERASE" else ""
+              val cap = if (tool == Tool.BRUSH || tool == Tool.ERASER || tool == Tool.SMUDGE || tool == Tool.BLUR) "ERASER" else if (tool == Tool.LIQUIFY) "RESTORE" else if (tool == Tool.LASSO) "ERASE" else ""
               val on = if (tool == Tool.ERASER) true else e.inv
               val col = Color(p.color)
               val ac = T.ac; val ink = Color(0xFF2149AA)
