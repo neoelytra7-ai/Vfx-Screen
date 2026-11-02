@@ -1,3 +1,8 @@
+# ======================= NEKO UI (7.2, BELUM dikompilasi) =======================
+# Rombak UI: bar gantung bertali + charm, kucing = rotator (animasi per-bagian), top bar ikan, bubble, popup 3 tombol,
+# panel brush gaya buku, font handwriting Neko Hand (res/font/neko_hand.otf), semua art di res/raw/neko_art.txt (hasil trace gambar user).
+# PUSH TERPISAH ke repo: app/src/main/res/raw/neko_art.txt dan app/src/main/res/font/neko_hand.otf (jangan ditimpa/dihapus workflow).
+# File baru: Neko.kt. Kalau build gagal kirim log-nya. Skala bar: 390 unit art x (lebar layar/720) di NekoBar.
 # ======================= SISA TASK (untuk chat baru) =======================
 # DONE di versi ini (7.1, BELUM dikompilasi - tidak ada toolchain Android di sini; kalau build gagal kirim log-nya):
 #  rotator: stiff axis-lock, sensitivitas size/opac, gain kanan, hold>menu(Style>ORB), tap2x>colorspace (morph dari orb), last stroke ikut adjust
@@ -184,6 +189,644 @@ jobs:
           </layer-list>
           EOF_SRC
           mkdir -p app/src/main/kotlin/dev/canvas
+          mkdir -p app/src/main/kotlin/dev/canvas
+          cat > app/src/main/kotlin/dev/canvas/Neko.kt <<'EOF_SRC'
+          package dev.canvas
+
+          import android.content.Context
+          import androidx.compose.animation.core.Animatable
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.spring
+          import androidx.compose.animation.core.tween
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.gestures.awaitFirstDown
+          import androidx.compose.foundation.gestures.detectDragGestures
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.interaction.MutableInteractionSource
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.offset
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.systemGestureExclusion
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.derivedStateOf
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableFloatStateOf
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.rememberUpdatedState
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.drawBehind
+          import androidx.compose.ui.geometry.CornerRadius
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Rect
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.PathFillType
+          import androidx.compose.ui.graphics.StrokeJoin
+          import androidx.compose.ui.graphics.drawscope.DrawScope
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.drawscope.clipPath
+          import androidx.compose.ui.graphics.drawscope.clipRect
+          import androidx.compose.ui.graphics.drawscope.withTransform
+          import androidx.compose.ui.graphics.graphicsLayer
+          import androidx.compose.ui.graphics.vector.PathParser
+          import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.platform.LocalConfiguration
+          import androidx.compose.ui.platform.LocalHapticFeedback
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.Font
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.text.drawText
+          import androidx.compose.ui.text.rememberTextMeasurer
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlin.math.abs
+          import kotlin.math.ln
+          import kotlin.math.pow
+          import kotlin.math.sin
+          import kotlin.math.sqrt
+          import kotlin.random.Random
+
+          // ═════════════════════════ NEKO UI ═════════════════════════
+          // Semua bentuk (kucing, bar gantung, charm, icon, bubble, popup) di-trace dari gambar desain user ke path vektor
+          // (res/raw/neko_art.txt), jadi tajam di semua ukuran dan bisa dianimasikan per bagian.
+          // Font: res/font/neko_hand.otf (dari tulisan tangan user).
+
+          val NekoFont = FontFamily(Font(R.font.neko_hand))
+          private val NInk = Color(0xFF0D0D0D)
+          private val NGray = Color(0xFF7D7D7D)
+          private val NPaper = Color.White
+          private val NRed = Color(0xFFFF4D6D)
+
+          class ArtShape(val w: Float, val h: Float, val x: Float, val y: Float) {
+              var fill: Path? = null
+              var gray: Path? = null
+              var ink: Path? = null
+          }
+
+          object Art {
+              val m = HashMap<String, ArtShape>()
+              val eyes = FloatArray(10)
+              var palBlob: Path? = null
+              var brushTip: Path? = null
+              @Volatile private var ok = false
+
+              private fun parse(s: String): Path {
+                  val p = PathParser().parsePathString(s).toPath()
+                  p.fillType = PathFillType.EvenOdd
+                  return p
+              }
+
+              @Synchronized
+              fun load(ctx: Context) {
+                  if (ok) return
+                  try {
+                      ctx.resources.openRawResource(R.raw.neko_art).bufferedReader().useLines { ls ->
+                          for (ln in ls) {
+                              val a = ln.indexOf('|'); if (a < 0) continue
+                              val b = ln.indexOf('|', a + 1); if (b < 0) continue
+                              val name = ln.substring(0, a); val kind = ln.substring(a + 1, b); val rest = ln.substring(b + 1)
+                              if (kind == "meta") {
+                                  val f = rest.trim().split(" ").map { it.toFloat() }
+                                  if (name == "eyes") { for (i in 0 until 10) eyes[i] = f[i] } else m[name] = ArtShape(f[0], f[1], f[2], f[3])
+                              } else if (kind == "fill") { m[name]?.fill = parse(rest) }
+                              else if (kind == "gray") { m[name]?.gray = parse(rest) }
+                              else if (kind == "ink") {
+                                  if (name == "pal_blob") palBlob = parse(rest)
+                                  else if (name == "brush_tip") brushTip = parse(rest)
+                                  else m[name]?.ink = parse(rest)
+                              }
+                          }
+                      }
+                      ok = true
+                  } catch (_: Throwable) { }
+              }
+
+              fun get(n: String): ArtShape? = m[n]
+          }
+
+          fun DrawScope.drawArt(a: ArtShape?, alpha: Float = 1f) {
+              if (a == null) return
+              a.fill?.let { drawPath(it, NPaper, alpha) }
+              a.gray?.let { drawPath(it, NGray, alpha) }
+              a.ink?.let { drawPath(it, NInk, alpha) }
+          }
+
+          /** draw [a] with its top-left at (px,py) pixels, art units multiplied by k */
+          fun DrawScope.artAt(a: ArtShape?, px: Float, py: Float, k: Float, alpha: Float = 1f) {
+              if (a == null) return
+              withTransform({ translate(px, py); scale(k, k, Offset.Zero) }) { drawArt(a, alpha) }
+          }
+
+          /** art units (design is 720 wide) -> dp */
+          @Composable
+          fun kd(): Float = LocalConfiguration.current.screenWidthDp / 720f
+
+          @Composable
+          fun NekoText(s: String, sz: Float = 13f, c: Color = NInk, mod: Modifier = Modifier) =
+              Text(s, modifier = mod, color = c, fontSize = sz.sp, fontFamily = NekoFont, maxLines = 1)
+
+          @Composable
+          fun OutlineText(s: String, sz: Float, fill: Color = Color.White, edge: Color = NInk) {
+              Box {
+                  Text(s, style = TextStyle(fontFamily = NekoFont, fontSize = sz.sp, color = edge, drawStyle = Stroke(width = 7f, join = StrokeJoin.Round)), maxLines = 1)
+                  Text(s, style = TextStyle(fontFamily = NekoFont, fontSize = sz.sp, color = fill), maxLines = 1)
+              }
+          }
+
+          // ───────────────────────── tombol dari art (undo / redo / view) ─────────────────────────
+          @Composable
+          fun ArtBtn(name: String, s: Float, en: Boolean = true, rep: Boolean = false, hold: (() -> Unit)? = null, f: () -> Unit) {
+              val a = Art.get(name) ?: return
+              val scope = rememberCoroutineScope()
+              var pr by remember { mutableStateOf(false) }
+              val sq by animateFloatAsState(if (pr) .86f else 1f, spring(.4f, 500f), label = "ab")
+              val fU by rememberUpdatedState(f)
+              val hU by rememberUpdatedState(hold)
+              val fired = remember { BooleanArray(1) }
+              Canvas(
+                  Modifier.size((a.w * s).dp, (a.h * s).dp).graphicsLayer { scaleX = sq; scaleY = sq; alpha = if (en) 1f else .35f }
+                      .pointerInput(en) {
+                          detectTapGestures(
+                              onPress = {
+                                  if (en) {
+                                      pr = true; fired[0] = false
+                                      val job = if (rep) scope.launch { delay(420); while (true) { fired[0] = true; hU?.invoke(); delay(110) } } else null
+                                      tryAwaitRelease()
+                                      job?.cancel(); pr = false
+                                  }
+                              },
+                              onTap = { if (en && !fired[0]) fU() }
+                          )
+                      }
+              ) { artAt(a, 0f, 0f, size.width / a.w) }
+          }
+
+          @Composable
+          fun NekoTop(e: Engine, v: CanvasView, onUndo: () -> Unit, onRedo: () -> Unit, onReset: () -> Unit) {
+              val s = kd() * .7f
+              val rv = U.rev
+              val moved by remember { derivedStateOf { e.rot != 0f || e.zoom != 1f } }
+              Box(
+                  Modifier.fillMaxWidth().background(NGray)
+                      .drawBehind { drawLine(NInk, Offset(0f, size.height - 2f), Offset(size.width, size.height - 2f), 4f) }
+                      .statusBarsPadding().padding(horizontal = d(8f), vertical = d(6f))
+              ) {
+                  Row(Modifier.align(Alignment.CenterStart), horizontalArrangement = Arrangement.spacedBy(d(12f)), verticalAlignment = Alignment.CenterVertically) {
+                      ArtBtn("t_undo", s, e.canUndo, true, { v.gl { e.undo() } }) { v.gl { e.undo() }; onUndo() }
+                      ArtBtn("t_redo", s, e.canRedo, true, { v.gl { e.redo() } }) { v.gl { e.redo() }; onRedo() }
+                  }
+                  Row(Modifier.align(Alignment.CenterEnd), horizontalArrangement = Arrangement.spacedBy(d(8f)), verticalAlignment = Alignment.CenterVertically) {
+                      if (moved) {
+                          val deg = ((e.rot * 57.2958f) % 360f + 360f) % 360f
+                          NekoText("%d%%  %d\u00B0".format((e.zoom * 100f).toInt(), deg.toInt()), 13f, Color.White)
+                      }
+                      ArtBtn("t_view", s) { e.resetView(); v.requestRender(); onReset() }
+                  }
+              }
+          }
+
+          // ───────────────────────── bar gantung ─────────────────────────
+          class Charm(val art: String, val px: Float, val sel: Boolean, val badge: String = "", val tint: Int = 0, val f: () -> Unit)
+
+          /** panel abu-abu + bar putih + slider (size/opacity) + charm bergantung tali. Tinggi = 390 unit art. pen == null -> tanpa slider (homepage). */
+          @Composable
+          fun NekoBar(pen: Pen?, charms: List<Charm>, gSel: Boolean, onG: () -> Unit, onAdjust: () -> Unit = {}, modifier: Modifier = Modifier) {
+              val kdv = kd()
+              val tm = rememberTextMeasurer()
+              val scope = rememberCoroutineScope()
+              val hf = LocalHapticFeedback.current
+              val kicks = remember { List(6) { Animatable(0f) } }
+              var pressed by remember { mutableIntStateOf(-1) }
+              val chU by rememberUpdatedState(charms)
+              val gU by rememberUpdatedState(onG)
+              val adjU by rememberUpdatedState(onAdjust)
+              Canvas(
+                  modifier.fillMaxWidth().height((390f * kdv).dp).pointerInput(Unit) {
+                      awaitPointerEventScope {
+                          while (true) {
+                              val down = awaitFirstDown(requireUnconsumed = false)
+                              val k = size.width / 720f
+                              val ax = down.position.x / k; val ay = down.position.y / k
+                              var tgt = -1
+                              if (pen != null && ay in 112f..161f && ax in 80f..650f) tgt = 0
+                              else if (pen != null && ay in 162f..193f && ax in 80f..650f) tgt = 1
+                              else if (ax in 522f..610f && ay in 14f..112f) tgt = 200
+                              else if (ay >= 193f) {
+                                  val l = chU
+                                  for (i in l.indices) { if (abs(ax - l[i].px) < 52f) { tgt = 100 + i; break } }
+                              }
+                              down.consume()
+                              if (tgt < 0) continue
+                              if (tgt == 0 || tgt == 1) {
+                                  val sMin = T.smin.coerceAtLeast(1f); val sMax = maxOf(T.smax, sMin + 1f)
+                                  val oMin = T.omin; val oMax = maxOf(T.omax, oMin + .01f)
+                                  fun upd(x: Float) {
+                                      val t = ((x / k - 112f) / (607f - 112f)).coerceIn(0f, 1f)
+                                      if (tgt == 0) pen!!.size = sMin * (sMax / sMin).pow(t) else pen!!.opacity = oMin + t * (oMax - oMin)
+                                      U.bump(); Life.poke(.03f)
+                                  }
+                                  if (T.hap > .5f) hf.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                  upd(down.position.x); adjU()
+                                  var lastPost = 0L
+                                  while (true) {
+                                      val ev = awaitPointerEvent()
+                                      val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                                      if (!ch.pressed) break
+                                      upd(ch.position.x); ch.consume()
+                                      val now = System.nanoTime()
+                                      if (now - lastPost > 45_000_000L) { lastPost = now; adjU() }
+                                  }
+                                  adjU()
+                              } else {
+                                  pressed = tgt
+                                  var moved = false
+                                  while (true) {
+                                      val ev = awaitPointerEvent()
+                                      val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                                      if ((ch.position - down.position).getDistance() > viewConfiguration.touchSlop * 2f) moved = true
+                                      ch.consume()
+                                      if (!ch.pressed) {
+                                          if (!moved) {
+                                              if (T.hap > .5f) hf.performHapticFeedback(HapticFeedbackType.LongPress)
+                                              if (tgt == 200) gU()
+                                              else {
+                                                  val i = tgt - 100
+                                                  val l = chU
+                                                  if (i in l.indices) {
+                                                      l[i].f()
+                                                      if (i < kicks.size) scope.launch { kicks[i].snapTo(14f); kicks[i].animateTo(0f, spring(.22f, 90f)) }
+                                                  }
+                                              }
+                                          }
+                                          break
+                                      }
+                                  }
+                                  pressed = -1
+                              }
+                          }
+                      }
+                  }
+              ) {
+                  val k = size.width / 720f
+                  val rr = U.rev
+                  fun placed(a: ArtShape?) { if (a != null) artAt(a, a.x * k, (a.y - 1210f) * k, k) }
+                  drawRect(NGray, Offset.Zero, size)
+                  drawLine(NInk, Offset(0f, 2f * k), Offset(size.width, 2f * k), 5f * k)
+                  placed(Art.get("bar"))
+                  if (gSel) drawCircle(T.ac.copy(alpha = .5f), 50f * k, Offset(566f * k, 65f * k))
+                  placed(Art.get("gbtn"))
+                  placed(Art.get("base"))
+                  placed(Art.get("pawL"))
+                  // ── sliders ──
+                  if (pen != null) {
+                      val sMin = T.smin.coerceAtLeast(1f); val sMax = maxOf(T.smax, sMin + 1f)
+                      val oMin = T.omin; val oMax = maxOf(T.omax, oMin + .01f)
+                      val t1 = (ln(pen.size.coerceIn(sMin, sMax) / sMin) / ln(sMax / sMin)).coerceIn(0f, 1f)
+                      val t2 = ((pen.opacity - oMin) / (oMax - oMin)).coerceIn(0f, 1f)
+                      val l = 112f * k; val r = 607f * k
+                      val c1 = 139f * k; val c2 = 184f * k
+                      val th = 24f * k
+                      val st = Stroke(3f * k)
+                      // size: ujung lancip hitam makin tebal
+                      drawRoundRect(NPaper, Offset(l, c1 - th / 2f), Size(r - l, th), CornerRadius(th / 2f))
+                      drawRoundRect(NInk, Offset(l, c1 - th / 2f), Size(r - l, th), CornerRadius(th / 2f), style = st)
+                      val kx1 = l + (r - l) * t1
+                      val tp = Path()
+                      tp.moveTo(l, c1); tp.lineTo(kx1, c1 - 10f * k); tp.lineTo(kx1, c1 + 10f * k); tp.close()
+                      drawPath(tp, NInk)
+                      drawCircle(NPaper, 15f * k, Offset(kx1, c1))
+                      drawCircle(NInk, 15f * k, Offset(kx1, c1), style = Stroke(4.5f * k))
+                      // opacity: bar hitam penuh
+                      drawRoundRect(NPaper, Offset(l, c2 - th / 2f), Size(r - l, th), CornerRadius(th / 2f))
+                      drawRoundRect(NInk, Offset(l, c2 - th / 2f), Size(r - l, th), CornerRadius(th / 2f), style = st)
+                      val kx2 = l + (r - l) * t2
+                      drawRoundRect(NInk, Offset(l, c2 - 10f * k), Size(maxOf(kx2 - l, 2f), 20f * k), CornerRadius(10f * k))
+                      drawRoundRect(NPaper, Offset(kx2 - 13f * k, c2 - 13f * k), Size(26f * k, 26f * k), CornerRadius(7f * k))
+                      drawRoundRect(NInk, Offset(kx2 - 13f * k, c2 - 13f * k), Size(26f * k, 26f * k), CornerRadius(7f * k), style = Stroke(4.5f * k))
+                      // penanda kiri + angka
+                      drawCircle(NInk, 8f * k, Offset(82f * k, c1))
+                      drawCircle(NPaper, 7f * k, Offset(82f * k, c2)); drawCircle(NInk, 7f * k, Offset(82f * k, c2), style = Stroke(2.5f * k))
+                      val ts = TextStyle(fontFamily = NekoFont, fontSize = (30f * k).toSp(), color = NInk)
+                      drawText(tm, pen.size.toInt().toString(), topLeft = Offset(628f * k, c1 - 20f * k), style = ts)
+                      drawText(tm, (pen.opacity * 100f).toInt().toString(), topLeft = Offset(622f * k, c2 - 20f * k), style = ts)
+                  }
+                  // ── charm ──
+                  for (i in charms.indices) {
+                      val c = charms[i]
+                      val a = Art.get(c.art) ?: continue
+                      val pvx = c.px * k; val pvy = (a.y - 1210f + 14f) * k
+                      val ang = (if (T.an > .01f) sin((Life.clock * 2f + i * .37f) * 6.2832f) * (1.6f + 4.5f * Life.e) else 0f) + (if (i < kicks.size) kicks[i].value else 0f)
+                      val sc = if (pressed == 100 + i) .93f else if (c.sel) 1.08f else 1f
+                      if (c.sel) drawCircle(T.ac.copy(alpha = .45f), 44f * k, Offset(c.px * k, (a.y - 1210f + a.h * .74f) * k))
+                      withTransform({ rotate(ang, Offset(pvx, pvy)); scale(sc, sc, Offset(pvx, pvy)) }) {
+                          placed(a)
+                          if (c.tint != 0) drawCircle(Color(c.tint), 13f * k, Offset((a.x + 26f - a.x) * k + a.x * k, (a.y - 1210f + 57f) * k))
+                      }
+                      if (c.badge.isNotEmpty()) {
+                          val bs = TextStyle(fontFamily = NekoFont, fontSize = (22f * k).toSp(), color = NInk)
+                          val lay = tm.measure(c.badge, bs)
+                          val bx = c.px * k - lay.size.width / 2f; val by = (a.y - 1210f + a.h - 14f) * k - lay.size.height / 2f
+                          drawRoundRect(NPaper, Offset(bx - 5f * k, by), Size(lay.size.width + 10f * k, lay.size.height.toFloat()), CornerRadius(8f * k))
+                          drawRoundRect(NInk, Offset(bx - 5f * k, by), Size(lay.size.width + 10f * k, lay.size.height.toFloat()), CornerRadius(8f * k), style = Stroke(2.5f * k))
+                          drawText(tm, c.badge, topLeft = Offset(bx, by), style = bs)
+                      }
+                  }
+              }
+          }
+
+          // ───────────────────────── kucing (rotator) ─────────────────────────
+          /**
+           * Kucing user = rotator. Drag atas/bawah = size, kiri/kanan = opacity (stiff axis lock, sama kayak orb lama).
+           * Tap = mode hapus/gambar, tahan = menu, tap 2x = color space. Kuas di mulut ikut warna pen, palet di badan ikut warna FG/BG.
+           * Animasi: napas, ekor goyang, kepala goyang + ngunyah, kedip acak, miring + squash saat di-drag.
+           * [e] == null -> mode dekorasi (homepage), [showH] = tinggi art yang kelihatan (unit art).
+           */
+          @Composable
+          fun NekoCat(
+              e: Engine?, kdv: Float, showH: Float = 408f, interactive: Boolean = true,
+              onAdjust: () -> Unit = {}, onInfo: (String) -> Unit = {}, onHold: () -> Unit = {}, onDouble: () -> Unit = {}, onTap: () -> Unit = {},
+              modifier: Modifier = Modifier
+          ) {
+              val rv = U.rev
+              val scope = rememberCoroutineScope()
+              val hf = LocalHapticFeedback.current
+              var drag by remember { mutableStateOf(false) }
+              var pullX by remember { mutableFloatStateOf(0f) }
+              var pullY by remember { mutableFloatStateOf(0f) }
+              val lx by animateFloatAsState(pullX, spring(.3f, 380f), label = "cx")
+              val ly by animateFloatAsState(pullY, spring(.3f, 380f), label = "cy")
+              val pr by animateFloatAsState(if (drag) 1f else 0f, spring(.5f, 300f), label = "cp")
+              val blink = remember { Animatable(0f) }
+              val flick = remember { Animatable(0f) }
+              LaunchedEffect(Unit) {
+                  while (true) {
+                      delay(Random.nextLong(2200L, 5200L))
+                      blink.animateTo(1f, tween(70)); blink.animateTo(0f, tween(120))
+                  }
+              }
+              val q = remember { IntArray(2) }
+              val ax = remember { IntArray(1) }
+              val oac = remember { FloatArray(3) }
+              val lastPost = remember { LongArray(1) }
+              val adjU by rememberUpdatedState(onAdjust)
+              val infoU by rememberUpdatedState(onInfo)
+              val holdU by rememberUpdatedState(onHold)
+              val dblU by rememberUpdatedState(onDouble)
+              val tapU by rememberUpdatedState(onTap)
+              fun release() { drag = false; pullX = 0f; pullY = 0f; adjU(); infoU("") }
+              fun flickNow() { scope.launch { flick.snapTo(1f); flick.animateTo(0f, spring(.35f, 120f)) } }
+
+              var mod = modifier.size((200f * kdv).dp, (showH * kdv).dp)
+              if (interactive && e != null) {
+                  mod = mod.systemGestureExclusion().pointerInput(Unit) {
+                      detectTapGestures(
+                          onTap = { flickNow(); tapU() },
+                          onDoubleTap = { if (T.od2 > .5f) dblU() },
+                          onLongPress = { if (T.ohd > .5f) { if (T.hap > .5f) hf.performHapticFeedback(HapticFeedbackType.LongPress); holdU() } }
+                      )
+                  }.pointerInput(Unit) {
+                      detectDragGestures(
+                          onDragStart = {
+                              drag = true; ax[0] = 0; oac[0] = 0f; oac[1] = 0f; oac[2] = 0f
+                              if (T.hap > .5f) hf.performHapticFeedback(HapticFeedbackType.LongPress)
+                          },
+                          onDragEnd = { release() },
+                          onDragCancel = { release() },
+                          onDrag = { ch, a ->
+                              ch.consume()
+                              val pen = e.pen
+                              var dx = a.x; var dy = a.y
+                              if (T.olk > .05f) {
+                                  if (ax[0] == 0) {
+                                      oac[0] += a.x; oac[1] += a.y
+                                      val thr = (3f + 22f * T.olk) * density
+                                      if (maxOf(abs(oac[0]), abs(oac[1])) < thr) { dx = 0f; dy = 0f }
+                                      else { ax[0] = if (abs(oac[1]) >= abs(oac[0])) 1 else 2; dx = oac[0]; dy = oac[1] }
+                                  }
+                                  if (ax[0] == 1) dx = 0f else if (ax[0] == 2) dy = 0f
+                              }
+                              val rng = 230f * density
+                              val sMin = T.smin.coerceAtLeast(1f); val sMax = maxOf(T.smax, sMin + 1f)
+                              val oMin = T.omin; val oMax = maxOf(T.omax, oMin + .01f)
+                              val c1 = (ln(pen.size.coerceIn(sMin, sMax) / sMin) / ln(sMax / sMin)).coerceIn(0f, 1f)
+                              val n1 = (c1 - dy / rng * T.osn).coerceIn(0f, 1f)
+                              if (dy != 0f) pen.size = sMin * (sMax / sMin).pow(n1)
+                              oac[2] += dx
+                              val gx = if (oac[2] > 0f) dx * (1f + T.orr) else dx
+                              val n2 = (pen.opacity + gx / rng * (oMax - oMin) * T.opn).coerceIn(oMin, oMax)
+                              if (dx != 0f) pen.opacity = n2
+                              val k1 = (n1 * 24f).toInt(); val k2 = (((n2 - oMin) / (oMax - oMin)) * 24f).toInt()
+                              if ((k1 != q[0] || k2 != q[1]) && T.hap > .5f) hf.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                              q[0] = k1; q[1] = k2
+                              val m = 20f * density
+                              pullX = (pullX + dx * .6f).coerceIn(-m, m); pullY = (pullY + dy * .6f).coerceIn(-m, m)
+                              Life.poke(.04f)
+                              infoU("SIZE %d   OPA %d%%".format(pen.size.toInt(), (pen.opacity * 100f).toInt()))
+                              if (dx != 0f || dy != 0f) {
+                                  val now = System.nanoTime()
+                                  if (now - lastPost[0] > 45_000_000L) { lastPost[0] = now; adjU() }
+                              }
+                              U.bump()
+                          }
+                      )
+                  }
+              } else {
+                  mod = mod.pointerInput(Unit) { detectTapGestures(onTap = { flickNow(); tapU() }) }
+              }
+              val pen = e?.pen
+              val c1 = pen?.color ?: 0xFF3B82F6.toInt()
+              val c2 = pen?.color2 ?: 0xFFFFFFFF.toInt()
+              val inv = e?.inv ?: false
+
+              Canvas(mod) {
+                  val s = size.width / 200f
+                  val on = T.an > .01f
+                  val clk = Life.clock; val en = Life.e
+                  val m = 20f * density
+                  val tx = (lx / m).coerceIn(-1f, 1f); val ty = (ly / m).coerceIn(-1f, 1f)
+                  val tailA = if (on) (7f * sin(clk * 12.566f) + 3f * sin(clk * 37.699f + 1f)) * (1f + en * 1.5f + pr) + flick.value * 26f * sin(clk * 62.832f) else 0f
+                  val breathe = if (on) 1f + .009f * sin(clk * 12.566f) else 1f
+                  val chew = if (on) .9f * en * sin(clk * 75.4f) else 0f
+                  val headA = (if (on) 1.3f * sin(clk * 18.85f + .5f) else 0f) + chew + tx * 5f
+                  val squashY = 1f - ty * .03f
+                  val lid = maxOf(blink.value, pr * .35f)
+                  withTransform({ scale(s, s, Offset.Zero) }) {
+                      // ekor (di belakang log)
+                      withTransform({ rotate(tailA, Offset(160f, 336f)) }) { drawArt(Art.get("cat_tail")) }
+                      // badan + log + palet
+                      withTransform({ scale(1f + tx * .015f, breathe * squashY, Offset(160f, 344f)) }) {
+                          drawArt(Art.get("cat_body"))
+                          val pb = Art.palBlob
+                          if (pb != null) {
+                              clipRect(0f, 0f, 150f, 408f) { drawPath(pb, Color(c1)) }
+                              clipRect(150f, 0f, 200f, 408f) { drawPath(pb, Color(c2)) }
+                          }
+                          // kepala + kuas di mulut
+                          withTransform({ rotate(headA, Offset(150f, 152f)); translate(tx * 2f, ty * 1.5f + (if (on) .8f * sin(clk * 18.85f) else 0f)) }) {
+                              drawArt(Art.get("cat_head"))
+                              val bt = Art.brushTip
+                              if (bt != null) drawPath(bt, if (inv) NRed else Color(c1), .95f)
+                              if (lid > .02f) {
+                                  var o = 0
+                                  while (o < 10) {
+                                      val cx = Art.eyes[o]; val cy = Art.eyes[o + 1]; val rx = Art.eyes[o + 2]; val ry = Art.eyes[o + 3]; val an = Art.eyes[o + 4]
+                                      if (rx > 0f) {
+                                          withTransform({ rotate(an, Offset(cx, cy)) }) {
+                                              val oval = Path()
+                                              oval.addOval(Rect(cx - rx, cy - ry, cx + rx, cy + ry))
+                                              clipPath(oval) { drawRect(NInk, Offset(cx - rx - 2f, cy - ry - 2f), Size(rx * 2f + 4f, (ry * 2f + 4f) * lid)) }
+                                          }
+                                      }
+                                      o += 5
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          /** kepala kucing kecil (tombol buka HUD kalau UI disembunyikan) */
+          @Composable
+          fun MiniCat(kdv: Float, f: () -> Unit) {
+              val src = remember { MutableInteractionSource() }
+              Canvas(Modifier.size((200f * kdv * .55f).dp, (165f * kdv * .55f).dp).clickable(interactionSource = src, indication = null, onClick = f)) {
+                  artAt(Art.get("cat_head"), 0f, 0f, size.width / 200f)
+              }
+          }
+
+          // ───────────────────────── bubble ucapan + popup 3 tombol ─────────────────────────
+          @Composable
+          fun NekoBubble(text: String, kdv: Float, modifier: Modifier = Modifier) {
+              val a = Art.get("bubble") ?: return
+              val s = sqrt(text.length / 9f).coerceIn(1f, 2.3f)
+              val w = a.w * kdv * s * .95f; val h = a.h * kdv * s * .95f
+              Box(modifier.size(w.dp, h.dp)) {
+                  Canvas(Modifier.fillMaxSize()) { artAt(a, 0f, 0f, size.width / a.w) }
+                  Box(
+                      Modifier.fillMaxSize().padding(start = (w * .11f).dp, end = (w * .11f).dp, top = (h * .1f).dp, bottom = (h * .28f).dp),
+                      contentAlignment = Alignment.Center
+                  ) {
+                      Text(text, color = NInk, fontFamily = NekoFont, fontSize = 13.sp, lineHeight = 15.sp, textAlign = TextAlign.Center, maxLines = 7)
+                  }
+              }
+          }
+
+          @Composable
+          fun NekoPopup(items: List<String>, kdv: Float, modifier: Modifier = Modifier, onPick: (Int) -> Unit) {
+              val a = Art.get("popup") ?: return
+              val s = kdv * .95f
+              Box(modifier.size((a.w * s).dp, (a.h * s).dp)) {
+                  Canvas(Modifier.fillMaxSize()) { artAt(a, 0f, 0f, size.width / a.w) }
+                  val ys = listOf(26f, 128f, 226f)
+                  for (i in 0 until minOf(3, items.size)) {
+                      val src = remember { MutableInteractionSource() }
+                      Box(
+                          Modifier.offset(x = (24f * s).dp, y = (ys[i] * s).dp).size(((a.w - 48f) * s).dp, (62f * s).dp)
+                              .clickable(interactionSource = src, indication = null) { onPick(i) },
+                          contentAlignment = Alignment.Center
+                      ) { OutlineText(items[i], 20f) }
+                  }
+              }
+          }
+
+          // ───────────────────────── panel brush gaya buku ─────────────────────────
+          @Composable
+          private fun BookToggle(label: String, on: Boolean, f: () -> Unit) {
+              val src = remember { MutableInteractionSource() }
+              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                  NekoText(label, 15f)
+                  Box(
+                      Modifier.size(d(34f)).clip(RoundedCornerShape(d(9f))).border(d(2.2f), NInk, RoundedCornerShape(d(9f)))
+                          .clickable(interactionSource = src, indication = null, onClick = f),
+                      contentAlignment = Alignment.Center
+                  ) {
+                      Canvas(Modifier.size(d(18f))) {
+                          if (on) drawCircle(NInk, size.minDimension / 2f)
+                          else drawCircle(NInk, size.minDimension / 2f, style = Stroke(3f))
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun BookPanel(e: Engine) {
+              val rv = U.rev
+              var full by remember { mutableStateOf(false) }
+              val paper = Color(0xFFF4F4F4)
+              val shape = RoundedCornerShape(d(12f))
+              val page = Modifier.clip(shape).background(paper).border(d(2.6f), NInk, shape).padding(d(10f))
+              val p = e.pen
+              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(d(6f))) {
+                  Column(page.weight(1f), verticalArrangement = Arrangement.spacedBy(d(6f))) {
+                      NekoText("Brush Types :", 19f)
+                      PRESETS.forEach { (n, vals) ->
+                          val src = remember { MutableInteractionSource() }
+                          Column(Modifier.fillMaxWidth().clickable(interactionSource = src, indication = null) { p.load(vals); U.bump() }) {
+                              NekoText(n.lowercase(), 16f, mod = Modifier.padding(start = d(14f)))
+                              Box(Modifier.fillMaxWidth().height(d(2f)).background(NInk.copy(alpha = .75f)))
+                          }
+                      }
+                  }
+                  Column(page.weight(1f), verticalArrangement = Arrangement.spacedBy(d(8f))) {
+                      NekoText("Kustomisasi", 18f)
+                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                          NekoText("Ketebalan", 15f)
+                          Box(Modifier.clip(RoundedCornerShape(d(9f))).border(d(2.2f), NInk, RoundedCornerShape(d(9f))).padding(horizontal = d(9f), vertical = d(2f))) {
+                              NekoText(p.size.toInt().toString(), 16f)
+                          }
+                      }
+                      CS((ln(p.size.coerceIn(1f, 1000f)) / ln(1000f)).coerceIn(0f, 1f), Modifier.fillMaxWidth()) { x -> p.size = 1000f.pow(x); U.bump() }
+                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                          NekoText("Tip", 15f)
+                          val src = remember { MutableInteractionSource() }
+                          Box(
+                              Modifier.size(d(40f)).clip(RoundedCornerShape(d(11f))).border(d(2.2f), NInk, RoundedCornerShape(d(11f)))
+                                  .clickable(interactionSource = src, indication = null) { p.round = if (p.round > .9f) .35f else 1f; U.bump() },
+                              contentAlignment = Alignment.Center
+                          ) {
+                              Canvas(Modifier.size(d(26f))) {
+                                  val w = size.width; val h = w * p.round.coerceIn(.25f, 1f)
+                                  drawOval(NInk, Offset(0f, (w - h) / 2f), Size(w, h), style = Stroke(3f))
+                                  drawCircle(NInk, w * .12f, Offset(w / 2f, w / 2f))
+                              }
+                          }
+                      }
+                      BookToggle("dinamis", p.pSize > .01f) { p.pSize = if (p.pSize > .01f) 0f else .7f; U.bump() }
+                      BookToggle("Variasi", p.sizeJit > .01f) { p.sizeJit = if (p.sizeJit > .01f) 0f else .3f; U.bump() }
+                      BookToggle("lengkap", full) { full = !full }
+                  }
+              }
+              if (full) {
+                  Column(Modifier.fillMaxWidth().padding(top = d(6f)).glass().padding(d(10f)), verticalArrangement = Arrangement.spacedBy(d(8f))) { BrushPanel(e) }
+              }
+          }
+          EOF_SRC
           cat > app/src/main/kotlin/dev/canvas/MainActivity.kt <<'EOF_SRC'
           package dev.canvas
 
@@ -204,6 +847,7 @@ jobs:
                       hide(WindowInsetsCompat.Type.systemBars())
                       systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                   }
+                  Art.load(this)
                   T.load(getSharedPreferences("t", 0))
                   U.loadHist(getSharedPreferences("t", 0))
                   GV.load(getSharedPreferences("t", 0))
@@ -2003,7 +2647,7 @@ jobs:
           fun d(x: Float): Dp = (x * T.sc).dp
           fun rs(m: Float = 1f) = RoundedCornerShape(d((8f + 18f * T.rad) * m))
           val FONTS = listOf(
-              FontFamily(Typeface.create("sans-serif-rounded", Typeface.BOLD)), FontFamily.Monospace, FontFamily.Serif, FontFamily.Cursive,
+              NekoFont, FontFamily.Monospace, FontFamily.Serif, FontFamily.Cursive,
               FontFamily(Typeface.create("casual", Typeface.BOLD)), FontFamily(Typeface.create("sans-serif-condensed", Typeface.BOLD)),
               FontFamily(Typeface.create("sans-serif-black", Typeface.NORMAL)), FontFamily(Typeface.create("sans-serif-thin", Typeface.NORMAL)),
               FontFamily(Typeface.create("serif", Typeface.BOLD_ITALIC)), FontFamily(Typeface.create("monospace", Typeface.BOLD)),
@@ -2791,6 +3435,8 @@ jobs:
               var backT by remember { mutableLongStateOf(0L) }
               var conf by remember { mutableIntStateOf(0) }
               var held by remember { mutableStateOf(false) }
+              var dragTxt by remember { mutableStateOf("") }
+              var catMenu by remember { mutableStateOf(false) }
               var dragO by remember { mutableStateOf(Offset.Zero) }
               var thumbs by remember { mutableStateOf<List<ImageBitmap>>(emptyList()) }
               val job = remember { arrayOfNulls<Job>(1) }
@@ -2837,7 +3483,8 @@ jobs:
               }
               LaunchedEffect(panel) { if (panel == 7) v.gl { e.fxOpen(); e.fxThumbs(72) } else v.gl { e.fxClose() } }
               BackHandler {
-                  if (blendFor >= 0) blendFor = -1
+                  if (catMenu) catMenu = false
+                  else if (blendFor >= 0) blendFor = -1
                   else if (panel != 0) panel = 0
                   else if (!hud) hud = true
                   else {
@@ -2887,10 +3534,10 @@ jobs:
                   Box(Modifier.fillMaxSize().pointerInput(panel) { awaitPointerEventScope { awaitFirstDown(requireUnconsumed = false); panel = 0 } })
               }
                   AnimatedVisibility(
-                      visible = !hud, modifier = Modifier.align(Alignment.BottomStart),
+                      visible = !hud, modifier = Modifier.align(Alignment.BottomEnd),
                       enter = scaleIn(spring(.5f, 400f)) + fadeIn(), exit = scaleOut() + fadeOut()
                   ) {
-                      Box(Modifier.navigationBarsPadding().padding(d(10f))) { Mascot(5, 52f) { hud = true; feel(1, "hi!") } }
+                      Box(Modifier.navigationBarsPadding()) { MiniCat(kd()) { hud = true; feel(1, "hi!") } }
                   }
                   AnimatedVisibility(
                       visible = hud, modifier = Modifier.fillMaxSize(),
@@ -2898,17 +3545,7 @@ jobs:
                       exit = fadeOut() + slideOutVertically { if (top) -it / 3 else it / 3 }
                   ) {
                     Box(Modifier.fillMaxSize()) {
-                      Row(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(d(10f)), horizontalArrangement = Arrangement.spacedBy(d(8f))) {
-                          IB(Ik.UN, en = e.canUndo, anim = false, hold = { v.gl { e.undo() } }, rep = true) { v.gl { e.undo() }; feel(4, "oops!") }
-                          IB(Ik.RE, en = e.canRedo, anim = false, hold = { v.gl { e.redo() } }, rep = true) { v.gl { e.redo() }; feel(1, "again!") }
-                      }
-                      Column(
-                          Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(d(10f)),
-                          horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(d(4f))
-                      ) {
-                          Compass(e, v) { feel(1, "reset view") }
-                          ViewChip(e)
-                      }
+                      Box(Modifier.align(Alignment.TopCenter)) { NekoTop(e, v, { feel(4, "oops!") }, { feel(1, "again!") }) { feel(1, "reset view") } }
                       val panelUi: @Composable () -> Unit = {
                           AnimatedVisibility(
                               visible = panel != 0,
@@ -2916,14 +3553,14 @@ jobs:
                               exit = fadeOut() + scaleOut(targetScale = .9f, transformOrigin = TransformOrigin(ox, oy)) + shrinkVertically()
                           ) {
                               Column(
-                                  Modifier.fillMaxWidth().padding(vertical = d(6f)).heightIn(max = d(360f)).glass(key = if (panel != 0) panel else last)
+                                  Modifier.fillMaxWidth().padding(vertical = d(6f)).heightIn(max = d(360f)).then(if (shown == 2) Modifier else Modifier.glass(key = if (panel != 0) panel else last))
                                       .animateContentSize().verticalScroll(rememberScrollState()).padding(d(10f)),
                                   verticalArrangement = Arrangement.spacedBy(d(8f))
                               ) {
                                   SlidePane(shown, prevShown) {
                                   when (shown) {
                                       1 -> ToolsPanel(tool) { t -> tool = t; e.tool = t; e.inv = false; U.bump(); feel(1, SAY[t.ordinal]); panel = 0 }
-                                      2 -> BrushPanel(e)
+                                      2 -> BookPanel(e)
                                       3 -> ColorPanel(e) { a, b -> feel(a, b) }
                                       4 -> LayerPanel(e, v, { a, b -> feel(a, b) }) { i -> blendFor = i }
                                       5 -> MenuPanel(
@@ -2993,43 +3630,58 @@ jobs:
                               ) { dockItems() }
                           }
                       }
-                      if (held) {
-                          Box(Modifier.align(Alignment.CenterStart).fillMaxHeight(.45f).width(d(20f)).clip(RoundedCornerShape(50)).background(T.ac.copy(alpha = .4f)))
-                          Box(Modifier.align(Alignment.CenterEnd).fillMaxHeight(.45f).width(d(20f)).clip(RoundedCornerShape(50)).background(T.ac.copy(alpha = .4f)))
+                      val kdv = kd()
+                      val barH = (390f * kdv).dp
+                      Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().graphicsLayer { alpha = dockA }) {
+                          Box(Modifier.fillMaxWidth().padding(horizontal = d(8f))) { panelUi() }
+                          NekoBar(
+                              e.pen,
+                              listOf(
+                                  Charm("c_yin", 112f, panel == 6) { panel = if (panel == 6) 0 else 6 },
+                                  Charm("c_butter", 208f, panel == 1, badge = TN.getOrElse(tool.ordinal) { "" }) { panel = if (panel == 1) 0 else 1 },
+                                  Charm("c_brush", 360f, panel == 2) { panel = if (panel == 2) 0 else 2 },
+                                  Charm("c_fx", 507f, panel == 7) { panel = if (panel == 7) 0 else 7 },
+                                  Charm("c_lay", 610f, panel == 4, badge = "" + e.info.size) { panel = if (panel == 4) 0 else 4 },
+                                  Charm("c_col", 690f, panel == 3, tint = e.pen.color) { panel = if (panel == 3) 0 else 3; U.from(if (U.tgt == 0) e.pen.color else e.pen.color2) }
+                              ),
+                              panel == 5, { panel = if (panel == 5) 0 else 5 },
+                              onAdjust = { if (e.restylePending.compareAndSet(false, true)) v.gl { e.restylePending.set(false); e.restyleLast() } }
+                          )
                       }
-                      if (side) {
-                          Box(
-                              Modifier.align(if (left) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = d(6f))
-                                  .graphicsLayer { translationX = dragO.x; translationY = dragO.y; alpha = dockA }.then(hold)
-                          ) {
-                              Column(
-                                  Modifier.glass(RoundedCornerShape(50), key = tool.ordinal * 10 + panel).padding(d(6f)),
-                                  verticalArrangement = Arrangement.spacedBy(d(6f)), horizontalAlignment = Alignment.CenterHorizontally
-                              ) { dockItems() }
-                          }
-                      }
-                      Column(
-                          Modifier.align(BiasAlignment(0f, day)).fillMaxWidth()
-                              .then(if (top) Modifier.statusBarsPadding().padding(top = d(54f)) else Modifier.navigationBarsPadding())
-                              .padding(start = if (side && left) d(70f) else d(8f), end = if (side && !left) d(70f) else d(8f), top = d(8f), bottom = d(8f))
-                              .graphicsLayer { alpha = dockA }
-                      ) {
-                          if (top) { dockRow(); barUi(); panelUi(); sayUi() } else { sayUi(); panelUi(); barUi(); if (!side) dockRow() }
-                      }
-                      // rotary slime orb (right-middle): drag up/down = size, left/right = opacity. Hidden while any other tab is open.
+                      // kucing = rotator: drag atas/bawah = size, kiri/kanan = opacity, tap = hapus/gambar, tahan = menu, tap 2x = color space
                       AnimatedVisibility(
                           visible = panel == 0,
-                          modifier = Modifier.align(Alignment.CenterEnd).padding(end = if (side && !left) d(70f) else d(6f)).graphicsLayer { alpha = dockA },
-                          enter = scaleIn(spring(.5f, 380f), transformOrigin = TransformOrigin(1f, .5f)) + fadeIn(),
-                          exit = scaleOut(transformOrigin = TransformOrigin(1f, .5f)) + fadeOut()
+                          modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = barH).graphicsLayer { alpha = dockA },
+                          enter = scaleIn(spring(.5f, 380f), transformOrigin = TransformOrigin(1f, 1f)) + fadeIn(),
+                          exit = scaleOut(transformOrigin = TransformOrigin(1f, 1f)) + fadeOut()
                       ) {
-                          RotOrb(
-                              e,
+                          NekoCat(
+                              e, kdv,
                               onAdjust = { if (e.restylePending.compareAndSet(false, true)) v.gl { e.restylePending.set(false); e.restyleLast() } },
-                              onHold = { fromOrb = true; panel = 6 },
+                              onInfo = { dragTxt = it },
+                              onHold = { catMenu = true },
                               onTap = { if (tool == Tool.BRUSH || tool == Tool.SMUDGE || tool == Tool.BLUR || tool == Tool.LASSO || tool == Tool.LIQUIFY) { e.inv = !e.inv; U.bump(); feel(1, if (e.inv) (if (tool == Tool.LIQUIFY) "restore mode" else "erase mode") else "draw mode") } },
                               onDouble = { fromOrb = true; U.from(if (U.tgt == 0) e.pen.color else e.pen.color2); panel = 3 }
                           )
+                      }
+                      val bubTxt = if (dragTxt.isNotEmpty()) dragTxt else say
+                      AnimatedVisibility(
+                          visible = dragTxt.isNotEmpty() || sayOn,
+                          modifier = Modifier.align(Alignment.BottomEnd).padding(end = (215f * kdv).dp, bottom = barH + (382f * kdv).dp),
+                          enter = scaleIn(spring(.5f, 500f), transformOrigin = TransformOrigin(1f, 1f)) + fadeIn(),
+                          exit = fadeOut() + scaleOut(transformOrigin = TransformOrigin(1f, 1f))
+                      ) { NekoBubble(bubTxt, kdv) }
+                      if (catMenu && panel == 0) {
+                          Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitPointerEventScope { awaitFirstDown(requireUnconsumed = false); catMenu = false } })
+                          NekoPopup(
+                              listOf("Style", "Warna", if (e.inv) "Gambar" else "Hapus"), kdv,
+                              Modifier.align(Alignment.BottomEnd).padding(end = (190f * kdv).dp, bottom = barH + (10f * kdv).dp)
+                          ) { i ->
+                              catMenu = false
+                              if (i == 0) { fromOrb = true; panel = 6 }
+                              else if (i == 1) { fromOrb = true; U.from(if (U.tgt == 0) e.pen.color else e.pen.color2); panel = 3 }
+                              else { e.inv = !e.inv; U.bump(); feel(1, if (e.inv) "erase mode" else "draw mode") }
+                          }
                       }
                     }
                   }
@@ -5620,22 +6272,16 @@ jobs:
                       if (r0 != null) { mood = 3; say = "you're a " + TIERS[r0.tier].name.lowercase() + "!"; delay(2600); mood = 0 }
                   }
               }
-              SparkBox(Modifier.fillMaxSize().background(Color.Black)) {
+              SparkBox(Modifier.fillMaxSize().background(Color(0xFF6E6E6E))) {
                   Floaters(Modifier.fillMaxSize())
                   if (st.running) key(st.key) {
                       AndroidView({ BenchView(ctx, st) { r -> st.res = r; st.running = false; saveBench(ctx, r) } }, Modifier.size(2.dp))
                   }
                   Column(
-                      Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = d(12f), vertical = d(8f)),
+                      Modifier.fillMaxSize().statusBarsPadding().padding(start = d(12f), end = d(12f), top = d(8f), bottom = (390f * kd()).dp),
                       verticalArrangement = Arrangement.spacedBy(d(8f))
                   ) {
                       Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(d(10f))) {
-                          Box(Modifier.pop(0).graphicsLayer { translationY = sin(fl.value * 6.2832f) * 4f * density }) {
-                              Mascot(mood, 92f, if (res != null) intArrayOf(1, 2, 3, 4, 5)[res.tier] else 0) {
-                                  say = SAYS[(System.currentTimeMillis() % SAYS.size).toInt()]; mood = 1
-                                  scope.launch { delay(1300); mood = if (st.running) 2 else 0 }
-                              }
-                          }
                           Column(Modifier.pop(1), verticalArrangement = Arrangement.spacedBy(d(4f))) {
                               ArtTitle()
                               Tx(say, T.dk, Modifier.clip(RoundedCornerShape(50)).background(T.ac).padding(horizontal = d(10f), vertical = d(3f)), 9f)
@@ -5662,16 +6308,23 @@ jobs:
                               }
                           }
                       }
-                      Row(
-                          Modifier.fillMaxWidth().pop(3).glass(RoundedCornerShape(50)).padding(horizontal = d(14f), vertical = d(8f)),
-                          horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
-                      ) {
-                          ToolBtn(Ik.TH, "STYLE", sheet == 2) { sheet = if (sheet == 2) 0 else 2 }
-                          ToolBtn(Ik.PL, "NEW", sheet == 1) { sheet = if (sheet == 1) 0 else 1 }
-                          ToolBtn(Ik.DC, "IDEA", false) { ideaTxt = idea(); ideaKey++; mood = 1; scope.launch { delay(2800); mood = if (st.running) 2 else 0 } }
-                          ToolBtn(Ik.CP, "DEVICE", sheet == 3) { sheet = if (sheet == 3) 0 else 3 }
-                      }
                   }
+                  val kdh = kd()
+                  NekoCat(
+                      null, kdh, 175f, false,
+                      onTap = { say = SAYS[(System.currentTimeMillis() % SAYS.size).toInt()]; mood = 1; scope.launch { delay(1300); mood = if (st.running) 2 else 0 } },
+                      modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = d(4f))
+                  )
+                  NekoBar(
+                      null,
+                      listOf(
+                          Charm("c_yin", 112f, sheet == 2) { sheet = if (sheet == 2) 0 else 2 },
+                          Charm("c_butter", 208f, sheet == 1) { sheet = if (sheet == 1) 0 else 1 },
+                          Charm("c_brush", 360f, false) { ideaTxt = idea(); ideaKey++; mood = 1; scope.launch { delay(2800); mood = if (st.running) 2 else 0 } }
+                      ),
+                      sheet == 3, { sheet = if (sheet == 3) 0 else 3 },
+                      modifier = Modifier.align(Alignment.BottomCenter)
+                  )
                   IdeaOverlay(ideaTxt, ideaKey) { ideaTxt = "" }
               }
           }
@@ -5692,10 +6345,7 @@ jobs:
           $T/zipalign -fp 4 app/build/outputs/apk/release/*.apk a.apk
           $T/apksigner sign --ks $K --ks-key-alias $A --ks-pass env:P --key-pass env:P --out dist/$N-$V.apk a.apk
           echo "V=$V" >>$GITHUB_ENV
-      - uses: actions/upload-artifact@v4
-        with: {name: "Canvas-apk", path: dist/*.apk}
       - if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
-        continue-on-error: true
         env: {GH_TOKEN: "${{github.token}}"}
         run: |
           R=nightly F=-p; [ $GITHUB_REF_TYPE = tag ] && R=$GITHUB_REF_NAME F=
