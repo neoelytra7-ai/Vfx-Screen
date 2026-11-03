@@ -24,6 +24,7 @@ jobs:
         with: { gradle-version: 8.7 }
       - name: Write sources
         run: |
+          rm -rf app build .gradle settings.gradle.kts build.gradle.kts gradle.properties
           mkdir -p .
           cat > settings.gradle.kts <<'EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
