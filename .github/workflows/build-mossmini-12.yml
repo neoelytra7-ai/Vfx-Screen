@@ -6,8 +6,10 @@
 #     (from the HF API, no 5 GB downloads), and probes each file's header. A pack that cannot be resolved
 #     is skipped with a reason in the run summary; it never breaks the build.
 #     Add your own models with a `catalog_extra.json` in the repo root (same shape as the packs in catalog.py).
-#   * PROOF STAYS HONEST: one image pack (input smoke_pack, default moss_q2k) is run end-to-end in CI. The
-#     others get "files + hashes + headers verified" only, and the app labels them that way.
+#   * FAST BY DEFAULT: no model is downloaded or run in CI. Packs get "files + hashes + headers verified"
+#     and the app labels them that way. Tick run_smoke_test to also run ONE image pack (smoke_pack) end to end.
+#     Compiled engines are cached per commit: an app-only change skips both native compiles.
+#     (Bump the -v1 cache salt in the two 'Reuse the compiled engine' steps when you change compiler flags.)
 #   * CHAT ENGINE (llama.cpp, OpenCL/Adreno) is built and checked as OPTIONAL jobs (continue-on-error):
 #     if they fail, the APK still ships with the image side exactly as before.
 #   * Background downloads run in a foreground service; model manager screen; strict root RAM mode.
@@ -15,7 +17,7 @@
 # GPU note: Adreno OpenCL kernels are optimized for Q4_0 / Q8_0 / MXFP4. K-quants and IQ-quants run, but
 # mostly on the CPU. That is why the new packs use Q4_0.
 #
-# Manual run options: smoke_pack, sd_cpp_ref, llama_cpp_ref, build_llama, skip_smoke_test.
+# Manual run options: run_smoke_test, smoke_pack, sd_cpp_ref, llama_cpp_ref, build_llama.
 
 name: Build MossMini APK
 
@@ -567,10 +569,19 @@ jobs:
     env:
       SD_COMMIT: ${{ needs.prep.outputs.sd_commit }}
     steps:
+      - name: Reuse the compiled engine if this exact commit was already built
+        id: bin
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: sdcli-arm64-${{ needs.prep.outputs.sd_commit }}-v1
+
       - name: Install build tools
+        if: steps.bin.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y ninja-build cmake git
 
       - name: "Fetch stable-diffusion.cpp at the pinned commit and check it"
+        if: steps.bin.outputs.cache-hit != 'true'
         run: |
           git clone --recursive https://github.com/leejet/stable-diffusion.cpp sdcpp
           cd sdcpp
@@ -584,6 +595,7 @@ jobs:
           echo "sd.cpp @ $SD_COMMIT knows MOSS-Image and every flag the app uses."
 
       - name: "Build OpenCL headers + ICD stub (link-time only)"
+        if: steps.bin.outputs.cache-hit != 'true'
         run: |
           NDK="$ANDROID_NDK_LATEST_HOME"
           TC="$NDK/build/cmake/android.toolchain.cmake"
@@ -599,6 +611,7 @@ jobs:
           cmake --build ol --target install
 
       - name: "Compile sd-cli"
+        if: steps.bin.outputs.cache-hit != 'true'
         run: |
           NDK="$ANDROID_NDK_LATEST_HOME"
           cmake -S sdcpp -B sdcpp/build -G Ninja \
@@ -635,10 +648,19 @@ jobs:
     env:
       LLAMA_COMMIT: ${{ needs.prep.outputs.llama_commit }}
     steps:
+      - name: Reuse the compiled engine if this exact commit was already built
+        id: bin
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: llamaserver-arm64-${{ needs.prep.outputs.llama_commit }}-v1
+
       - name: Install tools
+        if: steps.bin.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y ninja-build cmake git python3 unzip
 
       - name: Fetch llama.cpp at the pinned commit
+        if: steps.bin.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/ggml-org/llama.cpp llamacpp
           cd llamacpp
@@ -646,6 +668,7 @@ jobs:
           git rev-parse HEAD
 
       - name: OpenCL headers + ICD loader (same as sd-cli)
+        if: steps.bin.outputs.cache-hit != 'true'
         run: |
           NDK="$ANDROID_NDK_LATEST_HOME"; test -d "$NDK"
           git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers
@@ -661,6 +684,7 @@ jobs:
           ls -l "$HOME/ocl/lib"
 
       - name: Compile llama-server
+        if: steps.bin.outputs.cache-hit != 'true'
         run: |
           NDK="$ANDROID_NDK_LATEST_HOME"
           cmake -S llamacpp -B llamacpp/build -G Ninja \
@@ -683,155 +707,34 @@ jobs:
           file out/libllamaserver.so | grep -q 'ARM aarch64' || { echo "::error::not an arm64 binary"; exit 1; }
           readelf -d out/libllamaserver.so | grep -E 'NEEDED' || true
 
+      - name: Record which flags this llama.cpp commit supports (read from source; the engine is not run in CI)
+        if: steps.bin.outputs.cache-hit != 'true'
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          text = ""
+          for d in ("common", "tools/server"):
+              for p in (pathlib.Path("llamacpp") / d).rglob("*"):
+                  if p.suffix in (".cpp", ".h"):
+                      text += p.read_text(errors="ignore")
+          req = ["--model", "--host", "--port", "--ctx-size", "--n-gpu-layers", "--threads"]
+          opt = ["--jinja", "--no-webui", "--chat-template-kwargs", "--parallel", "--mmproj"]
+          missing = [f for f in req if '"%s"' % f not in text]
+          out = {"available": not missing,
+                 "info": ("chat engine built; flags read from llama.cpp source (engine not run in CI)" if not missing
+                          else "llama.cpp is missing required flags: " + " ".join(missing)),
+                 "proven_flags": [f for f in opt if '"%s"' % f in text]}
+          json.dump(out, open("out/llama_flags.json", "w"))
+          print(out)
+          PY
+
       - uses: actions/upload-artifact@v4
         with:
           name: llamaserver
-          path: out/libllamaserver.so
-          retention-days: 7
-
-  llama-check:
-    name: Check llama-server flags + chat (x86) [optional]
-    needs: [prep, catalog]
-    if: ${{ always() && inputs.build_llama != 'no' && needs.prep.result == 'success' && needs.catalog.result == 'success' }}
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      LLAMA_COMMIT: ${{ needs.prep.outputs.llama_commit }}
-      LLAMA_SMOKE_PACK: chat_qwen3_0_6b_q8_0
-    steps:
-      - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake git python3
-
-      - uses: actions/download-artifact@v4
-        with: { name: catalog, path: . }
-
-      - name: Build x86 llama-server at the same commit
-        run: |
-          git clone https://github.com/ggml-org/llama.cpp llamacpp
-          cd llamacpp
-          git checkout "$LLAMA_COMMIT"
-          cd ..
-          cmake -S llamacpp -B llamacpp/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
-          cmake --build llamacpp/build --target llama-server
-          BIN=$(find llamacpp/build -type f -name llama-server | head -1)
-          test -n "$BIN"
-          cp "$BIN" ./llama-server-x86
-
-      - name: Write checker
-        run: |
-          cat > llama_check.py <<'EOF'
-          #!/usr/bin/env python3
-          # Checks the x86 build of llama-server: required flags, optional flags, and (if a tiny chat model is
-          # in the catalog) a real streamed chat completion. Never fails the job: it records what it proved.
-          import hashlib, json, os, subprocess, sys, time, urllib.request
-
-          BIN = "./llama-server-x86"
-          REQ = ["--model", "--host", "--port", "--ctx-size", "--n-gpu-layers", "--threads"]
-          OPT = ["--jinja", "--no-webui", "--chat-template-kwargs", "--parallel", "--mmproj"]
-          out = {"commit": os.environ.get("LLAMA_COMMIT", ""), "available": False, "info": "", "proven_flags": []}
-
-          def finish():
-              json.dump(out, open("llama_check.json", "w"), indent=1)
-              print(json.dumps(out, indent=1))
-              s = os.environ.get("GITHUB_STEP_SUMMARY")
-              if s:
-                  open(s, "a").write("### llama-server check\n\n- %s\n- flags: %s\n" % (out["info"], " ".join(out["proven_flags"]) or "none"))
-              sys.exit(0)
-
-          try:
-              h = subprocess.run([BIN, "--help"], capture_output=True, text=True, timeout=60)
-              text = h.stdout + h.stderr
-          except Exception as e:
-              out["info"] = "llama-server --help failed: %s" % e
-              finish()
-          missing = [f for f in REQ if f not in text]
-          if missing:
-              out["info"] = "llama-server is missing required flags: " + " ".join(missing)
-              finish()
-          out["proven_flags"] = [f for f in OPT if f in text]
-          out["available"] = True
-          out["info"] = "flags verified (x86 build)"
-
-          pid = os.environ.get("LLAMA_SMOKE_PACK", "chat_qwen3_0_6b_q8_0")
-          pack = None
-          try:
-              cat = json.load(open("catalog.json"))
-              pack = next((p for p in cat["packs"] if p["id"] == pid), None)
-          except Exception:
-              pass
-          if pack is None:
-              out["info"] += "; no end-to-end run (test model not in catalog)"
-              finish()
-
-          proc = None
-          try:
-              f = pack["files"][0]
-              os.makedirs("lm", exist_ok=True)
-              path = "lm/" + f["name"]
-              req = urllib.request.Request(f["url"], headers={"User-Agent": "mossmini-ci/2"})
-              h256 = hashlib.sha256()
-              with urllib.request.urlopen(req, timeout=300) as r, open(path, "wb") as o:
-                  while True:
-                      b = r.read(1 << 20)
-                      if not b:
-                          break
-                      o.write(b)
-                      h256.update(b)
-              if h256.hexdigest() != f["sha256"]:
-                  raise RuntimeError("SHA-256 mismatch on the test model")
-              cmd = [BIN, "-m", path, "--host", "127.0.0.1", "--port", "8099", "-c", "512", "-ngl", "0", "-t", "2"]
-              for fl in ("--jinja", "--no-webui"):
-                  if fl in out["proven_flags"]:
-                      cmd.append(fl)
-              proc = subprocess.Popen(cmd, stdout=open("llama.log", "w"), stderr=subprocess.STDOUT)
-              t0 = time.time()
-              ok = False
-              while time.time() - t0 < 180:
-                  if proc.poll() is not None:
-                      raise RuntimeError("server exited with code %s" % proc.returncode)
-                  try:
-                      if urllib.request.urlopen("http://127.0.0.1:8099/health", timeout=2).status == 200:
-                          ok = True
-                          break
-                  except Exception:
-                      time.sleep(1)
-              if not ok:
-                  raise RuntimeError("server never became healthy")
-              body = json.dumps({"messages": [{"role": "user", "content": "Say hi"}], "stream": True, "max_tokens": 12}).encode()
-              rq = urllib.request.Request("http://127.0.0.1:8099/v1/chat/completions", data=body,
-                                          headers={"Content-Type": "application/json"})
-              chunks = 0
-              with urllib.request.urlopen(rq, timeout=120) as r:
-                  for line in r:
-                      line = line.decode("utf-8", "ignore").strip()
-                      if line.startswith("data:") and "[DONE]" not in line:
-                          json.loads(line[5:])
-                          chunks += 1
-              if chunks < 1:
-                  raise RuntimeError("no streamed chunks")
-              out["info"] = "flags verified + streamed chat completion OK on x86 CPU (%d chunks, model %s)" % (chunks, pid)
-          except Exception as e:
-              out["info"] += "; end-to-end run FAILED: %s" % e
-          finally:
-              if proc is not None and proc.poll() is None:
-                  proc.kill()
-          finish()
-          EOF
-
-      - name: Check flags and run a real chat completion
-        run: python3 llama_check.py
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: llama-check
           path: |
-            llama_check.json
-            llama.log
-          if-no-files-found: ignore
-          retention-days: 14
+            out/libllamaserver.so
+            out/llama_flags.json
+          retention-days: 7
 
   smoke:
     name: Verify model files + end-to-end test (x86)
@@ -841,7 +744,7 @@ jobs:
     env:
       SD_COMMIT: ${{ needs.prep.outputs.sd_commit }}
       SMOKE_PACK: ${{ inputs.smoke_pack || 'moss_q2k' }}
-      SKIP_SMOKE: ${{ inputs.skip_smoke_test && 'true' || 'false' }}
+      SKIP_SMOKE: ${{ inputs.run_smoke_test && 'false' || 'true' }}
     steps:
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build cmake git time jq
@@ -880,7 +783,17 @@ jobs:
 
       - name: "Check that the engine has every flag the app uses"
         run: |
-          if [ "$SKIP_SMOKE" = "true" ]; then : > proven.txt; : > proven_args.txt; exit 0; fi
+          if [ "$SKIP_SMOKE" = "true" ]; then
+            # fast build: prove the optional flags from the engine SOURCE at the pinned commit (nothing is run)
+            git init -q sdsrc && cd sdsrc
+            git fetch -q --depth 1 https://github.com/leejet/stable-diffusion.cpp "$SD_COMMIT" && git checkout -q FETCH_HEAD
+            cd ..
+            PF=""
+            for f in --vae-tiling --threads --seed; do grep -rqF -- "$f" sdsrc/examples && PF="$PF $f"; done
+            echo "$PF" > proven.txt; : > proven_args.txt
+            echo "optional flags found in source:$PF"
+            exit 0
+          fi
           ./sdcli-x86 --help > help.txt 2>&1 || true
           wc -l help.txt
           for f in $REQ_FLAGS; do
@@ -900,7 +813,7 @@ jobs:
 
       - name: "END-TO-END TEST: real 512x512 image with the app's exact flags (CPU mode)"
         run: |
-          if [ "$SKIP_SMOKE" = "true" ]; then echo 0 > peak_mb.txt; echo "SKIPPED (no end-to-end proof for this build)" > smoke_info.txt; exit 0; fi
+          if [ "$SKIP_SMOKE" = "true" ]; then echo 0 > peak_mb.txt; echo "SKIPPED (fast build: nothing was run in CI; flags checked in source only)" > smoke_info.txt; exit 0; fi
           set -o pipefail
           ARGS=()
           while IFS=$'\t' read -r flag name; do ARGS+=("$flag" "m/$name"); done < <(jq -r '.files[]|[.flag,.name]|@tsv' pack.json)
@@ -1025,7 +938,7 @@ jobs:
 
   apk:
     name: Scaffold, build, sign, release
-    needs: [prep, native, smoke, catalog, native-llama, llama-check]
+    needs: [prep, native, smoke, catalog, native-llama]
     if: ${{ always() && needs.native.result == 'success' && needs.smoke.result == 'success' && needs.catalog.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -1058,10 +971,6 @@ jobs:
         uses: actions/download-artifact@v4
         with: { name: llamaserver, path: llamabin }
 
-      - name: Download llama check result (optional)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with: { name: llama-check, path: llamacheck }
 
       - name: Restore signing key
         id: keycache
@@ -1146,8 +1055,8 @@ jobs:
           cat = json.load(open("catalog/catalog.json"))
           sm = json.load(open("smoke/smoke_result.json"))
           ll = {}
-          if os.path.exists("llamacheck/llama_check.json"):
-              ll = json.load(open("llamacheck/llama_check.json"))
+          if os.path.exists("llamabin/llama_flags.json"):
+              ll = json.load(open("llamabin/llama_flags.json"))
           have_bin = os.path.exists("llamabin/libllamaserver.so")
           llama_ok = bool(have_bin and ll.get("available"))
           skipped = sm["info"].startswith("SKIPPED")
