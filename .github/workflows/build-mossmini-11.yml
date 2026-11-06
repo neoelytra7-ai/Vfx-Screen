@@ -361,12 +361,11 @@ jobs:
               big = max([f["size"] for f in files if f["role"] in ("diffusion", "llm", "model")] or [0])
               total = sum(f["size"] for f in files)
               if kind == "image":
-                  p["ram_mb"] = int(big * 1.15 / MIB) + 1800
-                  te_flags = "vae=cpu" if spec.get("te_gpu") else "te=cpu,vae=cpu"
+                  # same streaming layout as MOSS: text encoder + VAE on the CPU, weights streamed from disk
+                  p["ram_mb"] = int(big * 0.75 / MIB) + 1500
                   p["profiles"] = [
-                      {"name": "GPU mode (OpenCL for the diffusion model" +
-                               (" and the text encoder)" if spec.get("te_gpu") else ", CPU text encoder)"),
-                       "kind": "gpu", "flags": ["--backend", te_flags] + COMMON},
+                      {"name": "GPU mode (OpenCL for the diffusion model, CPU text encoder, weights streamed from disk)",
+                       "kind": "gpu", "flags": ["--backend", "te=cpu,vae=cpu"] + COMMON},
                       {"name": "CPU mode (the exact mode tested in CI)", "kind": "cpu",
                        "flags": ["--backend", "cpu"] + COMMON},
                   ]
@@ -409,8 +408,8 @@ jobs:
               },
               {
                   "id": "zimage_turbo_q4_0", "kind": "image", "title": "Z-Image-Turbo - Q4_0 (8 steps)",
-                  "desc": "Alibaba Tongyi 6B turbo model. Q4_0 diffusion model + Qwen3-4B text encoder, both in the quant the Adreno OpenCL backend is optimized for. CFG 1, 8 steps.",
-                  "quant": "Q4_0", "gpu": "good", "license": "Apache-2.0", "steps": 8, "cfg": 1.0, "te_gpu": True,
+                  "desc": "Alibaba Tongyi 6B turbo model. Q4_0 diffusion model on the GPU, Qwen3-4B text encoder on the CPU, weights streamed from disk like MOSS. CFG 1, 8 steps.",
+                  "quant": "Q4_0", "gpu": "good", "license": "Apache-2.0", "steps": 8, "cfg": 1.0,
                   "files": [
                       {"id": "zimg_dit", "role": "diffusion", "flag": "--diffusion-model",
                        "cands": [{"repo": "leejet/Z-Image-Turbo-GGUF", "path": "z_image_turbo-Q4_0.gguf"},
@@ -427,7 +426,7 @@ jobs:
               {
                   "id": "flux2_klein_q4_0", "kind": "image", "title": "FLUX.2 klein 4B - Q4_0 (4 steps)",
                   "desc": "Black Forest Labs 4B distilled model (Apache-2.0). Smallest of the new models and shares the FLUX.2 VAE with MOSS. CFG 1, 4 steps.",
-                  "quant": "Q4_0", "gpu": "good", "license": "Apache-2.0", "steps": 4, "cfg": 1.0, "te_gpu": True,
+                  "quant": "Q4_0", "gpu": "good", "license": "Apache-2.0", "steps": 4, "cfg": 1.0,
                   "files": [
                       {"id": "klein_dit", "role": "diffusion", "flag": "--diffusion-model",
                        "cands": [{"repo": "leejet/FLUX.2-klein-4B-GGUF", "match": ["klein", "4b", "q4_0"], "exclude": ["base"], "ext": ".gguf"},
@@ -1788,6 +1787,8 @@ jobs:
               @Volatile private var rootBoost = false
               @Volatile private var rootMode = 0
               @Volatile private var useCache = false
+              @Volatile private var memCapGb = 0
+              private lateinit var segMem: Seg
               private lateinit var manifest: CatManifest
               private lateinit var pack: Pack
               private lateinit var cbCache: CheckBox
@@ -2520,7 +2521,7 @@ jobs:
                   if (Run.imageBusy) { logW("An earlier image run is still shutting down. Wait a moment."); return }
                   val text = prompt.text.toString().trim()
                   if (text.isEmpty()) { logW("Write a prompt first."); return }
-                  val size = listOf(256, 384, 512, 768)[segSize.selected]
+                  val size = listOf(256, 384, 512, 768, 1024)[segSize.selected]
                   val st = (steps.text.toString().toIntOrNull() ?: 20).coerceIn(1, 60)
                   val c = (cfg.text.toString().toDoubleOrNull() ?: 3.0).coerceIn(0.0, 20.0)
                   val sd = seed.text.toString().trim().toLongOrNull() ?: (System.currentTimeMillis() % 1000000000L)
@@ -2529,6 +2530,16 @@ jobs:
                       .putString("steps_" + variant, st.toString()).putString("cfg_" + variant, c.toString())
                       .putString("threads", th.toString()).putString("prompt", text).putInt("perf_j", segPerf.selected).apply()
                   useCache = cbCache.isChecked && cbCache.isEnabled
+                  prefs.edit().putInt("mem_i", segMem.selected).apply()
+                  val availNow = availMemMb()
+                  memCapGb = when (segMem.selected) {
+                      1 -> 0
+                      2 -> 3
+                      3 -> 2
+                      4 -> 1
+                      else -> if (availNow < 0 || availNow >= 7000) 0 else if (availNow >= 5000) 3 else if (availNow >= 3500) 2 else 1
+                  }
+                  if (size >= 768) log("Size $size: the VAE is tiled; the memory cap and Flash attention (optional) keep the big compute buffers in check. Expect it to be slow.")
                   val req = Req(text, size, st, c, sd, th, segMode.selected, cbFa.isChecked && cbFa.isEnabled, segPerf.selected)
                   thread { runGenerate(req) }
               }
@@ -2815,6 +2826,10 @@ jobs:
                   if ((r.fa || tier == 2) && p.kind == "gpu") {
                       if (helpText.contains("--flash-attn")) { cmd.add("--flash-attn"); cmd.add("auto,diffusion=on") }
                       else if (helpText.contains("--diffusion-fa")) cmd.add("--diffusion-fa")
+                  }
+                  if (memCapGb > 0 && p.kind == "gpu" && helpText.contains("--max-vram")) {
+                      cmd.add("--max-vram"); cmd.add(memCapGb.toString())
+                      log("Memory cap: --max-vram " + memCapGb + " (weights are staged in segments from disk; slower, much lower RAM)")
                   }
                   if (useCache && r.steps >= 10) {
                       cmd.add("--cache-mode"); cmd.add("easycache")
@@ -3430,7 +3445,7 @@ jobs:
                   exScroll.addView(exRow)
                   cCreate.put(exScroll, 10)
 
-                  segSize = Seg(this, listOf("256", "384", "512", "768"))
+                  segSize = Seg(this, listOf("256", "384", "512", "768", "1024"))
                   segSize.select(prefs.getInt("size_i", 1), false)
                   segMode = Seg(this, listOf("Auto", "GPU", "CPU"))
                   segMode.select(prefs.getInt("mode_i", 0), false)
@@ -3450,6 +3465,10 @@ jobs:
                       if (!busy) thread { preflight() }
                   }
                   cCreate.put(labeled(this, "Performance", segPerf.view), 12)
+                  segMem = Seg(this, listOf("Auto", "Off", "3 GB", "2 GB", "1 GB"))
+                  segMem.select(prefs.getInt("mem_i", 0), false)
+                  cCreate.put(labeled(this, "Memory cap (big models / big sizes)", segMem.view), 12)
+                  cCreate.put(tv(this, "Caps how much model data the GPU keeps resident; the rest streams from disk in segments. Auto picks a cap from your free RAM. Lower = fits more, runs slower. Needs an engine with --max-vram; GPU mode only.", 11f, Pal.dim), 6)
                   cCreate.put(perfNote, 6)
                   updatePerfNote()
 
