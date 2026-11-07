@@ -1,0 +1,2071 @@
+name: Build Foxle Hub APK
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: foxle-hub
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate project (heredoc)
+        run: |
+          set -e
+          D=hub
+          mkdir -p $D/app/src/main/java/app/foxl $D/app/src/main/assets $D/app/src/main/res/drawable $D/app/src/main/res/xml
+
+          cat > $D/settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'FoxleHub'
+          include ':app'
+          EOF
+
+          cat > $D/build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > $D/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          android.nonTransitiveRClass=true
+          android.useAndroidX=true
+          android.enableR8.fullMode=true
+          EOF
+
+          cat > $D/app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'app.foxl'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'app.foxl.hub'
+              minSdk 24
+              targetSdk 34
+              versionCode 5
+              versionName '2.3'
+            }
+            signingConfigs {
+              r {
+                storeFile file(System.getenv('KS') ?: 'ks.jks')
+                storePassword 'foxlhub'
+                keyAlias 'k'
+                keyPassword 'foxlhub'
+              }
+            }
+            buildTypes {
+              release {
+                minifyEnabled true
+                shrinkResources true
+                signingConfig signingConfigs.r
+                proguardFiles 'p.pro'
+              }
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+            lint { checkReleaseBuilds false; abortOnError false }
+          }
+          dependencies { implementation 'androidx.core:core:1.13.1' }
+          EOF
+
+          cat > $D/app/p.pro <<'EOF'
+          -keep class app.foxl.** { *; }
+          -keepattributes *Annotation*
+          -dontwarn **
+          EOF
+
+          cat > $D/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+            <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+            <uses-permission android:name="android.permission.CAMERA"/>
+            <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+            <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+            <uses-permission android:name="android.permission.VIBRATE"/>
+            <uses-feature android:name="android.hardware.camera" android:required="false"/>
+            <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+            <application
+              android:label="Foxle Hub"
+              android:icon="@drawable/ic"
+              android:theme="@android:style/Theme.Material.NoActionBar"
+              android:usesCleartextTraffic="true"
+              android:requestLegacyExternalStorage="true"
+              android:allowBackup="false"
+              android:largeHeap="true"
+              android:hardwareAccelerated="true">
+              <provider
+                android:name="androidx.core.content.FileProvider"
+                android:authorities="${applicationId}.fp"
+                android:exported="false"
+                android:grantUriPermissions="true">
+                <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/fp"/>
+              </provider>
+              <activity android:name=".MainActivity" android:exported="true"
+                android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode"
+                android:windowSoftInputMode="adjustResize">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts"/>
+              </activity>
+          <activity android:name=".OpenActivity" android:exported="true" android:theme="@android:style/Theme.Translucent.NoTitleBar" android:excludeFromRecents="true" android:taskAffinity="" android:noHistory="true">
+            <intent-filter>
+              <action android:name="android.intent.action.VIEW"/>
+              <category android:name="android.intent.category.DEFAULT"/>
+              <category android:name="android.intent.category.BROWSABLE"/>
+              <data android:scheme="content"/><data android:scheme="file"/>
+              <data android:mimeType="text/html"/><data android:mimeType="application/xhtml+xml"/><data android:mimeType="application/zip"/>
+            </intent-filter>
+            <intent-filter>
+              <action android:name="android.intent.action.VIEW"/>
+              <category android:name="android.intent.category.DEFAULT"/>
+              <category android:name="android.intent.category.BROWSABLE"/>
+              <data android:scheme="content"/><data android:scheme="file"/><data android:host="*"/><data android:mimeType="*/*"/>
+              <data android:pathPattern=".*\\.html"/><data android:pathPattern=".*\\.htm"/><data android:pathPattern=".*\\.zip"/>
+              <data android:pathPattern=".*\\..*\\.html"/><data android:pathPattern=".*\\..*\\.htm"/>
+            </intent-filter>
+            <intent-filter>
+              <action android:name="android.intent.action.SEND"/>
+              <category android:name="android.intent.category.DEFAULT"/>
+              <data android:mimeType="text/html"/><data android:mimeType="application/xhtml+xml"/><data android:mimeType="application/zip"/><data android:mimeType="text/plain"/>
+            </intent-filter>
+            <intent-filter>
+              <action android:name="android.intent.action.SEND_MULTIPLE"/>
+              <category android:name="android.intent.category.DEFAULT"/>
+              <data android:mimeType="text/html"/><data android:mimeType="application/zip"/>
+            </intent-filter>
+          </activity>
+              <activity android:name=".P" android:exported="false"
+                android:documentLaunchMode="always"
+                android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode"
+                android:windowSoftInputMode="adjustResize"/>
+            </application>
+          </manifest>
+          EOF
+
+          cat > $D/app/src/main/java/app/foxl/P.java <<'EOF'
+          package app.foxl;
+
+          public class P extends MainActivity {}
+          EOF
+
+          cat > $D/app/src/main/java/app/foxl/MainActivity.java <<'EOF'
+          package app.foxl;
+
+          import android.app.Activity;
+          import android.app.ActivityManager;
+          import android.app.AlertDialog;
+          import android.app.DownloadManager;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.ActivityInfo;
+          import android.content.pm.PackageManager;
+          import android.content.res.Configuration;
+          import android.database.Cursor;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.graphics.drawable.ColorDrawable;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.os.StatFs;
+          import android.provider.MediaStore;
+          import android.provider.OpenableColumns;
+          import android.provider.Settings;
+          import android.util.Base64;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.webkit.*;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.Toast;
+          import android.graphics.Canvas;
+import android.graphics.drawable.Drawable;
+import androidx.core.content.FileProvider;
+import androidx.core.content.pm.ShortcutInfoCompat;
+import androidx.core.content.pm.ShortcutManagerCompat;
+import androidx.core.graphics.drawable.IconCompat;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.*;
+          import java.util.*;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+          import java.util.zip.*;
+
+          public class MainActivity extends Activity {
+            WebView w;
+            FrameLayout fl;
+            File root, ext;
+            String pid, poly = "";
+            JSONObject cj = new JSONObject(); // cfg projek yang sedang berjalan (.cfg)
+            ValueCallback<Uri[]> fc;
+            View cv;
+            WebChromeClient.CustomViewCallback cvb;
+            WebChromeClient wc;
+            PermissionRequest pr;
+            String[] prr;
+            final Map<Integer, Out> outs = new HashMap<>();
+            int oid = 0;
+            boolean fsOn;
+            int res = 100;
+            String ori = "auto", menu = "";
+
+            // Password buat auto-unlock HTML terenkripsi (lihat vaultJs()).
+            // Dipecah jadi potongan acak & di-XOR biar nggak muncul sebagai satu string utuh
+            // "********" pas APK di-decompile/di-strings. Tetap cuma obfuscation, bukan proteksi
+            // kriptografis beneran — orang yang niat telusurin reconstruct() ya tetap nemu.
+            static final int FX_K = 0x5A;
+            static final int[] fx_z9 = {'*' ^ FX_K, '*' ^ FX_K};
+            static final int[] fx_q7 = {'*' ^ FX_K, '*' ^ FX_K, '*' ^ FX_K};
+            static final int[] fx_m2 = {'*' ^ FX_K, '*' ^ FX_K, '*' ^ FX_K};
+            static final int[][] FX_ORDER = { fx_z9, fx_q7, fx_m2 };
+
+            static String fxBuild() {
+              StringBuilder sb = new StringBuilder();
+              for (int[] chunk : FX_ORDER) for (int c : chunk) sb.append((char) (c ^ FX_K));
+              return sb.toString();
+            }
+
+            static final String VAULT_PW = fxBuild();
+
+            // baca opsi per-projek; default dipakai kalau belum pernah diatur (dan di launcher)
+            boolean cb(String k, boolean d) { return cj.optBoolean(k, d); }
+
+            void setKa(boolean on) {
+              if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+              else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+
+            // dilayani di https://p<id>.foxl/__fxreset?m=... supaya JS bisa menghapus storage origin projek itu
+            static final String RESET_HTML =
+              "<!doctype html><meta charset=utf-8><script>" +
+              "(async function(){" +
+              "var q=new URLSearchParams(location.search).get('m')||'';" +
+              "function T(p){return Promise.race([Promise.resolve(p),new Promise(function(r){setTimeout(r,3000)})])}" +
+              "try{" +
+              "if(q.indexOf('l')>=0){try{localStorage.clear()}catch(e){}try{sessionStorage.clear()}catch(e){}}" +
+              "if(q.indexOf('i')>=0&&indexedDB.databases){var d=(await T(indexedDB.databases()))||[];" +
+              "for(var x of d)await T(new Promise(function(r){var z=indexedDB.deleteDatabase(x.name);z.onsuccess=z.onerror=z.onblocked=r}))}" +
+              "if(q.indexOf('c')>=0&&self.caches){var k=(await T(caches.keys()))||[];for(var n of k)await T(caches.delete(n))}" +
+              "if(q.indexOf('s')>=0&&navigator.serviceWorker){var g=(await T(navigator.serviceWorker.getRegistrations()))||[];for(var w of g)await T(w.unregister())}" +
+              "}catch(e){}" +
+              "try{R.d()}catch(e){}" +
+              "})();</script>";
+
+            static String jsq(String s) {
+              StringBuilder o = new StringBuilder("\"");
+              for (char c : s.toCharArray()) {
+                if (c == '\\' || c == '"') o.append('\\').append(c);
+                else if (c == '\n') o.append("\\n");
+                else o.append(c);
+              }
+              return o.append('"').toString();
+            }
+
+            // JS auto-unlock buat HTML terenkripsi: cari input password + tombol, isi password, lalu submit.
+            // Cuma jalan kalau halaman keliatan seperti vault (meta fx-vault ATAU ada skrip dekripsi),
+            // polling max ~9 detik buat form yang baru muncul setelah load, dan submit sekali saja (anti-loop kalau salah).
+            String vaultJs() {
+              return
+              "(function(){try{" +
+              "if(window.__fxv)return;window.__fxv=1;" +
+              "var PW=" + jsq(VAULT_PW) + ",n=0,done=0;" +
+              "function pwi(){var a=document.querySelectorAll('input[type=password]');for(var i=0;i<a.length;i++)if(a[i].getClientRects().length)return a[i];return null}" +
+              "function isV(){" +
+              "if(document.querySelector('meta[name=fx-vault]'))return 1;" +
+              "var s=document.scripts,t='';" +
+              "for(var i=0;i<s.length;i++)t+=(s[i].textContent||'').slice(0,300000);" +
+              "return /crypto[.]subtle|AES-GCM|AES-CBC|PBKDF2|decrypt/i.test(t)}" +
+              "function setv(i,v){" +
+              "var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');" +
+              "d.set.call(i,v);" +
+              "i.dispatchEvent(new Event('input',{bubbles:true}));" +
+              "i.dispatchEvent(new Event('change',{bubbles:true}))}" +
+              "function btn(i){" +
+              "var b=document.getElementById('b');if(b&&b!==i)return b;" +
+              "var f=i.form,c=f&&f.querySelector('button,input[type=submit]');if(c)return c;" +
+              "var a=document.querySelectorAll('button,input[type=button],input[type=submit]');" +
+              "for(var k=0;k<a.length;k++)if(a[k].getClientRects().length)return a[k];" +
+              "return null}" +
+              "function go(){" +
+              "var i=pwi();if(!i||!isV())return 0;" +
+              "setv(i,PW);" +
+              "var b=btn(i);" +
+              "if(b)b.click();" +
+              "else{['keydown','keypress','keyup'].forEach(function(t){i.dispatchEvent(new KeyboardEvent(t,{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}))});" +
+              "if(i.form&&i.form.requestSubmit)i.form.requestSubmit()}" +
+              "return 1}" +
+              "var t=setInterval(function(){" +
+              "if(done||++n>60){clearInterval(t);return}" +
+              "if(go()){done=1;clearInterval(t)}" +
+              "},150);" +
+              "}catch(e){}})();";
+            }
+
+            static class Out { OutputStream o; String n; }
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              root = new File(getFilesDir(), "projects");
+              root.mkdirs();
+              ext = Environment.getExternalStorageDirectory();
+              pid = getIntent().getStringExtra("p");
+              if (pid != null) { try { cj = new JSONObject(readCfg(pid)); } catch (Exception e) {} }
+              if (cb("ka", false)) setKa(true);
+              if (pid == null) pushShare();
+              getWindow().setBackgroundDrawable(new ColorDrawable(Color.BLACK));
+              getWindow().setStatusBarColor(Color.BLACK);
+              getWindow().setNavigationBarColor(Color.BLACK);
+              try { poly = read(getAssets().open("poly.js")); } catch (Exception e) {}
+              try { menu = read(getAssets().open("menu.js")); } catch (Exception e) {}
+              WebView.setWebContentsDebuggingEnabled(true);
+              w = new WebView(this);
+              w.setBackgroundColor(Color.BLACK);
+              fl = new FrameLayout(this);
+              fl.setBackgroundColor(Color.BLACK);
+              fl.addView(w, new FrameLayout.LayoutParams(-1, -1));
+              setContentView(fl);
+              WebSettings s = w.getSettings();
+              s.setJavaScriptEnabled(true);
+              s.setDomStorageEnabled(true);
+              s.setDatabaseEnabled(true);
+              s.setMediaPlaybackRequiresUserGesture(false);
+              s.setAllowFileAccess(false);
+              s.setAllowContentAccess(false);
+              s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+              s.setTextZoom(100);
+              s.setSupportZoom(false);
+              s.setBuiltInZoomControls(false);
+              w.addJavascriptInterface(new Host(), "Host");
+              w.setDownloadListener((url, ua, cd, mt, len) -> {
+                try {
+                  if (url.startsWith("blob:") || url.startsWith("data:")) return;
+                  String fn = URLUtil.guessFileName(url, cd, mt);
+                  DownloadManager.Request q = new DownloadManager.Request(Uri.parse(url));
+                  if (mt != null && !mt.isEmpty()) q.setMimeType(mt);
+                  if (ua != null) q.addRequestHeader("User-Agent", ua);
+                  q.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                  q.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fn);
+                  ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).enqueue(q);
+                  tt("Mengunduh " + fn);
+                } catch (Exception e) {
+                  try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); } catch (Exception x) {}
+                }
+              });
+              w.setWebViewClient(new WebViewClient() {
+                @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                  WebResourceResponse x = serve(r);
+                  if (x != null || cb("net", true)) return x;
+                  String sc = r.getUrl().getScheme();
+                  if ("http".equals(sc) || "https".equals(sc))
+                    return new WebResourceResponse("text/plain", "utf-8", 403, "Blocked", new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
+                  return null;
+                }
+                @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                  Uri u = r.getUrl();
+                  String h = u.getHost(), sc = u.getScheme();
+                  if (h != null && h.endsWith(".foxl")) return false;
+                  if ("blob".equals(sc) || "data".equals(sc) || "about".equals(sc) || "javascript".equals(sc)) return false;
+                  if (!cb("ex", true)) { tt("Tautan luar diblokir"); return true; }
+                  try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception e) {}
+                  return true;
+                }
+                @Override public void onPageStarted(WebView v, String u, Bitmap f) {
+                  v.evaluateJavascript(poly, null);
+                }
+                @Override public void onPageFinished(WebView v, String u) {
+                  v.evaluateJavascript(poly, null);
+                  if (cb("av", true)) v.evaluateJavascript(vaultJs(), null);
+                }
+                @Override public boolean onRenderProcessGone(WebView v, RenderProcessGoneDetail d) {
+                  runOnUiThread(() -> recreate());
+                  return true;
+                }
+              });
+              wc = new WebChromeClient() {
+                @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                  if (fc != null) fc.onReceiveValue(null);
+                  fc = cb;
+                  try { startActivityForResult(p.createIntent(), 8); } catch (Exception e) { fc = null; return false; }
+                  return true;
+                }
+                @Override public void onPermissionRequest(PermissionRequest r) {
+                  runOnUiThread(() -> {
+                    List<String> al = new ArrayList<>(), need = new ArrayList<>();
+                    for (String x : r.getResources()) {
+                      if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(x)) {
+                        if (!cb("cam", true)) continue;
+                        if (checkSelfPermission("android.permission.CAMERA") != PackageManager.PERMISSION_GRANTED) need.add("android.permission.CAMERA");
+                      }
+                      if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(x)) {
+                        if (!cb("mic", true)) continue;
+                        if (checkSelfPermission("android.permission.RECORD_AUDIO") != PackageManager.PERMISSION_GRANTED) need.add("android.permission.RECORD_AUDIO");
+                      }
+                      al.add(x);
+                    }
+                    if (al.isEmpty()) { r.deny(); return; }
+                    String[] ok = al.toArray(new String[0]);
+                    if (need.isEmpty()) r.grant(ok);
+                    else { pr = r; prr = ok; requestPermissions(need.toArray(new String[0]), 2); }
+                  });
+                }
+                @Override public void onShowCustomView(View v, WebChromeClient.CustomViewCallback cb) {
+                  if (cv != null) { cb.onCustomViewHidden(); return; }
+                  cv = v;
+                  cvb = cb;
+                  fl.addView(v, new FrameLayout.LayoutParams(-1, -1));
+                  w.setVisibility(View.GONE);
+                  immersive(true);
+                }
+                @Override public void onHideCustomView() {
+                  if (cv == null) return;
+                  fl.removeView(cv);
+                  cv = null;
+                  w.setVisibility(View.VISIBLE);
+                  immersive(fsOn);
+                  if (cvb != null) cvb.onCustomViewHidden();
+                  cvb = null;
+                }
+                @Override public Bitmap getDefaultVideoPoster() {
+                  return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+                }
+                @Override public boolean onJsAlert(WebView v, String u, String m, JsResult r) {
+                  if (isFinishing()) { r.cancel(); return true; }
+                  new AlertDialog.Builder(MainActivity.this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setMessage(m)
+                    .setPositiveButton(android.R.string.ok, (d, i) -> r.confirm())
+                    .setOnCancelListener(d -> r.cancel())
+                    .show();
+                  return true;
+                }
+                @Override public boolean onJsConfirm(WebView v, String u, String m, JsResult r) {
+                  if (isFinishing()) { r.cancel(); return true; }
+                  new AlertDialog.Builder(MainActivity.this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setMessage(m)
+                    .setPositiveButton(android.R.string.ok, (d, i) -> r.confirm())
+                    .setNegativeButton(android.R.string.cancel, (d, i) -> r.cancel())
+                    .setOnCancelListener(d -> r.cancel())
+                    .show();
+                  return true;
+                }
+                @Override public boolean onJsPrompt(WebView v, String u, String m, String def, JsPromptResult r) {
+                  if (isFinishing()) { r.cancel(); return true; }
+                  final EditText et = new EditText(MainActivity.this);
+                  et.setText(def);
+                  new AlertDialog.Builder(MainActivity.this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setMessage(m)
+                    .setView(et)
+                    .setPositiveButton(android.R.string.ok, (d, i) -> r.confirm(et.getText().toString()))
+                    .setNegativeButton(android.R.string.cancel, (d, i) -> r.cancel())
+                    .setOnCancelListener(d -> r.cancel())
+                    .show();
+                  return true;
+                }
+              };
+              w.setWebChromeClient(wc);
+              if (pid != null) {
+                try { setTaskDescription(new ActivityManager.TaskDescription(nm(new File(root, pid)))); } catch (Exception e) {}
+              }
+              if (pid != null) {
+                Intent it0 = getIntent();
+                setOri(it0.getStringExtra("or"));
+                if (it0.getBooleanExtra("fs", false)) setFs(true);
+                int rs0 = it0.getIntExtra("res", 100);
+                if (rs0 != 100) setRes(rs0);
+              }
+              w.loadUrl(pid == null ? "https://app.foxl/" : "https://p" + pid + ".foxl/");
+            }
+
+          // Direct Share: Hub muncul di baris atas share sheet (Android yang menentukan urutan akhirnya)
+          void pushShare() {
+            try {
+              Drawable d = getDrawable(R.drawable.ic);
+              Bitmap bm = Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888);
+              d.setBounds(0, 0, 192, 192);
+              d.draw(new Canvas(bm));
+              Set<String> cat = new HashSet<>();
+              cat.add("app.foxl.share.HTML");
+              ShortcutInfoCompat sc = new ShortcutInfoCompat.Builder(this, "foxl_share")
+                .setShortLabel("Foxle Hub").setLongLived(true).setCategories(cat)
+                .setIcon(IconCompat.createWithBitmap(bm))
+                .setIntent(new Intent(this, MainActivity.class).setAction(Intent.ACTION_MAIN)).build();
+              ShortcutManagerCompat.pushDynamicShortcut(this, sc);
+            } catch (Throwable e) {}
+          }
+
+            void immersive(boolean on) {
+              getWindow().getDecorView().setSystemUiVisibility(on
+                ? (View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                  | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+                : 0);
+            }
+
+            void tt(String m) {
+              runOnUiThread(() -> Toast.makeText(this, m, Toast.LENGTH_SHORT).show());
+            }
+
+            // ---------- opsi tampilan per projek ----------
+            void setFs(boolean on) {
+              fsOn = on;
+              immersive(on);
+              if (Build.VERSION.SDK_INT >= 28) {
+                WindowManager.LayoutParams a = getWindow().getAttributes();
+                a.layoutInDisplayCutoutMode = on ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
+                getWindow().setAttributes(a);
+              }
+            }
+
+            void setOri(String o) {
+              if (o == null) o = "auto";
+              ori = o;
+              int v = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+              if ("land".equals(o)) v = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+              else if ("port".equals(o)) v = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+              setRequestedOrientation(v);
+            }
+
+            // resolusi render: WebView TETAP full-size (viewport CSS / window.innerWidth-Height
+            // dan skala UI HTML ga pernah berubah). Yang diturunkan cuma devicePixelRatio yang
+            // dibaca JS lewat poly.js, jadi canvas/game yang render berdasar devicePixelRatio
+            // bakal gambar di resolusi lebih rendah, sementara DOM & layout sekitar tetap sama.
+            void setRes(int p) {
+              res = Math.max(25, Math.min(100, p));
+              if (w != null) w.evaluateJavascript("window.__fxSetRes&&window.__fxSetRes(" + res + ")", null);
+            }
+
+            @Override public void onConfigurationChanged(Configuration c) {
+              super.onConfigurationChanged(c);
+              if (res != 100) setRes(res);
+            }
+
+            @Override public void onWindowFocusChanged(boolean f) {
+              super.onWindowFocusChanged(f);
+              if (f && fsOn && cv == null) immersive(true);
+            }
+
+            String readCfg(String id) {
+              try { return read(new FileInputStream(new File(new File(root, id), ".cfg"))); } catch (Exception e) { return "{}"; }
+            }
+
+            void savePref(String k, Object v) {
+              if (pid == null) return;
+              try {
+                JSONObject c = new JSONObject(readCfg(pid));
+                c.put(k, v);
+                wf(new File(new File(root, pid), ".cfg"), c.toString());
+                cj = c;
+              } catch (Exception e) {}
+            }
+
+            static long[] stat(File f, boolean top) {
+              long[] r = {0, 0};
+              File[] a = f.listFiles();
+              if (a != null) for (File c : a) {
+                if (top && c.getName().startsWith(".")) continue;
+                if (c.isDirectory()) { long[] s = stat(c, false); r[0] += s[0]; r[1] += s[1]; }
+                else { r[0] += c.length(); r[1]++; }
+              }
+              return r;
+            }
+
+            String ttl(File d) {
+              try (FileInputStream in = new FileInputStream(new File(d, "index.html"))) {
+                byte[] b = new byte[16384];
+                int n = in.read(b);
+                if (n <= 0) return "";
+                Matcher m = Pattern.compile("<title[^>]*>([^<]*)</title>", Pattern.CASE_INSENSITIVE).matcher(new String(b, 0, n, "UTF-8"));
+                return m.find() ? m.group(1).trim() : "";
+              } catch (Exception e) { return ""; }
+            }
+
+            // Tombol back: kirim event 'foxlback' ke halaman (preventDefault() = sudah ditangani, mis. naik folder)
+            @Override public void onBackPressed() {
+              if (cv != null) { wc.onHideCustomView(); return; }
+              if (w == null) { super.onBackPressed(); return; }
+              w.evaluateJavascript("(function(){try{var e=new CustomEvent('foxlback',{cancelable:true});dispatchEvent(e);return e.defaultPrevented}catch(x){return false}})()", v -> {
+                if ("true".equals(v)) return;
+                if (w != null && w.canGoBack()) w.goBack(); else super.onBackPressed();
+              });
+            }
+
+            @Override protected void onDestroy() {
+              for (Out x : outs.values()) try { x.o.close(); } catch (Exception e) {}
+              outs.clear();
+              if (w != null) { fl.removeView(w); w.destroy(); w = null; }
+              super.onDestroy();
+            }
+
+            @Override public void onRequestPermissionsResult(int rq, String[] ps, int[] gr) {
+              if (rq == 2 && pr != null) {
+                boolean ok = gr.length > 0;
+                for (int g : gr) if (g != PackageManager.PERMISSION_GRANTED) ok = false;
+                if (ok) pr.grant(prr != null ? prr : pr.getResources()); else pr.deny();
+                pr = null;
+              }
+            }
+
+            @Override protected void onActivityResult(int rq, int rs, Intent d) {
+              if (rq == 8) {
+                if (fc != null) {
+                  fc.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs, d));
+                  fc = null;
+                }
+                return;
+              }
+              if (rq == 7 && rs == RESULT_OK && d != null) {
+                final List<Uri> L = new ArrayList<>();
+                ClipData c = d.getClipData();
+                if (c != null) for (int i = 0; i < c.getItemCount(); i++) L.add(c.getItemAt(i).getUri());
+                else if (d.getData() != null) L.add(d.getData());
+                new Thread(() -> {
+                  for (Uri u : L) try { imp(u); } catch (Exception e) {}
+                  runOnUiThread(() -> { if (w != null) w.evaluateJavascript("refresh()", null); });
+                }).start();
+              }
+            }
+
+            // ---------- helpers ----------
+            static String read(InputStream in) throws IOException {
+              ByteArrayOutputStream o = new ByteArrayOutputStream();
+              byte[] b = new byte[8192];
+              int n;
+              while ((n = in.read(b)) > 0) o.write(b, 0, n);
+              in.close();
+              return o.toString("UTF-8");
+            }
+            static void cp(InputStream in, File f, boolean close) throws IOException {
+              FileOutputStream o = new FileOutputStream(f);
+              byte[] b = new byte[16384];
+              int n;
+              while ((n = in.read(b)) > 0) o.write(b, 0, n);
+              o.close();
+              if (close) in.close();
+            }
+            static void wf(File f, String s) throws IOException {
+              try (FileOutputStream o = new FileOutputStream(f)) { o.write(s.getBytes("UTF-8")); }
+            }
+            static boolean del(File f) {
+              File[] a = f.listFiles();
+              if (a != null) for (File c : a) del(c);
+              return f.delete();
+            }
+            String nm(File d) {
+              try { return read(new FileInputStream(new File(d, ".name"))).trim(); } catch (Exception e) { return d.getName(); }
+            }
+            File safe(String p) throws IOException {
+              if (!cb("st", true)) throw new SecurityException("storage off");
+              File f = new File(p).getCanonicalFile();
+              String r = ext.getCanonicalPath(), q = f.getPath();
+              if (!q.equals(r) && !q.startsWith(r + "/")) throw new SecurityException(p);
+              return f;
+            }
+
+            static void unzip(InputStream in, File d) throws IOException {
+              ZipInputStream z = new ZipInputStream(in);
+              String base = d.getCanonicalPath() + File.separator;
+              ZipEntry e;
+              while ((e = z.getNextEntry()) != null) {
+                String en = e.getName().replace('\\', '/');
+                if (en.startsWith("__MACOSX/")) continue;
+                File f = new File(d, en);
+                if (!f.getCanonicalPath().startsWith(base)) continue;
+                if (e.isDirectory()) f.mkdirs();
+                else { f.getParentFile().mkdirs(); cp(z, f, false); }
+              }
+              z.close();
+            }
+
+            static void fix(File d) {
+              if (new File(d, "index.html").exists()) return;
+              File[] a = d.listFiles();
+              if (a == null) return;
+              if (a.length == 1 && a[0].isDirectory()) {
+                File[] b = a[0].listFiles();
+                if (b != null) for (File f : b) f.renameTo(new File(d, f.getName()));
+                a[0].delete();
+              }
+              if (!new File(d, "index.html").exists()) {
+                a = d.listFiles();
+                if (a != null) for (File f : a) if (f.getName().toLowerCase().endsWith(".html")) { f.renameTo(new File(d, "index.html")); break; }
+              }
+            }
+
+            void imp(Uri u) throws Exception {
+              String n = "app";
+              try (Cursor c = getContentResolver().query(u, null, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                  int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                  if (i >= 0) n = c.getString(i);
+                }
+              }
+              String lo = n.toLowerCase(), base = n.replaceAll("\\.[^.]*$", "");
+              String id = base.toLowerCase().replaceAll("[^a-z0-9]+", "-").replaceAll("^-|-$", "");
+              if (id.isEmpty()) id = "app";
+              boolean zip = lo.endsWith(".zip");
+              if (!zip && !lo.endsWith(".html") && !lo.endsWith(".htm")) { tt("Hanya .html / .zip yang bisa diimpor"); return; }
+              File d = new File(root, id);
+              if (d.exists()) del(d);
+              d.mkdirs();
+              InputStream in = getContentResolver().openInputStream(u);
+              if (zip) { unzip(in, d); in.close(); fix(d); }
+              else cp(in, new File(d, "index.html"), true);
+              wf(new File(d, ".name"), base);
+            }
+
+            static final Map<String, String> M = new HashMap<>();
+            static {
+              String[] a = {
+                "html:text/html", "htm:text/html", "xhtml:application/xhtml+xml",
+                "js:text/javascript", "mjs:text/javascript", "cjs:text/javascript", "css:text/css",
+                "json:application/json", "map:application/json", "webmanifest:application/manifest+json",
+                "svg:image/svg+xml", "png:image/png", "jpg:image/jpeg", "jpeg:image/jpeg", "jpe:image/jpeg", "jfif:image/jpeg",
+                "gif:image/gif", "webp:image/webp", "avif:image/avif", "bmp:image/bmp", "ico:image/x-icon",
+                "tif:image/tiff", "tiff:image/tiff", "heic:image/heic", "heif:image/heif",
+                "woff:font/woff", "woff2:font/woff2", "ttf:font/ttf", "otf:font/otf", "eot:application/vnd.ms-fontobject",
+                "mp3:audio/mpeg", "ogg:audio/ogg", "oga:audio/ogg", "opus:audio/opus", "wav:audio/wav", "flac:audio/flac",
+                "aac:audio/aac", "m4a:audio/mp4", "weba:audio/webm", "mid:audio/midi", "midi:audio/midi", "amr:audio/amr",
+                "mp4:video/mp4", "m4v:video/mp4", "webm:video/webm", "mkv:video/x-matroska", "mov:video/quicktime",
+                "avi:video/x-msvideo", "3gp:video/3gpp", "ogv:video/ogg", "ts:video/mp2t", "mpg:video/mpeg", "mpeg:video/mpeg",
+                "flv:video/x-flv", "wmv:video/x-ms-wmv",
+                "pdf:application/pdf", "txt:text/plain", "log:text/plain", "ini:text/plain", "conf:text/plain", "md:text/markdown",
+                "csv:text/csv", "xml:application/xml", "yml:text/yaml", "yaml:text/yaml", "rtf:application/rtf",
+                "java:text/plain", "kt:text/plain", "py:text/plain", "sh:text/plain", "php:text/plain", "c:text/plain", "cpp:text/plain", "h:text/plain",
+                "zip:application/zip", "rar:application/vnd.rar", "7z:application/x-7z-compressed", "tar:application/x-tar",
+                "gz:application/gzip", "bz2:application/x-bzip2", "xz:application/x-xz",
+                "apk:application/vnd.android.package-archive",
+                "doc:application/msword", "docx:application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "xls:application/vnd.ms-excel", "xlsx:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "ppt:application/vnd.ms-powerpoint", "pptx:application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "odt:application/vnd.oasis.opendocument.text", "ods:application/vnd.oasis.opendocument.spreadsheet",
+                "epub:application/epub+zip", "wasm:application/wasm"
+              };
+              for (String s : a) { int i = s.indexOf(':'); M.put(s.substring(0, i), s.substring(i + 1)); }
+            }
+            static String mime(String p) {
+              int i = p.lastIndexOf('.');
+              if (i < 0) return "application/octet-stream";
+              String m = M.get(p.substring(i + 1).toLowerCase());
+              return m != null ? m : "application/octet-stream";
+            }
+
+            static class Lim extends FilterInputStream {
+              long left;
+              Lim(InputStream i, long n) { super(i); left = n; }
+              @Override public int read() throws IOException {
+                if (left <= 0) return -1;
+                int r = super.read();
+                if (r >= 0) left--;
+                return r;
+              }
+              @Override public int read(byte[] b, int o, int l) throws IOException {
+                if (left <= 0) return -1;
+                int r = super.read(b, o, (int) Math.min(l, left));
+                if (r > 0) left -= r;
+                return r;
+              }
+              @Override public long skip(long n) throws IOException {
+                long s = super.skip(Math.min(n, left));
+                left -= s;
+                return s;
+              }
+            }
+
+            static WebResourceResponse resp(String m, int c, String msg, Map<String, String> hd, InputStream in) {
+              String enc = (m.startsWith("text/") || m.equals("application/json") || m.equals("application/xml") || m.equals("image/svg+xml")) ? "utf-8" : null;
+              return new WebResourceResponse(m, enc, c, msg, hd, in);
+            }
+
+            // sisipkan poly.js paling awal di <head> supaya API polyfill sudah ada sebelum script halaman jalan
+            String inject(String s) {
+              String tag = "<script>" + poly + "</script>" + (cb("mn", true) ? "<script>" + menu + "</script>" : "");
+              int at = 0;
+              Matcher m = Pattern.compile("<head(\\s[^>]*)?>", Pattern.CASE_INSENSITIVE).matcher(s);
+              if (m.find()) at = m.end();
+              else {
+                m = Pattern.compile("<html(\\s[^>]*)?>", Pattern.CASE_INSENSITIVE).matcher(s);
+                if (m.find()) at = m.end();
+                else {
+                  m = Pattern.compile("<!doctype[^>]*>", Pattern.CASE_INSENSITIVE).matcher(s);
+                  if (m.find()) at = m.end();
+                }
+              }
+              return s.substring(0, at) + tag + s.substring(at);
+            }
+
+            OutputStream dout(String name, String mime) throws Exception {
+              name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+              if (name.isEmpty()) name = "file";
+              if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues cvs = new ContentValues();
+                cvs.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                cvs.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                cvs.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cvs);
+                return getContentResolver().openOutputStream(u);
+              }
+              File d = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+              d.mkdirs();
+              File f = new File(d, name);
+              String b = name.replaceAll("\\.[^.]*$", ""), x = name.substring(b.length());
+              int i = 1;
+              while (f.exists()) f = new File(d, b + " (" + (i++) + ")" + x);
+              return new FileOutputStream(f);
+            }
+
+            // https://app.foxl/ = launcher (assets) | https://p<id>.foxl/ = project | /__fs/<abs path> = real storage (dengan Range)
+            WebResourceResponse serve(WebResourceRequest rq) {
+              Uri u = rq.getUrl();
+              String h = u.getHost();
+              if (h == null || !h.endsWith(".foxl")) return null;
+              String p = u.getPath();
+              boolean app = h.equals("app.foxl");
+              if (p == null || p.equals("/")) p = app ? "/launcher.html" : "/index.html";
+              Map<String, String> hd = new HashMap<>();
+              hd.put("Access-Control-Allow-Origin", "*");
+              hd.put("Accept-Ranges", "bytes");
+              try {
+                if (!app && h.startsWith("p") && p.equals("/__fxreset"))
+                  return resp("text/html", 200, "OK", hd, new ByteArrayInputStream(RESET_HTML.getBytes("UTF-8")));
+                if (app) return resp(mime(p), 200, "OK", hd, getAssets().open(p.substring(1)));
+                File f = null;
+                boolean fs = false;
+                if (h.startsWith("p")) {
+                  if (p.startsWith("/__fs/")) {
+                    fs = true;
+                    File c = safe(p.substring(5));
+                    if (c.isFile()) f = c;
+                  } else {
+                    File d = new File(root, h.substring(1, h.length() - 5));
+                    File c = new File(d, p).getCanonicalFile();
+                    if (c.getPath().startsWith(d.getCanonicalPath() + File.separator) && c.isFile()) f = c;
+                  }
+                }
+                if (f == null) return resp("text/plain", 404, "Not Found", hd, new ByteArrayInputStream(new byte[0]));
+                String m = mime(f.getName());
+                long n = f.length();
+                if (!fs && m.equals("text/html")) {
+                  ByteArrayOutputStream bo = new ByteArrayOutputStream((int) n + poly.length() + 16);
+                  FileInputStream fi = new FileInputStream(f);
+                  byte[] bf = new byte[16384];
+                  int r;
+                  while ((r = fi.read(bf)) > 0) bo.write(bf, 0, r);
+                  fi.close();
+                  String html = inject(new String(bo.toByteArray(), "ISO-8859-1"));
+                  return resp(m, 200, "OK", hd, new ByteArrayInputStream(html.getBytes("ISO-8859-1")));
+                }
+                String rg = null;
+                for (Map.Entry<String, String> e : rq.getRequestHeaders().entrySet()) if (e.getKey().equalsIgnoreCase("range")) rg = e.getValue();
+                long a = 0, z = n - 1;
+                int code = 200;
+                String msg = "OK";
+                if (n > 0 && rg != null && rg.startsWith("bytes=")) {
+                  try {
+                    String[] t = rg.substring(6).split(",")[0].trim().split("-", -1);
+                    if (t[0].isEmpty()) a = Math.max(0, n - Long.parseLong(t[1]));
+                    else {
+                      a = Long.parseLong(t[0]);
+                      if (t.length > 1 && !t[1].isEmpty()) z = Math.min(Long.parseLong(t[1]), n - 1);
+                    }
+                    if (a > z || a >= n) {
+                      hd.put("Content-Range", "bytes */" + n);
+                      return resp("text/plain", 416, "Range Not Satisfiable", hd, new ByteArrayInputStream(new byte[0]));
+                    }
+                    code = 206;
+                    msg = "Partial Content";
+                    hd.put("Content-Range", "bytes " + a + "-" + z + "/" + n);
+                  } catch (Exception x) { a = 0; z = n - 1; code = 200; msg = "OK"; hd.remove("Content-Range"); }
+                }
+                hd.put("Content-Length", String.valueOf(z - a + 1));
+                FileInputStream fi = new FileInputStream(f);
+                if (a > 0) fi.getChannel().position(a);
+                InputStream in = code == 206 ? new Lim(fi, z - a + 1) : fi;
+                return resp(m, code, msg, hd, in);
+              } catch (Exception e) {
+                return resp("text/plain", 404, "Not Found", hd, new ByteArrayInputStream(new byte[0]));
+              }
+            }
+
+            // ---------- reset data per projek ----------
+            // mask: l=localStorage/sessionStorage, i=IndexedDB, c=Cache API, s=service worker
+            class Rst implements Runnable {
+              final String id, origin, mask;
+              final boolean ck, cf;
+              WebView t;
+              boolean fin;
+              Rst(String id, String mask, boolean ck, boolean cf) {
+                this.id = id; this.mask = mask; this.ck = ck; this.cf = cf;
+                this.origin = "https://p" + id + ".foxl";
+              }
+              void start() {
+                if (mask.isEmpty()) { run(); return; }
+                try {
+                  t = new WebView(MainActivity.this);
+                  WebSettings s = t.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  t.addJavascriptInterface(this, "R");
+                  t.setWebViewClient(new WebViewClient() {
+                    @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) { return serve(r); }
+                  });
+                  t.loadUrl(origin + "/__fxreset?m=" + mask);
+                  t.postDelayed(this, 9000);
+                } catch (Exception e) { run(); }
+              }
+              @JavascriptInterface public void d() { runOnUiThread(this); }
+              @Override public void run() {
+                if (fin) return;
+                fin = true;
+                if (t != null) {
+                  try { t.removeCallbacks(this); t.stopLoading(); t.destroy(); } catch (Exception e) {}
+                  t = null;
+                }
+                if (mask.contains("l") && mask.contains("i") && mask.contains("c") && mask.contains("s")) {
+                  try { WebStorage.getInstance().deleteOrigin(origin); } catch (Exception e) {}
+                }
+                if (ck) {
+                  try {
+                    CookieManager cm = CookieManager.getInstance();
+                    String c = cm.getCookie(origin);
+                    if (c != null) for (String kv : c.split(";")) {
+                      String n = kv.trim();
+                      int i = n.indexOf('=');
+                      if (i > 0) n = n.substring(0, i);
+                      if (!n.isEmpty()) cm.setCookie(origin, n + "=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/");
+                    }
+                    cm.flush();
+                  } catch (Exception e) {}
+                }
+                if (cf) new File(new File(root, id), ".cfg").delete();
+                tt("Data direset");
+                if (w != null) w.evaluateJavascript("window.__rd&&__rd(" + cf + ")", null);
+              }
+            }
+
+            // ---------- JS bridge ----------
+            class Host {
+              // launcher
+              @JavascriptInterface public String list() {
+                JSONArray a = new JSONArray();
+                File[] f = root.listFiles();
+                if (f != null) {
+                  Arrays.sort(f, (x, y) -> Long.compare(y.lastModified(), x.lastModified()));
+                  for (File d : f) try {
+                    if (d.isDirectory()) a.put(new JSONObject().put("id", d.getName()).put("name", nm(d)));
+                  } catch (Exception e) {}
+                }
+                return a.toString();
+              }
+              @JavascriptInterface public void imp() {
+                runOnUiThread(() -> {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                  startActivityForResult(i, 7);
+                });
+              }
+              @JavascriptInterface public void run(String id) {
+                id = id.replaceAll("[^a-z0-9-]", "");
+                final Intent it = new Intent(MainActivity.this, P.class).putExtra("p", id)
+                  .addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+                try {
+                  JSONObject c = new JSONObject(readCfg(id));
+                  it.putExtra("fs", c.optBoolean("fs", false));
+                  it.putExtra("or", c.optString("or", "auto"));
+                  it.putExtra("res", c.optInt("res", 100));
+                } catch (Exception e) {}
+                runOnUiThread(() -> startActivity(it));
+              }
+              @JavascriptInterface public void drop(String id) {
+                id = id.replaceAll("[^a-z0-9-]", "");
+                if (!id.isEmpty()) del(new File(root, id));
+              }
+              // detail projek
+              @JavascriptInterface public String info(String id) {
+                try {
+                  id = id.replaceAll("[^a-z0-9-]", "");
+                  File d = new File(root, id);
+                  long[] s = stat(d, true);
+                  return new JSONObject().put("id", id).put("name", nm(d)).put("title", ttl(d))
+                    .put("size", s[0]).put("files", s[1]).put("mod", d.lastModified())
+                    .put("entry", new File(d, "index.html").exists()).toString();
+                } catch (Exception e) { return "{}"; }
+              }
+              @JavascriptInterface public String cfg(String id) { return readCfg(id.replaceAll("[^a-z0-9-]", "")); }
+              @JavascriptInterface public void setCfg(String id, String j) {
+                try {
+                  id = id.replaceAll("[^a-z0-9-]", "");
+                  new JSONObject(j);
+                  wf(new File(new File(root, id), ".cfg"), j);
+                } catch (Exception e) {}
+              }
+              @JavascriptInterface public void resetData(String id, String mask, boolean ck, boolean cf) {
+                if (pid != null) return; // cuma boleh dipanggil dari launcher, bukan dari HTML projek
+                id = id.replaceAll("[^a-z0-9-]", "");
+                if (id.isEmpty() || !new File(root, id).isDirectory()) return;
+                final Rst r = new Rst(id, mask == null ? "" : mask.replaceAll("[^lics]", ""), ck, cf);
+                runOnUiThread(r::start);
+              }
+              @JavascriptInterface public boolean rename(String id, String n) {
+                try {
+                  id = id.replaceAll("[^a-z0-9-]", "");
+                  n = n.trim();
+                  if (id.isEmpty() || n.isEmpty()) return false;
+                  wf(new File(new File(root, id), ".name"), n);
+                  return true;
+                } catch (Exception e) { return false; }
+              }
+              // menu di dalam projek
+              @JavascriptInterface public String state() { return "{\"fs\":" + fsOn + ",\"res\":" + res + ",\"or\":\"" + ori + "\",\"ka\":" + cb("ka", false) + "}"; }
+              @JavascriptInterface public int res() { return res; }
+              @JavascriptInterface public void hFs(boolean on) { runOnUiThread(() -> { setFs(on); savePref("fs", on); }); }
+              @JavascriptInterface public void hRes(int p) { runOnUiThread(() -> { setRes(p); savePref("res", p); }); }
+              @JavascriptInterface public void hOri(String o) { runOnUiThread(() -> { setOri(o); savePref("or", ori); }); }
+              @JavascriptInterface public void hKa(boolean on) { runOnUiThread(() -> { setKa(on); savePref("ka", on); }); }
+              @JavascriptInterface public void hReload() { runOnUiThread(() -> { if (w != null) w.reload(); }); }
+              @JavascriptInterface public void hExit() { runOnUiThread(() -> finish()); }
+              // permission
+              @JavascriptInterface public boolean perm() {
+                return Build.VERSION.SDK_INT >= 30 ? Environment.isExternalStorageManager()
+                  : checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED;
+              }
+              @JavascriptInterface public void ask() {
+                runOnUiThread(() -> {
+                  try {
+                    if (Build.VERSION.SDK_INT >= 30)
+                      startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName())));
+                    else requestPermissions(new String[]{"android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"}, 1);
+                  } catch (Exception e) {
+                    try { startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); } catch (Exception x) {}
+                  }
+                });
+              }
+              // real storage (dipakai polyfill showDirectoryPicker)
+              @JavascriptInterface public String root() { return ext.getPath(); }
+              @JavascriptInterface public String mime(String n) { return MainActivity.mime(n); }
+              @JavascriptInterface public String ls(String p) {
+                JSONArray a = new JSONArray();
+                try {
+                  File[] f = safe(p).listFiles();
+                  if (f != null) for (File c : f) a.put(new JSONObject().put("n", c.getName()).put("d", c.isDirectory()).put("s", c.length()).put("m", c.lastModified()));
+                } catch (Exception e) {}
+                return a.toString();
+              }
+              @JavascriptInterface public boolean isd(String p) { try { return safe(p).isDirectory(); } catch (Exception e) { return false; } }
+              @JavascriptInterface public boolean isf(String p) { try { return safe(p).isFile(); } catch (Exception e) { return false; } }
+              @JavascriptInterface public double sz(String p) { try { return safe(p).length(); } catch (Exception e) { return 0; } }
+              @JavascriptInterface public double mt(String p) { try { return safe(p).lastModified(); } catch (Exception e) { return 0; } }
+              @JavascriptInterface public boolean mk(String p) { try { File f = safe(p); return f.isDirectory() || f.mkdirs(); } catch (Exception e) { return false; } }
+              @JavascriptInterface public boolean touch(String p) {
+                try { File f = safe(p); if (!f.exists()) { f.getParentFile().mkdirs(); return f.createNewFile(); } return true; } catch (Exception e) { return false; }
+              }
+              @JavascriptInterface public boolean rm(String p) { try { File f = safe(p); return !f.equals(ext) && del(f); } catch (Exception e) { return false; } }
+              @JavascriptInterface public boolean mv(String a, String b) {
+                try {
+                  File s = safe(a), t = safe(b);
+                  if (s.equals(ext) || t.exists()) return false;
+                  t.getParentFile().mkdirs();
+                  if (s.renameTo(t)) return true;
+                  if (s.isFile()) { cp(new FileInputStream(s), t, true); return s.delete(); }
+                  return false;
+                } catch (Exception e) { return false; }
+              }
+              @JavascriptInterface public void wr(String p, String b, boolean ap) {
+                try (FileOutputStream o = new FileOutputStream(safe(p), ap)) {
+                  if (!b.isEmpty()) o.write(Base64.decode(b, Base64.DEFAULT));
+                } catch (Exception e) {}
+              }
+              // tulis di posisi tertentu (seek) + truncate
+              @JavascriptInterface public boolean wat(String p, String b, double pos) {
+                try (RandomAccessFile f = new RandomAccessFile(safe(p), "rw")) {
+                  f.seek((long) pos);
+                  f.write(Base64.decode(b, Base64.DEFAULT));
+                  return true;
+                } catch (Exception e) { return false; }
+              }
+              @JavascriptInterface public boolean trunc(String p, double n) {
+                try {
+                  File t = safe(p);
+                  t.getParentFile().mkdirs();
+                  try (RandomAccessFile f = new RandomAccessFile(t, "rw")) { f.setLength((long) n); }
+                  return true;
+                } catch (Exception e) { return false; }
+              }
+              @JavascriptInterface public String disk() {
+                try {
+                  StatFs s = new StatFs(ext.getPath());
+                  return "{\"t\":" + s.getTotalBytes() + ",\"f\":" + s.getAvailableBytes() + "}";
+                } catch (Exception e) { return "{\"t\":1,\"f\":0}"; }
+              }
+              // simpan ke folder Download (MediaStore, tidak butuh izin)
+              @JavascriptInterface public int dlo(String n, String m) {
+                try {
+                  Out x = new Out();
+                  x.n = n;
+                  x.o = dout(n, m);
+                  int id;
+                  synchronized (outs) { id = ++oid; outs.put(id, x); }
+                  return id;
+                } catch (Exception e) { return -1; }
+              }
+              @JavascriptInterface public boolean dlw(int id, String b) {
+                try {
+                  Out x;
+                  synchronized (outs) { x = outs.get(id); }
+                  x.o.write(Base64.decode(b, Base64.DEFAULT));
+                  return true;
+                } catch (Exception e) { return false; }
+              }
+              @JavascriptInterface public void dlc(int id) {
+                Out x;
+                synchronized (outs) { x = outs.remove(id); }
+                if (x != null) {
+                  try { x.o.close(); } catch (Exception e) {}
+                  tt("Tersimpan di Download: " + x.n);
+                }
+              }
+              @JavascriptInterface public void dlf(String p, String n) {
+                final String nn = (n == null || n.isEmpty()) ? new File(p).getName() : n;
+                new Thread(() -> {
+                  try (InputStream in = new FileInputStream(safe(p)); OutputStream o = dout(nn, MainActivity.mime(nn))) {
+                    byte[] b = new byte[65536];
+                    int r;
+                    while ((r = in.read(b)) > 0) o.write(b, 0, r);
+                    tt("Tersimpan di Download: " + nn);
+                  } catch (Exception e) { tt("Gagal menyimpan file"); }
+                }).start();
+              }
+              // UI / sistem
+              @JavascriptInterface public void toast(String m) { tt(m); }
+              @JavascriptInterface public void copy(String t) {
+                runOnUiThread(() -> {
+                  ClipboardManager c = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                  if (c != null) c.setPrimaryClip(ClipData.newPlainText("text", t));
+                });
+              }
+              @JavascriptInterface public String paste() {
+                try {
+                  ClipboardManager c = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                  ClipData d = c.getPrimaryClip();
+                  return d != null && d.getItemCount() > 0 ? String.valueOf(d.getItemAt(0).coerceToText(MainActivity.this)) : "";
+                } catch (Exception e) { return ""; }
+              }
+              @JavascriptInterface public void shareText(String t) {
+                runOnUiThread(() -> {
+                  try { startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, t), null)); } catch (Exception e) {}
+                });
+              }
+              // buka file dengan aplikasi lain / bagikan file
+              @JavascriptInterface public boolean open(String p) {
+                try {
+                  File f = safe(p);
+                  Uri u = FileProvider.getUriForFile(MainActivity.this, getPackageName() + ".fp", f);
+                  final Intent i = new Intent(Intent.ACTION_VIEW).setDataAndType(u, MainActivity.mime(f.getName())).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                  runOnUiThread(() -> {
+                    try { startActivity(i); } catch (Exception e) { tt("Tidak ada aplikasi untuk membuka file ini"); }
+                  });
+                  return true;
+                } catch (Exception e) { return false; }
+              }
+              @JavascriptInterface public boolean share(String p) {
+                try {
+                  File f = safe(p);
+                  Uri u = FileProvider.getUriForFile(MainActivity.this, getPackageName() + ".fp", f);
+                  final Intent i = new Intent(Intent.ACTION_SEND).setType(MainActivity.mime(f.getName())).putExtra(Intent.EXTRA_STREAM, u);
+                  i.setClipData(ClipData.newRawUri("", u));
+                  i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                  runOnUiThread(() -> {
+                    try { startActivity(Intent.createChooser(i, null)); } catch (Exception e) {}
+                  });
+                  return true;
+                } catch (Exception e) { return false; }
+              }
+            }
+          }
+          EOF
+
+          cat > $D/app/src/main/assets/poly.js <<'EOF'
+          (()=>{
+          if(window.__fx||!window.Host)return;window.__fx=1;
+          const H=Host,J=JSON.parse,E=(n,m)=>new DOMException(m||n,n);
+
+          /* render-resolution: turunin devicePixelRatio aja, JANGAN ubah ukuran WebView/viewport.
+             Canvas/game yang nentuin resolusi gambarnya dari devicePixelRatio bakal render lebih
+             kecil (hemat GPU), tapi window.innerWidth/innerHeight & skala UI HTML tetap sama persis. */
+          (()=>{
+           const base=self.devicePixelRatio||1;
+           let pct=100;
+           try{pct=H.res?H.res():100}catch(e){}
+           try{Object.defineProperty(window,'devicePixelRatio',{configurable:true,get:()=>base*pct/100})}catch(e){}
+           window.__fxSetRes=p=>{pct=p;try{dispatchEvent(new Event('resize'))}catch(e){}};
+          })();
+
+          const CH=1<<20,MEM=48<<20,RT=H.root();
+          const O=location.origin&&location.origin!=='null'?location.origin:'',FS=O+'/__fs/';
+          const B=u=>{let s='';for(let i=0;i<u.length;i+=32768)s+=String.fromCharCode.apply(null,u.subarray(i,i+32768));return btoa(s)};
+          const U=(p,m)=>O+'/__fs'+p.split('/').map(encodeURIComponent).join('/')+(m?'?v='+m:'');
+
+          /* izin "Semua file": minta lalu tunggu user balik ke app */
+          const ensure=async()=>{
+           if(H.perm())return true;
+           H.ask();
+           await new Promise(r=>{
+            let seen=0;
+            const t=setTimeout(fin,120000);
+            function fin(){clearTimeout(t);['blur','focus','visibilitychange'].forEach(v=>removeEventListener(v,x));r()}
+            function x(){const on=document.visibilityState==='visible'&&document.hasFocus();if(!on)seen=1;else if(seen)setTimeout(fin,400)}
+            ['blur','focus','visibilitychange'].forEach(v=>addEventListener(v,x));
+           });
+           return !!H.perm();
+          };
+
+          /* File "malas" untuk file besar / video / audio: isi di-stream lewat /__fs dengan Range */
+          class LF extends File{
+           constructor(p,s,m,t,a,b){super([],p.split('/').pop(),{type:t,lastModified:m});this._p=p;this._s=s;this._m=m;this._a=a==null?0:a;this._b=b==null?s:b}
+           get size(){return this._b-this._a}
+           slice(a,b,t){
+            const n=this.size;
+            a=a==null?0:a<0?Math.max(n+a,0):Math.min(a,n);
+            b=b==null?n:b<0?Math.max(n+b,0):Math.min(b,n);
+            if(b<a)b=a;
+            return new LF(this._p,this._s,this._m,t==null?this.type:t,this._a+a,this._a+b);
+           }
+           _fetch(){
+            if(!this.size)return Promise.resolve(new Response(new Uint8Array(0)));
+            const h=(this._a||this._b!==this._s)?{Range:'bytes='+this._a+'-'+(this._b-1)}:{};
+            return fetch(U(this._p,this._m),{headers:h});
+           }
+           arrayBuffer(){return this._fetch().then(r=>r.arrayBuffer())}
+           bytes(){return this.arrayBuffer().then(b=>new Uint8Array(b))}
+           text(){return this._fetch().then(r=>r.text())}
+           stream(){const t=new TransformStream();this._fetch().then(r=>r.body.pipeTo(t.writable)).catch(e=>t.writable.abort(e));return t.readable}
+          }
+          {
+           const cu=URL.createObjectURL.bind(URL),ru=URL.revokeObjectURL.bind(URL);
+           URL.createObjectURL=o=>o instanceof LF&&o._a===0&&o._b===o._s?U(o._p,o._m):cu(o);
+           URL.revokeObjectURL=u=>{if(typeof u==='string'&&u.startsWith(FS))return;ru(u)};
+           const P=FileReader.prototype;
+           ['readAsArrayBuffer','readAsText','readAsDataURL','readAsBinaryString'].forEach(k=>{
+            const o=P[k];
+            P[k]=function(b,e){
+             if(b instanceof LF){b._fetch().then(r=>r.blob()).then(x=>o.call(this,x,e),()=>o.call(this,new Blob([]),e));return}
+             return o.call(this,b,e);
+            };
+           });
+           if(window.createImageBitmap){
+            const c=window.createImageBitmap;
+            window.createImageBitmap=function(x,...a){return x instanceof LF?x.arrayBuffer().then(b=>c(new Blob([b],{type:x.type}),...a)):c.call(this,x,...a)};
+           }
+          }
+
+          /* writer ala FileSystemWritableFileStream (write/seek/truncate, Blob, string, buffer, stream) */
+          function W(w){
+           let pos=0,q=Promise.resolve(),done=0;
+           const end=()=>{if(!done){done=1;return w.end()}};
+           const each=async(c,f)=>{
+            if(c instanceof Blob){for(let i=0;i<c.size;i+=CH)f(new Uint8Array(await c.slice(i,i+CH).arrayBuffer()));return}
+            const u=ArrayBuffer.isView(c)?new Uint8Array(c.buffer,c.byteOffset,c.byteLength):c instanceof ArrayBuffer?new Uint8Array(c):new TextEncoder().encode(String(c));
+            for(let i=0;i<u.length;i+=CH)f(u.subarray(i,i+CH));
+           };
+           const put=u=>{w.put(u,pos);pos+=u.length};
+           const op=async c=>{
+            if(c&&typeof c==='object'&&c.type&&!(c instanceof Blob)){
+             if(c.type==='seek'){pos=c.position;return}
+             if(c.type==='truncate'){w.trunc(c.size);if(pos>c.size)pos=c.size;return}
+             if(c.type==='write'){if(c.position!=null)pos=c.position;c=c.data;if(c==null)return}
+            }
+            await each(c,put);
+           };
+           const run=c=>q=q.then(()=>op(c));
+           const ws=new WritableStream({write:run,close:()=>q.then(end),abort:()=>q.then(end,end)});
+           ws.write=run;ws.close=()=>q.then(end);
+           ws.seek=n=>run({type:'seek',position:n});
+           ws.truncate=n=>run({type:'truncate',size:n});
+           return ws;
+          }
+
+          class FH{
+           constructor(p,k){this.path=p;this.kind=k;this.name=p===RT?'Storage':p.split('/').pop()}
+           async*values(){for(const e of J(H.ls(this.path)))yield new FH(this.path+'/'+e.n,e.d?'directory':'file')}
+           async*entries(){for await(const h of this.values())yield[h.name,h]}
+           async*keys(){for await(const h of this.values())yield h.name}
+           [Symbol.asyncIterator](){return this.entries()}
+           async getDirectoryHandle(n,o){
+            const p=this.path+'/'+n;
+            if(H.isf(p))throw E('TypeMismatchError');
+            if(o&&o.create){if(!H.mk(p))throw E('NotAllowedError')}else if(!H.isd(p))throw E('NotFoundError');
+            return new FH(p,'directory');
+           }
+           async getFileHandle(n,o){
+            const p=this.path+'/'+n;
+            if(H.isd(p))throw E('TypeMismatchError');
+            if(o&&o.create){if(!H.touch(p))throw E('NotAllowedError')}else if(!H.isf(p))throw E('NotFoundError');
+            return new FH(p,'file');
+           }
+           async removeEntry(n){if(!H.rm(this.path+'/'+n))throw E('NotAllowedError')}
+           async remove(){if(!H.rm(this.path))throw E('NotAllowedError')}
+           async move(a,b){
+            const d=typeof a==='string'?this.path.replace(/\/[^/]*$/,''):a.path,n=typeof a==='string'?a:(b||this.name),t=d+'/'+n;
+            if(!H.mv(this.path,t))throw E('NoModificationAllowedError');
+            this.path=t;this.name=n;
+           }
+           async resolve(h){
+            if(h.path===this.path)return[];
+            if(!h.path.startsWith(this.path+'/'))return null;
+            return h.path.slice(this.path.length+1).split('/');
+           }
+           async isSameEntry(o){return o.path===this.path}
+           async queryPermission(){return H.perm()?'granted':'prompt'}
+           async requestPermission(){return(await ensure())?'granted':'denied'}
+           open(){return H.open(this.path)}
+           share(){return H.share(this.path)}
+           async getFile(){
+            const p=this.path;
+            if(!H.isf(p))throw E('NotFoundError');
+            const s=H.sz(p),m=H.mt(p),t=H.mime(this.name);
+            let f;
+            if(s>MEM||/^(video|audio)\//.test(t))f=new LF(p,s,m,t);
+            else{
+             const r=await fetch(U(p,m));
+             if(!r.ok)throw E('NotReadableError');
+             f=new File([await r.blob()],this.name,{type:t,lastModified:m});
+            }
+            Object.defineProperty(f,'path',{value:p});
+            return f;
+           }
+           async createWritable(o){
+            const p=this.path;
+            if(!(o&&o.keepExistingData)&&!H.trunc(p,0))throw E('NotAllowedError');
+            return W({put:(u,pos)=>{if(!H.wat(p,B(u),pos))throw E('NotAllowedError')},trunc:n=>H.trunc(p,n),end(){}});
+           }
+          }
+
+          /* handle sementara dari <input type=file> (showOpenFilePicker) */
+          class MH{
+           constructor(f){this.kind='file';this.name=f.name;this.f=f}
+           async getFile(){return this.f}
+           async createWritable(){throw E('NotAllowedError')}
+           async isSameEntry(o){return o===this}
+           async queryPermission(){return'granted'}
+           async requestPermission(){return'granted'}
+          }
+          /* handle simpan file -> folder Download (showSaveFilePicker) */
+          class SH{
+           constructor(n){this.kind='file';this.name=n}
+           async getFile(){return new File([],this.name)}
+           async createWritable(){
+            const id=H.dlo(this.name,H.mime(this.name));
+            if(id<0)throw E('NotAllowedError');
+            return W({put:u=>{if(!H.dlw(id,B(u)))throw E('NotAllowedError')},trunc(){},end:()=>H.dlc(id)});
+           }
+           async isSameEntry(o){return o===this}
+           async queryPermission(){return'granted'}
+           async requestPermission(){return'granted'}
+          }
+          window.showDirectoryPicker=async()=>{
+           if(!await ensure())throw E('NotAllowedError','Izin "Semua file" belum diberikan');
+           return new FH(RT,'directory');
+          };
+          window.showOpenFilePicker=o=>new Promise((res,rej)=>{
+           const i=document.createElement('input');
+           i.type='file';i.multiple=!!(o&&o.multiple);
+           if(o&&o.excludeAcceptAllOption&&o.types){
+            const a=[];
+            o.types.forEach(t=>Object.entries(t.accept||{}).forEach(([k,v])=>{a.push(k);[].concat(v).forEach(x=>a.push(x))}));
+            if(a.length)i.accept=a.join(',');
+           }
+           i.onchange=()=>i.files.length?res([...i.files].map(f=>new MH(f))):rej(E('AbortError'));
+           i.addEventListener('cancel',()=>rej(E('AbortError')));
+           i.click();
+          });
+          window.showSaveFilePicker=async o=>new SH((o&&o.suggestedName)||'file');
+
+          /* storage, clipboard, share */
+          if(navigator.storage){
+           navigator.storage.estimate=async()=>{const d=J(H.disk());return{usage:d.t-d.f,quota:d.t}};
+           navigator.storage.persist=async()=>true;
+           navigator.storage.persisted=async()=>true;
+          }
+          try{Object.defineProperty(navigator,'clipboard',{configurable:true,value:{
+           writeText:async t=>{H.copy(String(t))},
+           readText:async()=>H.paste(),
+           write:async()=>{throw E('NotAllowedError')},
+           read:async()=>{throw E('NotAllowedError')}
+          }})}catch(e){}
+          navigator.share=async d=>{H.shareText([d&&d.title,d&&d.text,d&&d.url].filter(Boolean).join('\n'))};
+          navigator.canShare=d=>!(d&&d.files&&d.files.length);
+
+          /* download: <a download href=blob:/data:/__fs> -> folder Download */
+          const save=async(href,name)=>{
+           try{
+            if(href.startsWith(FS)){
+             const p=decodeURIComponent(new URL(href).pathname.slice(5));
+             H.dlf(p,name||p.split('/').pop());return;
+            }
+            const b=await(await fetch(href)).blob(),n=name||'download',id=H.dlo(n,b.type||H.mime(n));
+            if(id<0)throw 0;
+            for(let i=0;i<b.size;i+=CH)H.dlw(id,B(new Uint8Array(await b.slice(i,i+CH).arrayBuffer())));
+            H.dlc(id);
+           }catch(e){H.toast('Gagal menyimpan file')}
+          };
+          const need=a=>a.hasAttribute('download')&&(/^(blob:|data:)/.test(a.href)||a.href.startsWith(FS));
+          document.addEventListener('click',e=>{
+           const a=e.target.closest&&e.target.closest('a');
+           if(a&&need(a)){e.preventDefault();e.stopImmediatePropagation();save(a.href,a.getAttribute('download'))}
+          },true);
+          {
+           const ac=HTMLAnchorElement.prototype.click;
+           HTMLAnchorElement.prototype.click=function(){if(need(this)){save(this.href,this.getAttribute('download'));return}return ac.call(this)};
+          }
+          window.__fx={LF,save,ensure};
+          })();
+          EOF
+
+          cat > $D/app/src/main/assets/launcher.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="id"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+          <title>Foxle Hub</title>
+          <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@700&family=VT323&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+          <style>
+          *{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+          html,body{height:100%;background:#000;color:#f0f0f0;font:20px/1.1 'VT323',monospace;overflow:hidden;user-select:none;-webkit-user-select:none}
+          img{image-rendering:pixelated}
+          button{font:inherit;color:inherit;border:0;background:none}
+          body{display:flex;flex-direction:column;position:relative}
+          #top{flex:none;background:linear-gradient(var(--al),var(--al)) 0 0/100% 5px no-repeat,repeating-conic-gradient(var(--b1) 0 25%,var(--b2) 0 50%) 0 0/16px 16px;padding:calc(10px + env(safe-area-inset-top)) 12px 8px;border-bottom:4px solid #000;display:flex;align-items:center;gap:8px}
+          #top img{width:30px;height:30px}
+          h1{font:700 26px 'Pixelify Sans',monospace;text-shadow:3px 3px 0 #0006;flex:1}
+          #pm{background:#000;border:3px solid #000;box-shadow:inset 0 0 0 2px #555;padding:2px 8px;font-size:19px;color:var(--y);font-family:inherit}
+          #pm.on{color:var(--ah)}
+          /* ---------- grid 4x6 (kolom dikunci, tidak bisa melebar) ---------- */
+          #pg{flex:1;min-height:0;display:flex;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;scrollbar-width:none;overscroll-behavior:contain;background:none}
+          #pg::-webkit-scrollbar{display:none}
+          .pc{flex:none;width:100%;height:100%;scroll-snap-align:start;scroll-snap-stop:always;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr));gap:8px;padding:10px 10px 6px}
+          .s{min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:4px;background:var(--t);border:3px solid #000;box-shadow:inset 3px 3px 0 var(--tl),inset -3px -3px 0 var(--td);transition:transform .15s cubic-bezier(.3,1.6,.5,1);animation:pop .35s both}
+          .s:active{transform:scale(.9)}
+          .s img{width:min(100%,44px);aspect-ratio:1;height:auto;flex:none}
+          .s span{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px;text-shadow:2px 2px 0 #000}
+          .add{background:var(--a);box-shadow:inset 3px 3px 0 var(--al),inset -3px -3px 0 var(--ad)}
+          .add b{font:700 36px 'Pixelify Sans',monospace;line-height:44px;text-shadow:3px 3px 0 #000}
+          .fl{visibility:hidden}
+          @keyframes pop{from{transform:scale(.6);opacity:0}}
+          #dots{flex:none;display:flex;justify-content:center;gap:6px;padding:4px 0 calc(6px + env(safe-area-inset-bottom));background:#0005}
+          #dots i{width:8px;height:8px;background:#3a3a3a;transition:background .2s,transform .2s}
+          #dots i.on{background:var(--ah);transform:scale(1.35)}
+          #e{position:absolute;left:0;right:0;top:46%;text-align:center;color:#9a9a9a;font-size:24px;pointer-events:none}
+          /* ---------- sheet detail ---------- */
+          #dt{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;background:linear-gradient(var(--bgd),#000);transform:translateY(100%);visibility:hidden;transition:transform .35s cubic-bezier(.2,.9,.2,1),visibility 0s .35s}
+          #dt.on{transform:none;visibility:visible;transition:transform .35s cubic-bezier(.2,.9,.2,1),visibility 0s}
+          #dh{flex:none;display:flex;align-items:center;gap:10px;padding:calc(8px + env(safe-area-inset-top)) 10px 8px;background:var(--t);border-bottom:4px solid #000;box-shadow:inset 0 3px 0 var(--tl)}
+          #bk{width:40px;height:36px;background:#000;box-shadow:inset 0 0 0 2px #555;font-size:24px;color:var(--y)}
+          #bk:active{transform:scale(.9)}
+          #dn{font:700 22px 'Pixelify Sans',monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-shadow:2px 2px 0 #000}
+          #db{flex:1;min-height:0;overflow-y:auto;padding:18px 16px calc(18px + env(safe-area-inset-bottom));display:flex;flex-direction:column;align-items:center;gap:14px}
+          #da{width:96px;height:96px;flex:none;filter:drop-shadow(0 8px 0 #0008)}
+          #dt.on #da{animation:drop .55s cubic-bezier(.3,1.6,.5,1) both,bob 2.4s ease-in-out .6s infinite}
+          @keyframes drop{from{transform:translateY(-40px) scale(.5);opacity:0}}
+          @keyframes bob{50%{transform:translateY(-6px)}}
+          #dnm{font:700 26px 'Pixelify Sans',monospace;text-align:center;text-shadow:3px 3px 0 #000;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+          #dtt{color:#9a9a9a;font-size:20px;text-align:center;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+          #mt{width:100%;max-width:360px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+          #mt div{background:var(--pn);border:3px solid #000;box-shadow:inset 0 0 0 2px var(--pnl);padding:6px 8px;min-width:0}
+          #mt small{display:block;color:var(--mu);font-size:16px}
+          #mt b{display:block;font-weight:400;font-size:21px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+          #dt.on #mt div{animation:rise .4s both}
+          #dt.on #mt div:nth-child(2){animation-delay:.05s}
+          #dt.on #mt div:nth-child(3){animation-delay:.1s}
+          #dt.on #mt div:nth-child(4){animation-delay:.15s}
+          @keyframes rise{from{transform:translateY(14px);opacity:0}}
+          /* ---------- tombol Play ---------- */
+          #play{--in:inset 4px 4px 0 var(--ah),inset -4px -4px 0 var(--ad);position:relative;overflow:hidden;flex:none;width:min(88%,330px);height:74px;display:flex;align-items:center;justify-content:center;gap:14px;background:var(--a);border:4px solid #000;box-shadow:var(--in),0 0 0 0 rgba(var(--ahr),.6);font:700 32px 'Pixelify Sans',monospace;color:#fff;text-shadow:3px 3px 0 #000;animation:pulse 1.8s infinite;transition:transform .15s cubic-bezier(.3,1.6,.5,1)}
+          #play:active{transform:scale(.93)}
+          #play::after{content:"";position:absolute;top:0;bottom:0;left:-60%;width:36%;background:linear-gradient(100deg,transparent,#fff9,transparent);transform:skewX(-20deg);animation:shine 2.6s infinite;pointer-events:none}
+          #play i{flex:none;width:0;height:0;border-left:22px solid #fff;border-top:14px solid transparent;border-bottom:14px solid transparent;filter:drop-shadow(3px 3px 0 #000);animation:nudge .7s infinite alternate steps(3)}
+          #dt.on #play{animation:pulse 1.8s infinite,rise .5s .2s both}
+          @keyframes pulse{0%{box-shadow:var(--in),0 0 0 0 rgba(var(--ahr),.67)}70%,100%{box-shadow:var(--in),0 0 0 18px rgba(var(--ahr),0)}}
+          @keyframes shine{0%,35%{left:-60%}100%{left:130%}}
+          @keyframes nudge{to{transform:translateX(7px)}}
+          .rp{position:absolute;border-radius:50%;background:#fff7;transform:scale(0);animation:rp .6s ease-out forwards;pointer-events:none}
+          @keyframes rp{to{transform:scale(1);opacity:0}}
+          .pt{position:fixed;z-index:9;width:8px;height:8px;pointer-events:none}
+          #go{position:fixed;z-index:9;left:0;top:0;width:40px;height:40px;margin:-20px 0 0 -20px;border-radius:50%;background:var(--ah);transform:scale(0);pointer-events:none;visibility:hidden}
+          #go.on{visibility:visible;transform:scale(var(--k));transition:transform .4s cubic-bezier(.6,0,1,.6)}
+          /* ---------- opsi kecil ---------- */
+          #ops{width:100%;max-width:360px;display:flex;flex-direction:column;gap:12px}
+          .sc small{display:block;color:var(--mu);font-size:16px;margin:0 0 6px 2px}
+          .sg{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
+          .ob{width:66px;height:62px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:var(--t);border:3px solid #000;box-shadow:inset 3px 3px 0 var(--tl),inset -3px -3px 0 var(--td);font-size:15px;line-height:1;text-shadow:2px 2px 0 #000;transition:transform .15s cubic-bezier(.3,1.6,.5,1)}
+          .ob:active{transform:scale(.88)}
+          .ob svg{width:22px;height:22px;fill:none;stroke:#fff;stroke-width:2.5;shape-rendering:crispEdges;stroke-linecap:square}
+          .ob em{font-style:normal;color:var(--y);font-size:14px}
+          .ob.on{background:var(--a);box-shadow:inset 3px 3px 0 var(--al),inset -3px -3px 0 var(--ad)}
+          .ob.on em{color:var(--ah)}
+          .ob.rd{background:#6b1c12;box-shadow:inset 3px 3px 0 #b0422f,inset -3px -3px 0 #3a0e06}
+          #dt.on .ob{animation:rise .4s both}
+          #dt.on .ob:nth-child(1){animation-delay:.3s}#dt.on .ob:nth-child(2){animation-delay:.35s}#dt.on .ob:nth-child(3){animation-delay:.4s}#dt.on .ob:nth-child(4){animation-delay:.45s}#dt.on .ob:nth-child(5){animation-delay:.5s}
+          /* ---------- dialog reset data ---------- */
+          #rd{position:absolute;inset:0;z-index:8;display:none;align-items:center;justify-content:center;background:#000b;padding:16px}
+          #rd.on{display:flex}
+          #rb{width:100%;max-width:340px;max-height:100%;overflow-y:auto;background:var(--pn);border:4px solid #000;box-shadow:inset 0 0 0 2px var(--pn3);padding:14px;display:flex;flex-direction:column;gap:8px}
+          #rb h2{font:700 24px 'Pixelify Sans',monospace;text-shadow:2px 2px 0 #000}
+          #rb p{color:#9a9a9a;font-size:17px;line-height:1.15;margin-bottom:2px}
+          .ck{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:8px 10px;background:var(--pn2);border:3px solid #000;box-shadow:inset 2px 2px 0 var(--pn3);font-size:20px}
+          .ck i{flex:none;width:22px;height:22px;background:#000;box-shadow:inset 0 0 0 2px #555}
+          .ck.on i{background:var(--ah);box-shadow:inset 0 0 0 4px #000}
+          .ck small{display:block;color:var(--mu);font-size:15px}
+          .rr{display:flex;gap:8px;margin-top:4px}
+          .bt{flex:1;height:46px;background:var(--t);border:3px solid #000;box-shadow:inset 3px 3px 0 var(--tl),inset -3px -3px 0 var(--td);font-size:22px;text-shadow:2px 2px 0 #000}
+          .bt:active{transform:scale(.94)}
+          .bt.rd{background:#6b1c12;box-shadow:inset 3px 3px 0 #b0422f,inset -3px -3px 0 #3a0e06}
+          @media (prefers-reduced-motion:reduce){#play,#play::after,#play i,#da{animation:none!important}}
+          #wd{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;z-index:0}#top,#pg,#dots{position:relative;z-index:1}.s{background-image:var(--tex);background-size:32px;image-rendering:pixelated}#e{color:#ddd;text-shadow:2px 2px 0 #000}#lg{cursor:pointer;filter:drop-shadow(0 0 6px var(--glow))}#th{width:40px;height:34px;padding:0;background:#000;box-shadow:inset 0 0 0 2px var(--al);display:flex;align-items:center;justify-content:center}#th img{width:26px;height:26px}#tm{position:absolute;top:calc(58px + env(safe-area-inset-top));right:8px;z-index:12;display:none;flex-direction:column;gap:6px;padding:8px;background:var(--pn);border:4px solid #000;box-shadow:inset 0 0 0 2px var(--pn3)}#tm.on{display:flex;animation:pop .25s both}#tm button{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 6px;min-width:176px;background:var(--t);border:3px solid #000;box-shadow:inset 2px 2px 0 var(--tl),inset -2px -2px 0 var(--td);font-size:21px;text-shadow:2px 2px 0 #000;text-align:left}#tm button.on{background:var(--a);box-shadow:inset 2px 2px 0 var(--al),inset -2px -2px 0 var(--ad)}#tm img{width:26px;height:26px}#fx{position:fixed;inset:0;z-index:30;pointer-events:none;overflow:hidden}#fx.on{pointer-events:auto}#fx .lb{position:absolute;left:0;right:0;height:0;background:#000;transition:height .35s cubic-bezier(.2,.9,.2,1)}#fx .t{top:0}#fx .b{bottom:0}#fx.on .lb{height:14%}#fx i{position:absolute;pointer-events:none}#ft{position:absolute;top:50%;left:0;right:0;margin-top:-20px;text-align:center;font:700 34px 'Pixelify Sans',monospace;letter-spacing:3px;color:var(--ah);text-shadow:3px 0 #f0f,-3px 0 #0ff;opacity:0}#fx.on #ft{opacity:1;animation:jit .12s steps(2) infinite}@keyframes jit{50%{transform:translate(3px,-2px)}}</style></head><body><canvas id="wd"></canvas>
+          <div id="top"><img id="lg" alt=""><h1>Foxle Hub</h1><button id="pm">Akses file</button><button id="th"></button></div>
+          <div id="pg"></div>
+          <div id="dots"></div>
+          <div id="e" hidden>Belum ada projek<br>Tap + untuk impor .html / .zip</div>
+          <div id="dt">
+            <div id="dh"><button id="bk">&#9664;</button><b id="dn"></b></div>
+            <div id="db">
+              <img id="da" alt="">
+              <div id="dnm"></div>
+              <div id="dtt"></div>
+              <div id="mt"></div>
+              <button id="play"><i></i><span>MAIN</span></button>
+              <div id="ops"></div>
+            </div>
+          </div>
+          <div id="rd"><div id="rb"></div></div>
+          <div id="go"></div>
+          <script>
+          const $=s=>document.querySelector(s);
+          const pal=['#e8802a','#5fb02f','#4a7fd4','#d6403a','#9b59c9','#fcdb5a','#7cff3a','#e86fb0'];
+          const esc=s=>s.replace(/[&<>"]/g,c=>'&#'+c.charCodeAt(0)+';');
+          function px(g,pl){const c=document.createElement('canvas');c.width=c.height=10;const x=c.getContext('2d'),on=(i,y)=>pl[(g[y]||'')[i]];
+           x.fillStyle='#000';for(let y=-1;y<9;y++)for(let i=-1;i<9;i++)if(!on(i,y)&&(on(i-1,y)||on(i+1,y)||on(i,y-1)||on(i,y+1)))x.fillRect(i+1,y+1,1,1);
+           g.forEach((r,y)=>[...r].forEach((ch,i)=>{if(pl[ch]){x.fillStyle=pl[ch];x.fillRect(i+1,y+1,1,1)}}));return c.toDataURL()}
+          function av(n){let h=2166136261;for(const c of n){h^=c.charCodeAt(0);h=Math.imul(h,16777619)>>>0}
+           let r=h;const rnd=()=>((r=(Math.imul(r,1103515245)+12345)>>>0)/4294967296);
+           const g=[];for(let y=0;y<8;y++){let a='';for(let i=0;i<4;i++)a+=rnd()<.55?'c':'.';g.push(a+[...a].reverse().join(''))}
+           g[3]=g[3].replace(/^.(.*).$/,'.$1.');return px(g,{c:pal[h%8]})}
+          const FOX=["o......o","oo....oo","oooooooo","owkoowko","oooooooo","owwoowwo",".owwwwo.","..okko.."];
+          $('#lg').src=px(FOX,{o:'#e8802a',w:'#fff',k:'#000'});
+
+          /* ---------- grid ---------- */
+          const PER=24;let P=[],cur=0;const pg=$('#pg');
+          function refresh(){let n;try{n=Host.list()}catch(e){n='[]'}if(n===window.__ls&&pg.firstChild)return;window.__ls=n;try{P=JSON.parse(n)}catch(e){P=[]}draw()}
+          function draw(){
+            const it=P.map((p,i)=>`<div class="s" data-id="${p.id}" style="animation-delay:${Math.min(i%PER,23)*18}ms"><img src="${av(p.name)}" alt=""><span>${esc(p.name)}</span></div>`);
+            it.push(`<div class="s add" id="add"><b>+</b><span>Impor</span></div>`);
+            const n=Math.ceil(it.length/PER);let h='';
+            for(let i=0;i<n;i++)h+=`<div class="pc">${it.slice(i*PER,(i+1)*PER).join('')}</div>`;
+            pg.innerHTML=h;
+            $('#dots').innerHTML=n>1?Array.from({length:n},(_,i)=>'<i></i>').join(''):'';
+            cur=Math.min(cur,n-1);pg.scrollLeft=cur*pg.clientWidth;dots();
+            $('#e').hidden=P.length>0;
+          }
+          function dots(){const d=$('#dots').children;for(let i=0;i<d.length;i++)d[i].className=i===cur?'on':''}
+          pg.addEventListener('scroll',()=>{const i=Math.round(pg.scrollLeft/(pg.clientWidth||1));if(i!==cur){cur=i;dots()}},{passive:true});
+          addEventListener('resize',()=>{pg.scrollLeft=cur*pg.clientWidth});
+          pg.addEventListener('click',e=>{
+            const s=e.target.closest('.s');if(!s)return;
+            if(s.id==='add')return Host.imp();
+            openDt(s.dataset.id);
+          });
+
+          /* ---------- detail ---------- */
+          const DEF={fs:false,or:'auto',res:100,ka:false,st:true,cam:true,mic:true,net:true,ex:true,mn:true,av:true};
+          const TG=['ka','st','cam','mic','net','ex','mn','av'];
+          let id=null,C={...DEF},openD=false;
+          const ORN={auto:'Auto',land:'Landscape',port:'Portrait'},ORS=['auto','land','port'],RES=[100,75,50,35];
+          const ic={
+           fs:'<svg viewBox="0 0 24 24"><path d="M3 9V3h6M15 3h6v6M21 15v6h-6M9 21H3v-6"/></svg>',
+           or:'<svg viewBox="0 0 24 24"><path d="M4 8h16v10H4zM8 4h8"/></svg>',
+           rs:'<svg viewBox="0 0 24 24"><path d="M3 3h18v18H3zM3 12h18M12 3v18"/></svg>',
+           rn:'<svg viewBox="0 0 24 24"><path d="M4 20l1-5L16 4l4 4L9 19zM14 6l4 4"/></svg>',
+           dl:'<svg viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg>',
+           ka:'<svg viewBox="0 0 24 24"><path d="M8 8h8v8H8zM12 2v3M12 19v3M2 12h3M19 12h3"/></svg>',
+           st:'<svg viewBox="0 0 24 24"><path d="M3 6h7l2 3h9v10H3z"/></svg>',
+           cam:'<svg viewBox="0 0 24 24"><path d="M3 7h12v10H3zM15 11l6-3v8l-6-3"/></svg>',
+           mic:'<svg viewBox="0 0 24 24"><path d="M9 3h6v10H9zM5 11v3h14v-3M12 17v4"/></svg>',
+           net:'<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>',
+           ex:'<svg viewBox="0 0 24 24"><path d="M10 14l4-4M8 12l-3 3a3 3 0 0 0 4 4l3-3M16 12l3-3a3 3 0 0 0-4-4l-3 3"/></svg>',
+           mn:'<svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>',
+           av:'<svg viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+           rst:'<svg viewBox="0 0 24 24"><path d="M4 4v6h6M4 10a8 8 0 1 1 2 6"/></svg>'};
+          function sz(b){return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':b<1073741824?(b/1048576).toFixed(1)+' MB':(b/1073741824).toFixed(2)+' GB'}
+          function saveC(){try{Host.setCfg(id,JSON.stringify(C))}catch(e){}}
+          const oo=v=>v?'ON':'OFF';
+          const T=(o,lb,on,em)=>`<button class="ob${on?' on':''}" data-o="${o}">${ic[o]}${lb}<em>${em}</em></button>`;
+          const SC=(t,a)=>`<div class="sc"><small>${t}</small><div class="sg">${a.join('')}</div></div>`;
+          function ops(){
+            $('#ops').innerHTML=
+             SC('Tampilan',[T('fs','Layar penuh',C.fs,oo(C.fs)),T('or','Orientasi',C.or!=='auto',ORN[C.or]),T('rs','Resolusi',C.res!==100,C.res+'%'),T('ka','Tetap nyala',C.ka,oo(C.ka))])+
+             SC('Izin',[T('st','Penyimpanan',C.st,oo(C.st)),T('cam','Kamera',C.cam,oo(C.cam)),T('mic','Mikrofon',C.mic,oo(C.mic)),T('net','Internet',C.net,oo(C.net))])+
+             SC('Perilaku',[T('ex','Tautan luar',C.ex,oo(C.ex)),T('mn','Menu game',C.mn,oo(C.mn)),T('av','Auto-unlock',C.av,oo(C.av))])+
+             SC('Data',[`<button class="ob rd" data-o="rst">${ic.rst}Reset data</button>`,`<button class="ob" data-o="rn">${ic.rn}Ganti nama</button>`,`<button class="ob rd" data-o="dl">${ic.dl}Hapus</button>`]);
+          }
+          function openDt(i){
+            const p=P.find(x=>x.id===i);if(!p)return;id=i;
+            let f={};try{f=JSON.parse(Host.info(i))}catch(e){}
+            try{C=Object.assign({},DEF,JSON.parse(Host.cfg(i)))}catch(e){C={...DEF}}
+            $('#dn').textContent=p.name;$('#dnm').textContent=p.name;$('#da').src=av(p.name);
+            const t=(f.title||'').trim();$('#dtt').textContent=t&&t!==p.name?t:'';$('#dtt').hidden=!($('#dtt').textContent);
+            $('#mt').innerHTML=
+             `<div><small>Ukuran</small><b>${sz(f.size||0)}</b></div>`+
+             `<div><small>Berkas</small><b>${f.files||0}</b></div>`+
+             `<div><small>Diubah</small><b>${f.mod?new Date(f.mod).toLocaleDateString('id-ID',{day:'numeric',month:'short',year:'numeric'}):'-'}</b></div>`+
+             `<div><small>index.html</small><b>${f.entry?'Ada':'Tidak ada'}</b></div>`;
+            ops();$('#dt').classList.add('on');openD=true;
+          }
+          function closeDt(){$('#dt').classList.remove('on');openD=false;$('#go').classList.remove('on')}
+          $('#bk').onclick=closeDt;
+          addEventListener('foxlback',e=>{
+            if($('#rd').classList.contains('on')){e.preventDefault();$('#rd').classList.remove('on')}
+            else if(openD){e.preventDefault();closeDt()}
+          });
+
+          /* ---------- reset data per projek ---------- */
+          const RK=[['l','Simpanan lokal','save game, skor, setelan halaman'],['i','Database (IndexedDB)','data besar / offline'],['c','Cache & service worker','aset tersimpan halaman'],['ck','Cookie',''],['cf','Pengaturan projek','layar, izin, dll kembali default']];
+          let R={l:1,i:1,c:1,ck:1,cf:0};
+          function rdDraw(){
+            const p=P.find(x=>x.id===id);
+            $('#rb').innerHTML=`<h2>Reset data</h2><p>${esc(p?p.name:'')}. File projek tidak dihapus. Tutup projek dulu kalau sedang berjalan.</p>`+
+             RK.map(k=>`<button class="ck${R[k[0]]?' on':''}" data-k="${k[0]}"><i></i><span>${k[1]}${k[2]?`<small>${k[2]}</small>`:''}</span></button>`).join('')+
+             `<div class="rr"><button class="bt" data-a="x">Batal</button><button class="bt rd" data-a="ok">Reset</button></div>`;
+          }
+          function openRd(){R={l:1,i:1,c:1,ck:1,cf:0};rdDraw();$('#rd').classList.add('on')}
+          $('#rb').addEventListener('click',e=>{
+            const k=e.target.closest('.ck');
+            if(k){R[k.dataset.k]=R[k.dataset.k]?0:1;rdDraw();return}
+            const b=e.target.closest('.bt');if(!b)return;
+            $('#rd').classList.remove('on');
+            if(b.dataset.a!=='ok')return;
+            const m=(R.l?'l':'')+(R.i?'i':'')+(R.c?'cs':'');
+            if(m||R.ck||R.cf)Host.resetData(id,m,!!R.ck,!!R.cf);
+          });
+          window.__rd=cf=>{if(cf&&id)openDt(id)};
+          $('#ops').addEventListener('click',e=>{
+            const b=e.target.closest('.ob');if(!b)return;const o=b.dataset.o;
+            if(o==='fs'){C.fs=!C.fs;saveC();ops()}
+            else if(o==='or'){C.or=ORS[(ORS.indexOf(C.or)+1)%3];saveC();ops()}
+            else if(o==='rs'){C.res=RES[(RES.indexOf(C.res)+1)%RES.length];saveC();ops()}
+            else if(TG.includes(o)){C[o]=!C[o];saveC();ops()}
+            else if(o==='rst')openRd();
+            else if(o==='rn'){const p=P.find(x=>x.id===id);const n=prompt('Nama baru',p.name);if(n&&n.trim()){Host.rename(id,n.trim());refresh();openDt(id)}}
+            else if(o==='dl'){const p=P.find(x=>x.id===id);if(confirm('Hapus "'+p.name+'"?')){Host.drop(id);closeDt();refresh()}}
+          });
+
+          /* ---------- Play: ripple + partikel + wipe ---------- */
+          const play=$('#play');
+          play.addEventListener('click',e=>{
+            if(!id||play.dataset.b)return;play.dataset.b=1;
+            const r=play.getBoundingClientRect(),x=e.clientX||r.left+r.width/2,y=e.clientY||r.top+r.height/2;
+            const d=Math.max(r.width,r.height)*2,rp=document.createElement('span');rp.className='rp';
+            rp.style.cssText=`width:${d}px;height:${d}px;left:${x-r.left-d/2}px;top:${y-r.top-d/2}px`;play.appendChild(rp);setTimeout(()=>rp.remove(),650);
+            const cs=getComputedStyle(document.documentElement),cols=['--ah','--y','--al','--t'].map(v=>cs.getPropertyValue(v).trim()).concat('#fff');
+            for(let i=0;i<18;i++){const q=document.createElement('i');q.className='pt';q.style.cssText=`left:${x-4}px;top:${y-4}px;background:${cols[i%5]};box-shadow:2px 2px 0 #000`;document.body.appendChild(q);
+              const a=Math.random()*Math.PI*2,m=60+Math.random()*110;
+              q.animate([{transform:'translate(0,0) scale(1)',opacity:1},{transform:`translate(${Math.cos(a)*m}px,${Math.sin(a)*m-30}px) scale(0)`,opacity:0}],{duration:520+Math.random()*260,easing:'cubic-bezier(.1,.7,.3,1)'}).onfinish=()=>q.remove()}
+            navigator.vibrate&&navigator.vibrate(18);
+            const go=$('#go');go.style.left=(r.left+r.width/2)+'px';go.style.top=(r.top+r.height/2)+'px';
+            go.style.setProperty('--k',Math.hypot(innerWidth,innerHeight)/18);
+            setTimeout(()=>go.classList.add('on'),120);
+            setTimeout(()=>{Host.run(id)},480);
+            setTimeout(()=>{go.classList.remove('on');delete play.dataset.b},1300);
+          });
+
+          function stat(){const o=Host.perm();const b=$('#pm');b.textContent='Akses file: '+(o?'ON':'OFF');b.className=o?'on':''}
+          $('#pm').onclick=()=>{if(!Host.perm())Host.ask()};
+          addEventListener('focus',stat);document.addEventListener('visibilitychange',stat);
+          stat();refresh();
+          </script>
+          <script>
+          (()=>{
+          const $=q=>document.querySelector(q),root=document.documentElement;
+          const K=['b1','b2','al','a','ad','ah','ahr','t','tl','td','y','bgd','pn','pnl','pn2','pn3','mu','glow'];
+          const V={
+          ow:['#7a5230','#6a4627','#5fb02f','#2b6b12','#123a06','#7cff3a','124,255,58','#4a3320','#8a5a2b','#2a1a0c','#fcdb5a','#0b0f06','#1a120a','#3a2a18','#2a1c10','#5a3f22','#8a7a60','#7cff3a'],
+          lc:['#3b5a2f','#32502a','#9bd13c','#3e7d1f','#1a3a0b','#c8ff5a','200,255,90','#35502c','#6c9a45','#1b2e16','#ffb347','#07120c','#0f1d14','#234632','#14281b','#2e5a3c','#7fa88a','#ffb347'],
+          ne:['#7a2a2a','#6a2020','#e05a1a','#b8410f','#5c1a05','#ff8a2a','255,138,42','#5a2222','#9a3a34','#2a0c0c','#ffcf4a','#1a0505','#1f0a0a','#4a1a1a','#2e1010','#6a2a24','#b08078','#ff6a1a'],
+          en:['#2a1745','#1f1038','#b25cf0','#5b2a9a','#2a1252','#d58bff','213,139,255','#231436','#4d2f7a','#0e0818','#e9e08c','#07040f','#120a20','#2d1b4a','#1a0f2e','#3d2766','#9a86b8','#c77dff']};
+          const NM={ow:'OVERWORLD',lc:'LUSH CAVES',ne:'THE NETHER',en:'THE END'},ORD=['ow','lc','ne','en'];
+          const IC={
+          ow:[['gggggggg','gggggggg','dddddddd','dddddddd','dddddddd','dddddddd','dddddddd','dddddddd'],{g:'#5fb02f',d:'#7a5230'}],
+          lc:[['gggggggg','gmmgmmmg','mmommomm','mmmmmmmm','mmmommmm','mommmmom','mmmmmmmm','mmmmmmmm'],{g:'#9bd13c',m:'#35502c',o:'#ffb347'}],
+          ne:[['rrrrrrrr','rroorrrr','rrrrrrro','rorrrrrr','rrrrroor','rrrrrrrr','orrrorrr','rrrrrrrr'],{r:'#7a2a2a',o:'#ff8a2a'}],
+          en:[['kkkkkkkk','kkpppkkk','kpwwwpkk','kpwkwpkk','kpwwwpkk','kkpppkkk','kkkkkkkk','kkkkkkkk'],{k:'#1a0f2a',p:'#c77dff',w:'#e9e08c'}]};
+          const ico={};ORD.forEach(k=>ico[k]=px(IC[k][0],IC[k][1]));
+          const hr=()=>new Date().getHours(),au=h=>h>=6&&h<18?'ow':h>=18&&h<21?'lc':(h>=21||h<3)?'ne':'en';
+          let mode='auto';try{mode=localStorage.getItem('fxTheme')||'auto'}catch(e){}
+          if(mode!=='auto'&&!V[mode])mode='auto';
+          /* ---------- dunia (canvas low-res 4px) ---------- */
+          const cv=$('#wd'),X=cv.getContext('2d'),A=document.createElement('canvas'),B=document.createElement('canvas');
+          let W,H,XA,XB,F=[],pt=null,tr=null,cur,last=0;
+          function size(){W=Math.ceil(innerWidth/4);H=Math.ceil(innerHeight/4);[cv,A,B].forEach(c=>{c.width=W;c.height=H});XA=A.getContext('2d');XB=B.getContext('2d')}
+          const hx=s=>[1,3,5].map(i=>parseInt(s.substr(i,2),16)),mx=(a,b,t)=>{a=hx(a);b=hx(b);return'rgb('+a.map((v,i)=>v+(b[i]-v)*t|0)+')'};
+          const R=(c,col,x,y,w,h,a)=>{c.globalAlpha=a==null?1:a;c.fillStyle=col;c.fillRect(x|0,y|0,Math.max(1,w|0),Math.max(1,h|0));c.globalAlpha=1};
+          const G=(c,a,b)=>{const g=c.createLinearGradient(0,0,0,H);g.addColorStop(0,a);g.addColorStop(1,b);c.fillStyle=g;c.fillRect(0,0,W,H)};
+          const nz=i=>{const s=Math.sin(i*127.1)*43758.5453;return s-Math.floor(s)};
+          const S={
+          ow(c,t){let h=hr()+new Date().getMinutes()/60;if(h<6||h>=18)h=12;const f=(h-6)/12,st=[0,.15,.75,1],tp=['#f08a5d','#3f8fe6','#3f8fe6','#5a3f8a'],bt=['#ffd08a','#a8dcff','#a8dcff','#ff9a6a'],i=f<.15?0:f<.75?1:2,u=(f-st[i])/(st[i+1]-st[i]);
+           G(c,mx(tp[i],tp[i+1],u),mx(bt[i],bt[i+1],u));
+           const sx=f*W,sy=H*.5-Math.sin(f*Math.PI)*H*.32;R(c,'#fff6a0',sx-7,sy-7,14,14,.25);R(c,'#fff6a0',sx-4,sy-4,8,8);
+           for(let i=0;i<6;i++){const cx=(t*5+i*W/5)%(W+40)-20,cy=H*.1+nz(i)*H*.18;R(c,'#fff',cx,cy,18,4,.9);R(c,'#fff',cx+4,cy-3,10,3,.9)}
+           [['#5aa83a',.74,.025,0],['#3f8a26',.8,.04,2]].forEach(([col,b,fq,o])=>{for(let x=0;x<W;x++){const y=H*b+Math.sin(x*fq+o)*6;R(c,col,x,y,1,H-y)}});
+           for(let i=0;i<7;i++){const x=(i*W/6+8)|0,y=H*.8+Math.sin(x*.04+2)*6;R(c,'#6b4a2a',x,y-9,2,9);R(c,'#2f7a1e',x-4,y-16,10,8);R(c,'#3c9526',x-2,y-19,6,4)}},
+          lc(c,t){G(c,'#07130d','#17402a');
+           for(let i=0;i<3;i++){const x=W*(.2+i*.3)+Math.sin(t*.4+i)*6;c.globalAlpha=.07;c.fillStyle='#d8ffb0';c.beginPath();c.moveTo(x,0);c.lineTo(x+14,0);c.lineTo(x+40,H);c.lineTo(x+8,H);c.fill();c.globalAlpha=1}
+           for(let x=0;x<W;x+=5){const l=4+nz(x)*16;R(c,'#2a3a2c',x,0,4,l);R(c,'#3d5a40',x,l,2,3)}
+           for(let i=0;i<9;i++){const x=nz(i+3)*W|0,l=14+nz(i)*H*.3;R(c,'#2f8a3a',x,0,1,l);R(c,'#ffb347',x-2,l-1,5,5,.12);R(c,'#ffb347',x-1,l,3,3,.6+.4*Math.sin(t*3+i))}
+           const wy=H*.9;R(c,'#1f7a8a',0,wy,W,H-wy,.85);for(let x=0;x<W;x+=6)R(c,'#6fd0d8',x+Math.sin(t*2+x)*2,wy,3,1,.7);R(c,'#3a6a2a',0,H-3,W,3);
+           const ax=(t*7)%(W+30)-15,ay=wy+4+Math.sin(t*2)*2;R(c,'#f4a7c0',ax,ay,8,3);R(c,'#f4a7c0',ax+8,ay-1,4,4);R(c,'#e0608a',ax-1,ay-2,2,2);R(c,'#e0608a',ax+9,ay-2,1,2);R(c,'#000',ax+11,ay,1,1)},
+          ne(c,t){G(c,'#260606','#7a1a05');
+           for(let x=0;x<W;x+=4){const l=8+nz(x*.7)*H*.22;R(c,'#3a0d0d',x,0,4,l);R(c,'#52140f',x,l,3,2)}
+           for(let i=0;i<3;i++){const x=W*(.15+i*.35);R(c,'#14090a',x,H*.55,9,H);R(c,'#241012',x,H*.55,2,H)}
+           for(let x=0;x<W;x++){const y=H*.9+Math.sin(x*.2+t*2)*1.5;R(c,'#ff6a1a',x,y,1,H-y);R(c,'#ffd04a',x,y,1,1)}
+           const gx=(t*4)%(W+50)-25,gy=H*.3+Math.sin(t*.8)*6;R(c,'#e8e8f0',gx,gy,14,14);R(c,'#555',gx+3,gy+5,2,3);R(c,'#555',gx+9,gy+5,2,3);for(let i=0;i<4;i++)R(c,'#dcdce8',gx+1+i*3,gy+14,2,3+Math.sin(t*3+i)*2)},
+          en(c,t){G(c,'#05020b','#180b2c');
+           for(let i=0;i<70;i++)R(c,'#fff',nz(i)*W,nz(i+9)*H*.8,1,1,.3+.7*Math.abs(Math.sin(t*1.5+i)));
+           for(let i=0;i<3;i++){const x=W*(.18+i*.32),y=H*.45+i%2*H*.1+Math.sin(t*.7+i)*3;R(c,'#d9d28a',x,y,26,4);R(c,'#a8a265',x+3,y+4,20,3);R(c,'#6b663f',x+8,y+7,10,4)}
+           for(let i=0;i<4;i++){const x=W*(.1+i*.27),h=H*(.3+nz(i)*.2);R(c,'#120a1e',x,H-h,6,h);R(c,'#c77dff',x+1,H-h-3,4,3,.7+.3*Math.sin(t*4+i))}
+           const dx=((t%26)/26)*(W+80)-40,dy=H*.16+Math.sin(t)*5;R(c,'#1b0f2c',dx,dy,22,5);R(c,'#2a1844',dx+6,dy-6+Math.sin(t*6)*3,4,8);R(c,'#2a1844',dx-4,dy+Math.sin(t*6+1)*3-2,8,3);R(c,'#e040ff',dx+20,dy+1,2,1)}};
+          /* kunang-kunang / bara / debu End: ikut jari */
+          const PC={ow:['#fff6a0',10,0],lc:['#ffe27a',44,0],ne:['#ff8a2a',50,1],en:['#d58bff',40,2]};
+          const mk=(x,y,l)=>({x,y,vx:(Math.random()-.5)*2,vy:(Math.random()-.5)*2,p:Math.random()*6,l});
+          function parts(c,k,t){const o=PC[k];for(let i=F.length-1;i>=0;i--){const f=F[i];
+           if(o[2]===1){f.y-=.25+f.p%1*.3;f.x+=Math.sin(t*2+f.p)*.2;if(f.y<-2){f.y=H+2;f.x=Math.random()*W}}
+           else{f.vx+=(Math.random()-.5)*.08;f.vy+=(Math.random()-.5)*.08-(o[2]===2?.004:0);f.vx*=.96;f.vy*=.96;
+            if(pt){const dx=pt.x-f.x,dy=pt.y-f.y,d=Math.hypot(dx,dy);if(d<50&&d>1){f.vx+=dx/d*.06;f.vy+=dy/d*.06}}
+            f.x+=f.vx;f.y+=f.vy;if(f.x<0)f.x=W;if(f.x>W)f.x=0;if(f.y<0)f.y=H;if(f.y>H)f.y=0}
+           if(f.l&&--f.l<=0){F.splice(i,1);continue}
+           const a=.35+.65*Math.abs(Math.sin(t*2.2+f.p*3));R(c,o[0],f.x-1,f.y-1,3,3,a*.2);R(c,o[0],f.x,f.y,1,1,a)}}
+          const ez=u=>u<.5?2*u*u:1-2*(1-u)*(1-u);
+          function frame(n){requestAnimationFrame(frame);if(document.hidden||n-last<33)return;last=n;const t=n/1000;
+           if(tr){const u=ez(Math.max(0,Math.min(1,(n-tr.s-150)/1000)));S[tr.a](XA,t);S[tr.b](XB,t);X.fillStyle='#000';X.fillRect(0,0,W,H);const sy=Math.sin(u*Math.PI)*3;X.drawImage(A,-u*W*tr.d,sy);X.drawImage(B,(1-u)*W*tr.d,sy)}
+           else S[cur](X,t);
+           parts(X,tr?tr.b:cur,t)}
+          /* ---------- tema ---------- */
+          function tex(k){const c=document.createElement('canvas');c.width=c.height=16;const x=c.getContext('2d'),v=V[k],cs=[v[7],v[8],v[9]];let r=k.charCodeAt(0)*977;const rn=()=>((r=(Math.imul(r,1103515245)+12345)>>>0)/4294967296);
+           x.fillStyle=v[7];x.fillRect(0,0,16,16);x.globalAlpha=.55;for(let i=0;i<60;i++){x.fillStyle=cs[rn()*3|0];x.fillRect(rn()*16|0,rn()*16|0,1+(rn()*2|0),1)}
+           x.globalAlpha=.8;x.fillStyle=v[10];for(let i=0;i<3;i++)x.fillRect(rn()*16|0,rn()*16|0,1,1);return'url('+c.toDataURL()+')'}
+          function setT(k){K.forEach((n,i)=>root.style.setProperty('--'+n,V[k][i]));root.style.setProperty('--tex',tex(k));$('#th').innerHTML='<img src="'+ico[k]+'">';
+           F=Array.from({length:PC[k][1]},()=>mk(Math.random()*W,Math.random()*H,0))}
+          const v=n=>getComputedStyle(root).getPropertyValue(n).trim();
+          const bl=()=>{fx.querySelectorAll('i').forEach(e=>e.remove());let h='';for(let i=0;i<7;i++)h+='<i style="left:'+Math.random()*90+'%;top:'+Math.random()*100+'%;width:'+(10+Math.random()*50)+'%;height:'+(2+Math.random()*14)+'px;background:'+['#f0f','#0ff','#fff',v('--ah')][i%4]+';opacity:.7"></i>';fx.insertAdjacentHTML('beforeend',h)};
+          function glitch(ms){const g=$('#gd'),tb=$('#gt'),s=performance.now();(function f(n){const e=n-s;if(e>ms){document.body.style.filter='';g.setAttribute('scale',0);return}
+           const k=Math.sin(Math.PI*e/ms),o=k*(3+Math.random()*9)|0;g.setAttribute('scale',Math.random()<.65?k*(20+Math.random()*70):0);tb.setAttribute('baseFrequency','0 '+(.02+Math.random()*.7));
+           document.body.style.filter='url(#gf) drop-shadow('+o+'px 0 #f0f8) drop-shadow('+(-o)+'px 0 #0ff8)';if(Math.random()<.5)bl();requestAnimationFrame(f)})(s)}
+          function go(k){if(k===cur||tr)return;const a=cur,d=ORD.indexOf(k)>ORD.indexOf(a)?1:-1;$('#ft').textContent=NM[k];fx.className='on';navigator.vibrate&&navigator.vibrate([25,40,25,40,60]);
+           glitch(1100);tr={a,b:k,s:performance.now(),d};setTimeout(()=>setT(k),480);
+           setTimeout(()=>{fx.className='';fx.querySelectorAll('i').forEach(e=>e.remove());cur=k;tr=null},1550)}
+          /* ---------- UI ---------- */
+          document.body.insertAdjacentHTML('beforeend','<div id="tm"></div><div id="fx"><b class="lb t"></b><b class="lb b"></b><h2 id="ft"></h2></div><svg width="0" height="0" style="position:absolute"><filter id="gf" x="0" y="0" width="100%" height="100%"><feTurbulence id="gt" type="fractalNoise" baseFrequency="0 .5" numOctaves="1"/><feDisplacementMap id="gd" in="SourceGraphic" scale="0" xChannelSelector="R" yChannelSelector="G"/></filter></svg>');
+          const tm=$('#tm'),fx=$('#fx'),th=$('#th');
+          function menu(){tm.innerHTML=[['auto','Otomatis (waktu)',null]].concat(ORD.map(k=>[k,NM[k],ico[k]])).map(([k,n,i])=>'<button data-k="'+k+'" class="'+(mode===k?'on':'')+'">'+(i?'<img src="'+i+'">':'<b style="width:26px;text-align:center">&#9684;</b>')+n+'</button>').join('')}
+          th.onclick=e=>{e.stopPropagation();menu();tm.classList.toggle('on')};
+          document.addEventListener('click',e=>{if(!e.target.closest('#tm'))tm.classList.remove('on')});
+          tm.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;mode=b.dataset.k;try{localStorage.setItem('fxTheme',mode)}catch(_){}tm.classList.remove('on');go(mode==='auto'?au(hr()):mode)});
+          addEventListener('foxlback',e=>{if(tm.classList.contains('on')){e.preventDefault();tm.classList.remove('on')}});
+          const pp=e=>{pt={x:e.clientX/4,y:e.clientY/4}};
+          document.addEventListener('pointermove',pp,{passive:true});
+          document.addEventListener('pointerdown',e=>{pp(e);for(let i=0;i<6;i++)F.push(mk(pt.x,pt.y,300))},{passive:true});
+          ['pointerup','pointercancel'].forEach(t=>document.addEventListener(t,()=>{pt=null}));
+          $('#lg').onclick=e=>{e.currentTarget.animate([{transform:'none'},{transform:'translateY(-12px) rotate(-10deg)'},{transform:'none'}],{duration:420,easing:'cubic-bezier(.3,1.6,.5,1)'});const r=e.currentTarget.getBoundingClientRect();for(let i=0;i<10;i++)F.push(mk((r.left+r.width/2)/4,(r.top+r.height/2)/4,240))};
+          setInterval(()=>{if(mode==='auto')go(au(hr()))},30000);
+          document.addEventListener('visibilitychange',()=>{if(!document.hidden){refresh();if(mode==='auto')go(au(hr()))}});
+          size();addEventListener('resize',size);
+          cur=mode==='auto'?au(hr()):mode;setT(cur);requestAnimationFrame(frame);
+          })();
+          </script></body></html>
+          EOF
+
+          cat > $D/app/src/main/assets/menu.js <<'EOF'
+          (function(){
+          if(window.top!==window||window.__fxm)return;window.__fxm=1;
+          var RES=[100,75,50,35],ORS=[['auto','Auto'],['land','Landscape'],['port','Portrait']];
+          function go(){
+            if(!window.Host||!Host.state)return;
+            var st;try{st=JSON.parse(Host.state())}catch(e){return}
+            var h=document.createElement('div');
+            h.style.cssText='all:initial;position:fixed;top:0;right:0;width:0;height:0;z-index:2147483647';
+            var r=h.attachShadow({mode:'open'});
+            r.innerHTML='<style>'+
+            '*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}'+
+            '#w{position:fixed;top:50%;right:0;transform:translateY(-50%);font:17px/1.15 "VT323",monospace;color:#fff;pointer-events:none}'+
+            '#in{display:flex;align-items:center;transform-origin:right center;transform:translateX(calc(100% - 16px)) scale(var(--z,1));transition:transform .28s cubic-bezier(.2,.9,.2,1)}'+
+            '#w.o #in{transform:translateX(0) scale(var(--z,1))}'+
+            'button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}'+
+            '#b{flex:0 0 auto;width:16px;min-height:64px;display:flex;align-items:center;justify-content:center;background:#4a3320;border:3px solid #000;border-right:0;box-shadow:inset 2px 2px 0 #8a5a2b,inset -2px -2px 0 #2a1a0c;pointer-events:auto}'+
+            '#b:active{filter:brightness(.85)}'+
+            '#b i{display:block;width:3px;height:16px;background:#fcdb5a;box-shadow:0 7px 0 #fcdb5a,0 -7px 0 #fcdb5a;transition:transform .25s}'+
+            '#w.o #b i{transform:rotate(90deg)}'+
+            '#p{width:218px;max-height:78vh;overflow:auto;background:#1a120af2;border:3px solid #000;box-shadow:inset 0 0 0 2px #5a3f22;pointer-events:none}'+
+            '#w.o #p{pointer-events:auto}'+
+            '.g>button{width:100%;display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#4a3320;border-bottom:3px solid #000;text-shadow:2px 2px 0 #000;font-size:19px}'+
+            '.g>button::after{content:"\\25B8";color:#fcdb5a;transition:transform .2s}'+
+            '.g.o>button::after{transform:rotate(90deg)}'+
+            '.gb{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s}.g.o .gb{grid-template-rows:1fr}'+
+            '.gb>div{overflow:hidden;min-height:0;display:flex;flex-wrap:wrap;gap:6px;padding:0 10px}'+
+            '.g.o .gb>div{padding:10px}'+
+            '.c{flex:1 1 auto;min-width:46px;padding:6px 8px;background:#2a1c10;border:3px solid #000;box-shadow:inset 2px 2px 0 #5a3f22;text-align:center;transition:transform .12s}'+
+            '.c:active{transform:scale(.9)}.c.on{background:#2b6b12;box-shadow:inset 2px 2px 0 #5fb02f,inset -2px -2px 0 #123a06;color:#b6ff8a}'+
+            '.c.rd{background:#6b1c12}'+
+            '#f{position:fixed;top:calc(6px + env(safe-area-inset-top,0px));left:6px;background:#000c;color:#7cff3a;padding:2px 8px;font:19px "VT323",monospace;display:none;pointer-events:none}'+
+            '</style>'+
+            '<div id="f"></div>'+
+            '<div id="w"><div id="in"><button id="b"><i></i></button><div id="p">'+
+             '<div class="g" id="g1"><button>Resolusi</button><div class="gb"><div id="rs"></div></div></div>'+
+             '<div class="g" id="g2"><button>Layar</button><div class="gb"><div id="ly"></div></div></div>'+
+             '<div class="g" id="g3"><button>Alat</button><div class="gb"><div id="al"></div></div></div>'+
+            '</div></div></div>';
+            function $(s){return r.querySelector(s)}
+            var w=$('#w'),idle;
+            function dim(){clearTimeout(idle);idle=setTimeout(function(){w.classList.remove('o')},5000)}
+            function scale(){w.style.setProperty('--z',(st.res||100)/100)}
+            function build(){
+              $('#rs').innerHTML=RES.map(function(n){return '<button class="c'+(st.res===n?' on':'')+'" data-r="'+n+'">'+n+'%</button>'}).join('');
+              $('#ly').innerHTML='<button class="c'+(st.fs?' on':'')+'" data-f="1" style="flex-basis:100%">Layar penuh: '+(st.fs?'ON':'OFF')+'</button>'+
+                ORS.map(function(o){return '<button class="c'+(st.or===o[0]?' on':'')+'" data-o="'+o[0]+'">'+o[1]+'</button>'}).join('')+
+                '<button class="c'+(st.ka?' on':'')+'" data-k="1" style="flex-basis:100%">Layar menyala: '+(st.ka?'ON':'OFF')+'</button>';
+              $('#al').innerHTML='<button class="c'+(fpsOn?' on':'')+'" data-a="fps" style="flex-basis:100%">Penghitung FPS: '+(fpsOn?'ON':'OFF')+'</button>'+
+                '<button class="c" data-a="rl" style="flex-basis:100%">Muat ulang</button>'+
+                '<button class="c rd" data-a="ex" style="flex-basis:100%">Kembali ke Hub</button>';
+              scale();
+            }
+            var fpsOn=false,fr=0,ft=0,raf;
+            function loop(t){fr++;if(t-ft>=500){$('#f').textContent=Math.round(fr*1000/(t-ft))+' FPS';fr=0;ft=t}raf=requestAnimationFrame(loop)}
+            function fps(on){fpsOn=on;$('#f').style.display=on?'block':'none';cancelAnimationFrame(raf);if(on){fr=0;ft=performance.now();raf=requestAnimationFrame(loop)}}
+            $('#b').onclick=function(){w.classList.toggle('o');dim()};
+            r.addEventListener('click',function(e){
+              var g=e.target.closest('.g>button');
+              if(g){var p=g.parentNode,was=p.classList.contains('o');
+                ['g1','g2','g3'].forEach(function(i){$('#'+i).classList.remove('o')});
+                if(!was)p.classList.add('o');dim();return}
+              var c=e.target.closest('.c');if(!c)return;dim();
+              if(c.dataset.r){st.res=+c.dataset.r;Host.hRes(st.res)}
+              else if(c.dataset.f){st.fs=!st.fs;Host.hFs(st.fs)}
+              else if(c.dataset.k){st.ka=!st.ka;Host.hKa(st.ka)}
+              else if(c.dataset.o){st.or=c.dataset.o;Host.hOri(st.or)}
+              else if(c.dataset.a==='fps')fps(!fpsOn);
+              else if(c.dataset.a==='rl')Host.hReload();
+              else if(c.dataset.a==='ex')Host.hExit();
+              build();
+            });
+            ['pointerdown','pointerup','touchstart','touchend','mousedown','mouseup','click'].forEach(function(t){h.addEventListener(t,function(e){e.stopPropagation()})});
+            build();dim();
+            (document.body||document.documentElement).appendChild(h);
+            setInterval(function(){if(!h.isConnected)(document.body||document.documentElement).appendChild(h)},2000);
+          }
+          if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',go);else go();
+          })();
+          EOF
+
+          cat > $D/app/src/main/java/app/foxl/OpenActivity.java <<'EOF'
+          package app.foxl;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.database.Cursor;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.provider.OpenableColumns;
+          import android.widget.Toast;
+          import org.json.JSONObject;
+          import java.io.*;
+          import java.util.*;
+          import java.util.regex.*;
+
+          // Terima HTML/ZIP dari app mana pun (Open with / Share), impor ke Hub, lalu langsung jalankan.
+          public class OpenActivity extends Activity {
+            String cfg;
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              final Intent in = getIntent();
+              new Thread(() -> {
+                String id = null;
+                try { id = take(in); } catch (Exception e) {}
+                final String r = id;
+                runOnUiThread(() -> {
+                  if (r == null) Toast.makeText(this, "Tidak ada HTML yang bisa dibuka", Toast.LENGTH_SHORT).show();
+                  else go(r);
+                  finish();
+                });
+              }).start();
+            }
+
+            void go(String id) {
+              Intent it = new Intent(this, P.class).putExtra("p", id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+              try {
+                JSONObject c = new JSONObject(MainActivity.read(new FileInputStream(new File(new File(new File(getFilesDir(), "projects"), id), ".cfg"))));
+                it.putExtra("fs", c.optBoolean("fs", false)).putExtra("or", c.optString("or", "auto")).putExtra("res", c.optInt("res", 100));
+              } catch (Exception e) {}
+              startActivity(it);
+            }
+
+            String take(Intent in) throws Exception {
+              List<Uri> L = new ArrayList<>();
+              if (Intent.ACTION_VIEW.equals(in.getAction()) && in.getData() != null) L.add(in.getData());
+              else {
+                Uri one = in.getParcelableExtra(Intent.EXTRA_STREAM);
+                if (one != null) L.add(one);
+                ArrayList<Uri> many = in.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+                if (many != null) L.addAll(many);
+                android.content.ClipData cd = in.getClipData();
+                if (L.isEmpty() && cd != null) for (int i = 0; i < cd.getItemCount(); i++) if (cd.getItemAt(i).getUri() != null) L.add(cd.getItemAt(i).getUri());
+              }
+              String first = null;
+              for (Uri u : L) { String id = save(u); if (first == null) first = id; }
+              if (first == null) { CharSequence t = in.getCharSequenceExtra(Intent.EXTRA_TEXT); if (t != null) first = saveText(t.toString()); }
+              return first;
+            }
+
+            static boolean htmlish(String t) {
+              t = t.toLowerCase();
+              return t.contains("<html") || t.contains("<!doctype html") || t.contains("<script") || t.contains("<body");
+            }
+
+            File fresh(String base) {
+              String id = base.toLowerCase().replaceAll("[^a-z0-9]+", "-").replaceAll("^-|-$", "");
+              if (id.isEmpty()) id = "app";
+              File d = new File(new File(getFilesDir(), "projects"), id);
+              cfg = null;
+              try { cfg = MainActivity.read(new FileInputStream(new File(d, ".cfg"))); } catch (Exception e) {}
+              if (d.exists()) MainActivity.del(d);
+              d.mkdirs();
+              return d;
+            }
+
+            void done(File d, String base) throws IOException {
+              if (cfg != null) MainActivity.wf(new File(d, ".cfg"), cfg);
+              MainActivity.wf(new File(d, ".name"), base);
+              d.setLastModified(System.currentTimeMillis());
+            }
+
+            String save(Uri u) throws Exception {
+              String n = null;
+              try (Cursor c = getContentResolver().query(u, null, null, null, null)) {
+                if (c != null && c.moveToFirst()) { int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME); if (i >= 0) n = c.getString(i); }
+              } catch (Exception e) {}
+              if (n == null || n.isEmpty()) n = u.getLastPathSegment() == null ? "app" : u.getLastPathSegment();
+              n = n.substring(n.lastIndexOf('/') + 1);
+              String lo = n.toLowerCase(), mt = String.valueOf(getContentResolver().getType(u)).toLowerCase();
+              boolean zip = lo.endsWith(".zip") || mt.contains("zip");
+              boolean hn = lo.endsWith(".html") || lo.endsWith(".htm") || mt.contains("html");
+              if (!zip && !hn) {
+                InputStream s = getContentResolver().openInputStream(u);
+                byte[] h = new byte[4096];
+                int k = s.read(h);
+                s.close();
+                if (k <= 0 || !htmlish(new String(h, 0, k, "UTF-8"))) return null;
+              }
+              String base = n.replaceAll("\\.[^.]*$", "");
+              File d = fresh(base);
+              InputStream is = getContentResolver().openInputStream(u);
+              if (zip) { MainActivity.unzip(is, d); is.close(); MainActivity.fix(d); }
+              else MainActivity.cp(is, new File(d, "index.html"), true);
+              done(d, base);
+              return d.getName();
+            }
+
+            String saveText(String t) throws Exception {
+              if (!htmlish(t)) return null;
+              Matcher m = Pattern.compile("<title[^>]*>([^<]+)</title>", Pattern.CASE_INSENSITIVE).matcher(t);
+              String base = m.find() ? m.group(1).trim() : "Shared " + new java.text.SimpleDateFormat("HHmmss").format(new Date());
+              File d = fresh(base);
+              MainActivity.wf(new File(d, "index.html"), t);
+              done(d, base);
+              return d.getName();
+            }
+          }
+          EOF
+
+          cat > $D/app/src/main/res/xml/shortcuts.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+            <share-target android:targetClass="app.foxl.OpenActivity">
+              <data android:mimeType="text/html"/>
+              <data android:mimeType="application/xhtml+xml"/>
+              <data android:mimeType="application/zip"/>
+              <data android:mimeType="text/plain"/>
+              <category android:name="app.foxl.share.HTML"/>
+            </share-target>
+          </shortcuts>
+          EOF
+
+          cat > $D/app/src/main/res/xml/fp.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+            <root-path name="r" path="."/>
+          </paths>
+          EOF
+
+          python3 - <<'PY'
+          g=["o......o","oo....oo","oooooooo","owkoowko","oooooooo","owwoowwo",".owwwwo.","..okko.."]
+          C={'o':'#e8802a','w':'#ffffff','k':'#000000'}
+          s='<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="12" android:viewportHeight="12">'
+          s+='<path android:fillColor="#7a5230" android:pathData="M0,0h12v12h-12z"/><path android:fillColor="#5fb02f" android:pathData="M0,0h12v1.5h-12z"/>'
+          for c,col in C.items():
+              d=''.join('M%d,%dh1v1h-1z'%(x+2,y+2) for y,r in enumerate(g) for x,ch in enumerate(r) if ch==c)
+              s+='<path android:fillColor="%s" android:pathData="%s"/>'%(col,d)
+          open('hub/app/src/main/res/drawable/ic.xml','w').write(s+'</vector>')
+          PY
+
+      - name: Keystore (cache, dibuat sekali)
+        uses: actions/cache@v4
+        with:
+          path: ks.jks
+          key: foxl-keystore-v1
+
+      - name: Buat keystore jika belum ada
+        run: |
+          [ -f ks.jks ] || keytool -genkeypair -keystore ks.jks -storepass foxlhub -keypass foxlhub \
+            -alias k -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=Foxle Hub"
+
+      - name: Build release APK
+        working-directory: hub
+        env:
+          KS: ${{ github.workspace }}/ks.jks
+        run: gradle assembleRelease --console=plain
+
+      - name: Rename
+        run: |
+          cp hub/app/build/outputs/apk/release/app-release.apk FoxleHub.apk
+          ls -l FoxleHub.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FoxleHub
+          path: FoxleHub.apk
+          if-no-files-found: error
