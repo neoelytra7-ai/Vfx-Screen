@@ -294,8 +294,9 @@ jobs:
             }
 
             // JS auto-unlock buat HTML terenkripsi: cari input password + tombol, isi password, lalu submit.
-            // Cuma jalan kalau halaman keliatan seperti vault (meta fx-vault ATAU ada skrip dekripsi),
-            // polling max ~9 detik buat form yang baru muncul setelah load, dan submit sekali saja (anti-loop kalau salah).
+            // Deteksi vault dilonggarin: meta fx-vault, ATAU skrip (inline/eksternal via src) yang mengandung
+            // kata kunci enkripsi, ATAU fallback cuma ada 1 password input di halaman (toggle ini memang opt-in).
+            // Polling max ~20 detik buat form yang baru muncul setelah load, submit sekali saja (anti-loop kalau salah).
             String vaultJs() {
               return
               "(function(){try{" +
@@ -304,9 +305,13 @@ jobs:
               "function pwi(){var a=document.querySelectorAll('input[type=password]');for(var i=0;i<a.length;i++)if(a[i].getClientRects().length)return a[i];return null}" +
               "function isV(){" +
               "if(document.querySelector('meta[name=fx-vault]'))return 1;" +
+              "var re=/crypto[.]subtle|AES-GCM|AES-CBC|PBKDF2|decrypt|vault/i;" +
               "var s=document.scripts,t='';" +
-              "for(var i=0;i<s.length;i++)t+=(s[i].textContent||'').slice(0,300000);" +
-              "return /crypto[.]subtle|AES-GCM|AES-CBC|PBKDF2|decrypt/i.test(t)}" +
+              "for(var i=0;i<s.length;i++){t+=(s[i].textContent||'').slice(0,300000);if(s[i].src)t+=s[i].src}" +
+              "if(re.test(t))return 1;" +
+              "if(re.test(document.title+' '+(document.body?document.body.className:'')))return 1;" +
+              "var pw=document.querySelectorAll('input[type=password]');" +
+              "return pw.length===1}" +
               "function setv(i,v){" +
               "var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');" +
               "d.set.call(i,v);" +
@@ -326,9 +331,11 @@ jobs:
               "else{['keydown','keypress','keyup'].forEach(function(t){i.dispatchEvent(new KeyboardEvent(t,{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}))});" +
               "if(i.form&&i.form.requestSubmit)i.form.requestSubmit()}" +
               "return 1}" +
+              "var mo=new MutationObserver(function(){if(!done&&go()){done=1;mo.disconnect();clearInterval(t)}});" +
+              "try{mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true})}catch(e){}" +
               "var t=setInterval(function(){" +
-              "if(done||++n>60){clearInterval(t);return}" +
-              "if(go()){done=1;clearInterval(t)}" +
+              "if(done||++n>134){clearInterval(t);mo.disconnect();return}" +
+              "if(go()){done=1;clearInterval(t);mo.disconnect()}" +
               "},150);" +
               "}catch(e){}})();";
             }
