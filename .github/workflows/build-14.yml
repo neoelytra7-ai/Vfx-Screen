@@ -1,0 +1,1312 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      KS_B64: ${{ secrets.KEYSTORE_B64 }}
+      KS_PASS: ${{ secrets.KS_PASS || 'infinitepath' }}
+      KS_ALIAS: ${{ secrets.KS_ALIAS || 'key' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Generate native Android project (heredoc)
+        run: |
+          set -e
+          P=android/app/src/main
+          mkdir -p $P/java/com/infinitepath/app $P/res/xml $P/res/values $P/res/drawable $P/res/mipmap-anydpi android/app
+
+          cat > android/settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "InfinitePath"
+          include(":app")
+          EOF
+
+          cat > android/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > android/gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
+          kotlin.code.style=official
+          EOF
+
+          cat > android/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          val verCode = (project.findProperty("verCode") as String?)?.toIntOrNull() ?: 1
+          val ghRepo = (project.findProperty("ghRepo") as String?) ?: "owner/repo"
+          android {
+              namespace = "com.infinitepath.app"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.infinitepath.app"
+                  minSdk = 29
+                  targetSdk = 34
+                  versionCode = verCode
+                  versionName = "1.0.$verCode"
+                  buildConfigField("String", "GH_REPO", "\"$ghRepo\"")
+              }
+              buildFeatures { buildConfig = true }
+              signingConfigs {
+                  create("rel") {
+                      storeFile = file(System.getenv("KS_FILE") ?: "../../ci.jks")
+                      storePassword = System.getenv("KS_PASS") ?: "infinitepath"
+                      keyAlias = System.getenv("KS_ALIAS") ?: "key"
+                      keyPassword = System.getenv("KS_PASS") ?: "infinitepath"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.getByName("rel")
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF
+
+          cat > $P/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+              <application
+                  android:label="Infinite Path"
+                  android:icon="@mipmap/ic_launcher"
+                  android:theme="@style/AppTheme"
+                  android:hardwareAccelerated="true"
+                  android:largeHeap="true"
+                  android:allowBackup="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="sensorLandscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="${applicationId}.fp"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths" />
+                  </provider>
+              </application>
+          </manifest>
+          EOF
+
+          cat > $P/res/xml/file_paths.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <external-files-path name="dl" path="Download/" />
+          </paths>
+          EOF
+
+          cat > $P/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+                  <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > $P/res/values/colors.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_bg">#1B2A49</color>
+          </resources>
+          EOF
+
+          cat > $P/res/drawable/ic_fg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FFD54A"
+                  android:pathData="M54,30m-10,0a10,10 0,1 1,20 0a10,10 0,1 1,-20 0" />
+              <path android:fillColor="#2E9E72"
+                  android:pathData="M22,78L44,46L58,64L68,52L86,78Z" />
+          </vector>
+          EOF
+
+          cat > $P/res/mipmap-anydpi/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_bg" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
+          EOF
+
+          cat > $P/java/com/infinitepath/app/World.kt <<'EOF'
+          package com.infinitepath.app
+
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.nio.FloatBuffer
+          import java.util.concurrent.ConcurrentHashMap
+          import kotlin.math.abs
+          import kotlin.math.floor
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.pow
+          import kotlin.math.sqrt
+
+          class TreeInfo(val kind: Int, val h: Int, val th: Int)
+
+          class MeshData(val cx: Int, val cz: Int, val v: FloatBuffer, val n: Int, val w: FloatBuffer?, val wn: Int)
+
+          private class FB {
+              var a = FloatArray(1 shl 15)
+              var n = 0
+              fun add(x: Float, y: Float, z: Float, r: Float, g: Float, b: Float) {
+                  if (n + 6 > a.size) a = a.copyOf(a.size * 2)
+                  a[n] = x; a[n + 1] = y; a[n + 2] = z; a[n + 3] = r; a[n + 4] = g; a[n + 5] = b
+                  n += 6
+              }
+
+              fun quad(
+                  x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float,
+                  x2: Float, y2: Float, z2: Float, x3: Float, y3: Float, z3: Float,
+                  r: Float, g: Float, b: Float
+              ) {
+                  add(x0, y0, z0, r, g, b); add(x1, y1, z1, r, g, b); add(x2, y2, z2, r, g, b)
+                  add(x0, y0, z0, r, g, b); add(x2, y2, z2, r, g, b); add(x3, y3, z3, r, g, b)
+              }
+
+              fun box(x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, r: Float, g: Float, b: Float) {
+                  quad(x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1, r, g, b)
+                  quad(x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0, r * .78f, g * .78f, b * .78f)
+                  quad(x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1, r * .78f, g * .78f, b * .78f)
+                  quad(x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y1, z0, r * .62f, g * .62f, b * .62f)
+                  quad(x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0, r * .62f, g * .62f, b * .62f)
+              }
+
+              fun buf(): FloatBuffer {
+                  val bb = ByteBuffer.allocateDirect(n * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+                  bb.put(a, 0, n); bb.flip()
+                  return bb
+              }
+          }
+
+          class World(var seed: Int = 1) {
+              val sea = 14
+              val CS = 16
+              private val none = TreeInfo(0, 0, 0)
+              private val tc = ConcurrentHashMap<Long, TreeInfo>()
+
+              private fun hash(x: Int, z: Int, s: Int): Int {
+                  var n = x * 374761393 + z * 668265263 + s * 1274126177 + seed * 362437
+                  n = (n xor (n ushr 13)) * 1274126177
+                  return n xor (n ushr 16)
+              }
+
+              private fun hf(x: Int, z: Int, s: Int): Float = (hash(x, z, s) and 0xFFFFFF) / 16777215f
+
+              private fun vn(x: Float, z: Float, s: Int): Float {
+                  val xi = floor(x).toInt(); val zi = floor(z).toInt()
+                  val fx = x - xi; val fz = z - zi
+                  val u = fx * fx * (3f - 2f * fx); val v = fz * fz * (3f - 2f * fz)
+                  val a = hf(xi, zi, s); val b = hf(xi + 1, zi, s); val c = hf(xi, zi + 1, s); val d = hf(xi + 1, zi + 1, s)
+                  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v
+              }
+
+              private fun fbm(x: Float, z: Float, o: Int, s: Int): Float {
+                  var a = 0f; var amp = .5f; var f = 1f; var t = 0f
+                  for (i in 0 until o) { a += vn(x * f, z * f, s + i) * amp; t += amp; amp *= .5f; f *= 2f }
+                  return a / t
+              }
+
+              fun height(x: Int, z: Int): Int {
+                  val n = fbm(x * .011f, z * .011f, 5, 1)
+                  val r = 1f - abs(fbm(x * .02f + 50f, z * .02f, 3, 9) * 2f - 1f)
+                  val m = fbm(x * .004f, z * .004f, 2, 20)
+                  val e = (n * .7f + r * r * .5f * m).coerceIn(0f, 1.2f)
+                  return (2f + e.pow(1.5f) * 48f).toInt()
+              }
+
+              fun hg(x: Float, z: Float): Float = height(floor(x).toInt(), floor(z).toInt()) + 1f
+
+              fun tree(x: Int, z: Int): TreeInfo? {
+                  val k = (x.toLong() shl 32) xor (z.toLong() and 0xffffffffL)
+                  val c = tc[k]
+                  if (c != null) return if (c === none) null else c
+                  val h = height(x, z)
+                  var t: TreeInfo? = null
+                  if (h > sea + 1 && h < 38) {
+                      val dens = if (fbm(x * .03f, z * .03f, 2, 5) > .5f) .05f else .008f
+                      if (hf(x, z, 77) < dens) t = TreeInfo(1, h, 4 + (hf(x, z, 78) * 4).toInt())
+                      else if (hf(x, z, 79) < .012f) t = TreeInfo(2, h, 0)
+                  }
+                  if (tc.size > 300000) tc.clear()
+                  tc[k] = t ?: none
+                  return t
+              }
+
+              /** jarak bebas ke permukaan terdekat (di luar radius r); o = arah dorong keluar */
+              fun clr(x: Float, y: Float, z: Float, r: Float, o: FloatArray): Float {
+                  var top = -1e9f
+                  val x0 = floor(x - r * .5f).toInt(); val x1 = floor(x + r * .5f).toInt()
+                  val z0 = floor(z - r * .5f).toInt(); val z1 = floor(z + r * .5f).toInt()
+                  for (a in x0..x1) for (b in z0..z1) top = max(top, height(a, b) + 1f)
+                  top = max(top, sea + 1f)
+                  var best = y - top - r
+                  o[0] = 0f; o[1] = 1f; o[2] = 0f
+                  if (y > 37f + r) return best
+                  val ax = floor(x - 6.7f).toInt(); val bx = floor(x + 6.7f).toInt()
+                  val az = floor(z - 6.7f).toInt(); val bz = floor(z + 6.7f).toInt()
+                  for (tx in ax..bx) for (tz in az..bz) {
+                      val t = tree(tx, tz) ?: continue
+                      val dx = x - (tx + .5f); val dz = z - (tz + .5f)
+                      if (t.kind == 1) {
+                          var dy = y - (t.h + t.th + .9f)
+                          var l = sqrt(dx * dx + dy * dy + dz * dz)
+                          var d = l - 4.3f - r
+                          if (d < best) { best = d; if (l < 1e-4f) l = 1f; o[0] = dx / l; o[1] = dy / l; o[2] = dz / l }
+                          val qy = min(t.h + t.th + 1f, max(t.h + 1f, y))
+                          dy = y - qy
+                          l = sqrt(dx * dx + dy * dy + dz * dz)
+                          d = l - .9f - r
+                          if (d < best) { best = d; if (l < 1e-4f) l = 1f; o[0] = dx / l; o[1] = dy / l; o[2] = dz / l }
+                      } else {
+                          val dy = y - (t.h + 1f)
+                          var l = sqrt(dx * dx + dy * dy + dz * dz)
+                          val d = l - 2f - r
+                          if (d < best) { best = d; if (l < 1e-4f) l = 1f; o[0] = dx / l; o[1] = dy / l; o[2] = dz / l }
+                      }
+                  }
+                  return best
+              }
+
+              private fun topColor(h: Int, x: Int, z: Int, c: FloatArray) {
+                  val j = hf(x, z, 5) * .08f
+                  when {
+                      h <= sea + 1 -> { c[0] = .76f; c[1] = .70f; c[2] = .50f }
+                      h > 42 -> { c[0] = .92f; c[1] = .94f; c[2] = .96f }
+                      h > 30 -> { c[0] = .45f; c[1] = .43f; c[2] = .40f }
+                      else -> { val t = (h - sea) / 18f; c[0] = .20f + .10f * t; c[1] = .46f + .08f * t; c[2] = .12f + .06f * t }
+                  }
+                  c[0] += j; c[1] += j; c[2] += j
+              }
+
+              fun build(cx: Int, cz: Int): MeshData {
+                  val fb = FB()
+                  val c = FloatArray(3)
+                  val x0 = cx * CS; val z0 = cz * CS
+                  var anyWater = false
+                  for (lx in 0 until CS) for (lz in 0 until CS) {
+                      val x = x0 + lx; val z = z0 + lz
+                      val h = height(x, z)
+                      if (h <= sea) anyWater = true
+                      topColor(h, x, z, c)
+                      if (h < sea) { c[0] *= .55f; c[1] *= .65f; c[2] *= .7f }
+                      val y = h + 1f
+                      val xf = x.toFloat(); val zf = z.toFloat()
+                      fb.quad(xf, y, zf, xf + 1, y, zf, xf + 1, y, zf + 1, xf, y, zf + 1, c[0], c[1], c[2])
+                      val sr = if (h > 30) .40f else .38f; val sg = if (h > 30) .38f else .28f; val sb = if (h > 30) .36f else .18f
+                      val nh0 = height(x, z - 1); val nh1 = height(x, z + 1); val nh2 = height(x - 1, z); val nh3 = height(x + 1, z)
+                      if (nh0 < h) { val yb = nh0 + 1f; fb.quad(xf, yb, zf, xf + 1, yb, zf, xf + 1, y, zf, xf, y, zf, sr * .8f, sg * .8f, sb * .8f) }
+                      if (nh1 < h) { val yb = nh1 + 1f; fb.quad(xf, yb, zf + 1, xf + 1, yb, zf + 1, xf + 1, y, zf + 1, xf, y, zf + 1, sr * .8f, sg * .8f, sb * .8f) }
+                      if (nh2 < h) { val yb = nh2 + 1f; fb.quad(xf, yb, zf, xf, yb, zf + 1, xf, y, zf + 1, xf, y, zf, sr * .62f, sg * .62f, sb * .62f) }
+                      if (nh3 < h) { val yb = nh3 + 1f; fb.quad(xf + 1, yb, zf, xf + 1, yb, zf + 1, xf + 1, y, zf + 1, xf + 1, y, zf, sr * .62f, sg * .62f, sb * .62f) }
+                  }
+                  for (x in x0 until x0 + CS) for (z in z0 until z0 + CS) {
+                      val t = tree(x, z) ?: continue
+                      val xf = x.toFloat(); val zf = z.toFloat(); val yb = t.h + 1f
+                      val j = hf(x, z, 6) * .12f
+                      if (t.kind == 1) {
+                          fb.box(xf + .15f, yb, zf + .15f, xf + .85f, yb + t.th, zf + .85f, .36f, .25f, .14f)
+                          val cy = yb + t.th
+                          fb.box(xf - 1.5f, cy - 2f, zf - 1.5f, xf + 2.5f, cy, zf + 2.5f, .12f + j, .38f + j, .10f)
+                          fb.box(xf - 2.5f, cy - 1f, zf - 2.5f, xf + 3.5f, cy + 1f, zf + 3.5f, .14f + j, .42f + j, .11f)
+                          fb.box(xf - 1.5f, cy + 1f, zf - 1.5f, xf + 2.5f, cy + 3f, zf + 2.5f, .16f + j, .46f + j, .12f)
+                          fb.box(xf, cy + 3f, zf, xf + 1f, cy + 4f, zf + 1f, .18f + j, .5f + j, .13f)
+                      } else {
+                          fb.box(xf - .6f, yb, zf - .6f, xf + 1.6f, yb + 1.6f, zf + 1.6f, .15f + j, .40f + j, .10f)
+                      }
+                  }
+                  var wb: FloatBuffer? = null; var wn = 0
+                  if (anyWater) {
+                      val w = FB(); val y = sea + 1f - .08f
+                      val xa = x0.toFloat(); val za = z0.toFloat(); val xb = xa + CS; val zb = za + CS
+                      w.quad(xa, y, za, xb, y, za, xb, y, zb, xa, y, zb, .10f, .36f, .50f)
+                      wb = w.buf(); wn = w.n / 6
+                  }
+                  return MeshData(cx, cz, fb.buf(), fb.n / 6, wb, wn)
+              }
+          }
+          EOF
+
+          cat > $P/java/com/infinitepath/app/Cinematic.kt <<'EOF'
+          package com.infinitepath.app
+
+          import java.util.Random
+          import kotlin.math.PI
+          import kotlin.math.abs
+          import kotlin.math.atan
+          import kotlin.math.atan2
+          import kotlin.math.ceil
+          import kotlin.math.cos
+          import kotlin.math.exp
+          import kotlin.math.floor
+          import kotlin.math.hypot
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.pow
+          import kotlin.math.sin
+          import kotlin.math.tan
+
+          fun lp(a: Float, b: Float, t: Float) = a + (b - a) * t
+          fun ss(a: Float, b: Float, x: Float): Float { val t = ((x - a) / (b - a)).coerceIn(0f, 1f); return t * t * (3f - 2f * t) }
+
+          fun crp(P: List<FloatArray>, s: Float, o: FloatArray) {
+              val n = P.size - 1
+              val f = s.coerceIn(0f, 1f) * n
+              val i = min(n - 1, floor(f).toInt())
+              val t = f - i
+              val p0 = P[max(0, i - 1)]; val p1 = P[i]; val p2 = P[i + 1]; val p3 = P[min(n, i + 2)]
+              val t2 = t * t; val t3 = t2 * t
+              for (j in 0..2) o[j] = .5f * (2f * p1[j] + (-p0[j] + p2[j]) * t + (2f * p0[j] - 5f * p1[j] + 4f * p2[j] - p3[j]) * t2 + (-p0[j] + 3f * p1[j] - 3f * p2[j] + p3[j]) * t3)
+          }
+
+          class Path(val P: List<FloatArray>) {
+              private val M = max(8, (P.size - 1) * 24)
+              private val pos = Array(M + 1) { FloatArray(3) }
+              private val cum = FloatArray(M + 1)
+              val len: Float
+
+              init {
+                  val o = FloatArray(3)
+                  for (i in 0..M) {
+                      crp(P, i / M.toFloat(), o)
+                      System.arraycopy(o, 0, pos[i], 0, 3)
+                      if (i > 0) cum[i] = cum[i - 1] + hypot(hypot(o[0] - pos[i - 1][0], o[1] - pos[i - 1][1]), o[2] - pos[i - 1][2])
+                  }
+                  len = max(cum[M], 1e-3f)
+              }
+
+              fun at(s: Float, out: FloatArray) {
+                  val L = s.coerceIn(0f, 1f) * len
+                  var a = 0; var b = M
+                  while (b - a > 1) { val m = (a + b) shr 1; if (cum[m] <= L) a = m else b = m }
+                  val f = (L - cum[a]) / max(1e-6f, cum[b] - cum[a])
+                  for (j in 0..2) out[j] = pos[a][j] + (pos[b][j] - pos[a][j]) * f
+              }
+          }
+
+          class Ev(val k: Int, val t: Float, val w: Float, val a: Float = 0f, val ox: Float = 0f, val oy: Float = 0f, val oz: Float = 0f, val f: Float = 0f, val s: Float = 0f)
+
+          class Shot(
+              val path: Path, val T: List<FloatArray>, val sp: FloatArray, val fov: Float, val dur: Float, val ease: Int,
+              val bank: Float, val shake: Float, val camR: Float, val dolly: Float, val z0: Float, val z1: Float,
+              val dtc: Float, val ev: List<Ev>, val tag: String, val name: String, val ax: Float, val az: Float,
+              val ptsX: FloatArray, val ptsZ: FloatArray
+          )
+
+          class Pose { var x = 0f; var y = 0f; var z = 0f; var yaw = 0f; var pit = 0f; var roll = 0f; var fov = 1f }
+
+          class Planner(private val w: World) {
+              private val co = FloatArray(3)
+              private val names1 = arrayOf("Hutan", "Lembah", "Punggung", "Pesisir", "Kabut", "Fajar", "Senja", "Sungai", "Padang", "Bukit")
+              private val names2 = arrayOf("Sunyi", "Emas", "Biru", "Purba", "Lengang", "Hijau", "Perak", "Jauh")
+              private val rigNames = arrayOf("ORBIT", "HELIX", "SERPENTINE", "FPV", "ARC DOLLY", "ROCKET", "TOP-DOWN SPIRAL", "VERTIGO", "RIDGE-REVEAL")
+              private val hist = ArrayList<Int>()
+
+              private fun smH(x: Float, z: Float): Float {
+                  var s = 0f
+                  for (a in -2..2) for (b in -2..2) s += w.hg(x + a * 6f, z + b * 6f)
+                  return s / 25f
+              }
+
+              private fun base(x: Float, z: Float) = max(smH(x, z), w.sea + 1f)
+
+              private fun mkA(n: Int, f: (Float) -> FloatArray): MutableList<FloatArray> {
+                  val l = ArrayList<FloatArray>()
+                  for (i in 0 until n) l.add(f(i / (n - 1).toFloat()))
+                  return l
+              }
+
+              private fun relax(P: List<FloatArray>, r: Float, mg: Float, it: Int) {
+                  fun push(p: FloatArray, m: Float) {
+                      val d = w.clr(p[0], p[1], p[2], r, co)
+                      if (d < m) { val f = (m - d) * .75f; p[0] += co[0] * f; p[1] += co[1] * f; p[2] += co[2] * f }
+                  }
+                  val n = P.size
+                  for (k in 0 until it) {
+                      for (i in 0 until n) push(P[i], mg)
+                      if (k < it - 1) for (i in 1 until n - 1) {
+                          val p = P[i]; val a = P[i - 1]; val b = P[i + 1]
+                          for (j in 0..2) p[j] += ((a[j] + b[j]) * .5f - p[j]) * .3f
+                      }
+                  }
+                  for (k in 0 until 4) for (i in 0 until n) push(P[i], mg * .6f)
+              }
+
+              private fun pathMin(pa: Path, r: Float): Float {
+                  var m = 1e9f
+                  val n = max(40, ceil(pa.len / 1.8f).toInt())
+                  val o = FloatArray(3)
+                  for (i in 0..n) { pa.at(i / n.toFloat(), o); val d = w.clr(o[0], o[1], o[2], r, co); if (d < m) m = d }
+                  return m
+              }
+
+              fun make(i: Int, seed: Int, prevX: Float, prevZ: Float): Shot {
+                  val r = Random((i * 7919L + seed * 131L + 17L))
+                  fun rf() = r.nextFloat()
+                  // pilih rig, hindari pengulangan
+                  var ri: Int
+                  do { ri = r.nextInt(rigNames.size) } while (hist.contains(ri))
+                  hist.add(ri); if (hist.size > 3) hist.removeAt(0)
+                  val ang = rf() * 6.283f; val ds = 140f + rf() * 220f
+                  val bx = prevX + cos(ang) * ds; val bz = prevZ + sin(ang) * ds
+                  var best = -1e9f; var X = bx; var Z = bz
+                  for (k in 0 until 14) {
+                      val x = bx + (rf() - .5f) * 160f; val z = bz + (rf() - .5f) * 160f; val h = w.hg(x, z)
+                      val s = if (ri == 2 || ri == 3 || ri == 5 || ri == 8) abs(w.hg(x + 40, z) - w.hg(x - 40, z)) + abs(w.hg(x, z + 40) - w.hg(x, z - 40)) + h * .3f
+                      else h - abs(w.hg(x + 25, z) - h) * 2f
+                      if (s > best) { best = s; X = x; Z = z }
+                  }
+                  val hd = rf() * 6.283f; val fx = cos(hd); val fz = sin(hd); val qx = -fz; val qz = fx
+                  val h0 = w.hg(X, Z); val ph = rf() * 6.283f
+                  var P: MutableList<FloatArray> = ArrayList(); var T: MutableList<FloatArray> = ArrayList()
+                  var fov = 1f; var bank = .5f; var shake = .4f; var camR = 1.15f; var dolly = 0f; var ease = -1; var dk = 1f
+                  var sp = floatArrayOf(X, h0 + 4f, Z)
+                  when (ri) {
+                      0 -> { // ORBIT
+                          val R0 = 26f + rf() * 40f; val R1 = R0 * (.55f + rf() * 1.1f); val t0 = rf() * 6.283f
+                          val sw = (1.3f + rf() * 3.2f) * (if (rf() < .5f) 1f else -1f); val a0 = 5f + rf() * 16f; val a1 = a0 + (rf() - .35f) * 34f
+                          val sj = 2f + rf() * 9f; val wb = 1f + rf() * 2f; sp = floatArrayOf(X, h0 + sj, Z)
+                          P = mkA(16) { t -> val R = lp(R0, R1, t); val a = t0 + sw * t; val x = X + cos(a) * R; val z = Z + sin(a) * R; floatArrayOf(x, base(x, z) + lp(a0, a1, t) + sin(t * 6.283f * wb) * 4f, z) }
+                          T = mkA(5) { t -> floatArrayOf(X + sin(t * 3 + ph) * 3, sp[1] + cos(t * 2) * 2, Z + cos(t * 3) * 3) }
+                          fov = .9f; bank = .55f; shake = .4f
+                      }
+                      1 -> { // HELIX
+                          val up = rf() < .7f; val R0 = 14f + rf() * 20f; val R1 = R0 + 30f + rf() * 40f; val t0 = rf() * 6.283f
+                          val sw = (2f + rf() * 3.4f) * (if (rf() < .5f) 1f else -1f); val a0 = 3f + rf() * 3f; val a1 = 45f + rf() * 60f
+                          sp = floatArrayOf(X, h0 + 3f + rf() * 6f, Z)
+                          P = mkA(20) { t -> val q = if (up) t else 1 - t; val R = lp(R0, R1, q); val a = t0 + sw * t; val x = X + cos(a) * R; val z = Z + sin(a) * R; floatArrayOf(x, base(x, z) + lp(a0, a1, q * q * (3 - 2 * q)), z) }
+                          T = mkA(4) { t -> floatArrayOf(X, sp[1] + t * 6f, Z) }
+                          fov = .95f; bank = .35f; shake = .3f; ease = 3
+                      }
+                      2, 3 -> { // SERPENTINE / FPV
+                          val fpv = ri == 3
+                          val L = if (fpv) 220f + rf() * 110f else 130f + rf() * 120f
+                          val A = if (fpv) 18f + rf() * 24f else 10f + rf() * 26f
+                          val cy = if (fpv) 1.5f + rf() * 1.3f else .9f + rf() * .9f
+                          val p0 = rf() * 6.283f; val a0 = if (fpv) 4f + rf() * 5f else 10f + rf() * 30f; val da = (rf() - .5f) * 20f
+                          val pf = { t: Float ->
+                              val d = t * L; val sw = sin(p0 + t * 6.283f * cy) * A * min(1f, t * 4f + .3f)
+                              val x = X + fx * d + qx * sw; val z = Z + fz * d + qz * sw
+                              floatArrayOf(x, base(x, z) + a0 + (if (fpv) sin(t * 9 + p0) * 2.5f else da * t), z)
+                          }
+                          P = mkA(if (fpv) 26 else 18, pf)
+                          val la = if (fpv) .07f else .16f
+                          T = mkA(if (fpv) 26 else 18) { t -> val q = pf(t + la); floatArrayOf(q[0], if (fpv) q[1] + 1.5f else q[1] - (q[1] - base(q[0], q[2])) * .55f, q[2]) }
+                          fov = if (fpv) 1.5f + rf() * .25f else 1.05f; bank = if (fpv) 1.5f else .9f; shake = if (fpv) .7f else .45f
+                          if (fpv) { dk = .68f; ease = 2 }
+                          sp = floatArrayOf(X + fx * L * .5f, h0 + 4f, Z + fz * L * .5f)
+                      }
+                      4 -> { // ARC DOLLY (tele)
+                          val R = 22f + rf() * 26f; val t0 = rf() * 6.283f; val sw = (.8f + rf() * .7f) * (if (rf() < .5f) 1f else -1f); val a0 = 3.5f + rf() * 7f
+                          sp = floatArrayOf(X, h0 + 2f + rf() * 8f, Z)
+                          P = mkA(8) { t -> val a = t0 + sw * t; val x = X + cos(a) * R; val z = Z + sin(a) * R; floatArrayOf(x, base(x, z) + a0 + sin(t * 3) * 1.2f, z) }
+                          T = mkA(4) { t -> floatArrayOf(X + sin(t * 2) * 1.5f, sp[1], Z + cos(t * 2) * 1.5f) }
+                          fov = .32f + rf() * .2f; bank = .25f; shake = .55f
+                      }
+                      5 -> { // ROCKET
+                          val R0 = 10f + rf() * 10f; val R1 = R0 + 14f + rf() * 20f; val t0 = rf() * 6.283f; val sw = (1.2f + rf() * 1.4f) * (if (rf() < .5f) 1f else -1f); val top = 80f + rf() * 40f
+                          sp = floatArrayOf(X, h0 + 4f, Z)
+                          P = mkA(14) { t -> val R = lp(R0, R1, t); val a = t0 + sw * t; val x = X + cos(a) * R; val z = Z + sin(a) * R; floatArrayOf(x, base(x, z) + lp(2.5f, top, t * t * (3 - 2 * t)), z) }
+                          T = mkA(4) { t -> floatArrayOf(X, sp[1] - t * 2, Z) }
+                          fov = 1.1f; bank = .2f; shake = .25f; ease = 3
+                      }
+                      6 -> { // TOP-DOWN SPIRAL
+                          val t0 = rf() * 6.283f; val sw = (2.5f + rf() * 2.6f) * (if (rf() < .5f) 1f else -1f); val R0 = 26f + rf() * 20f; val R1 = R0 + 30f + rf() * 30f
+                          val a0 = 90f + rf() * 40f; val a1 = 26f + rf() * 14f; val hz = rf() * 6.283f
+                          P = mkA(20) { t -> val R = lp(R0, R1, t); val a = t0 + sw * t; val x = X + cos(a) * R; val z = Z + sin(a) * R; floatArrayOf(x, base(x, z) + lp(a0, a1, t), z) }
+                          T = mkA(5) { t -> val q = ss(.15f, 1f, t); floatArrayOf(X + cos(hz) * 120f * q, h0 + lp(0f, 24f, q), Z + sin(hz) * 120f * q) }
+                          fov = 1f; bank = .3f; shake = .2f; ease = 3
+                      }
+                      7 -> { // VERTIGO (dolly zoom)
+                          val d0 = 18f + rf() * 10f; val d1 = d0 * (2.3f + rf() * .9f); val inn = rf() < .5f; val a0 = 5f + rf() * 4f
+                          val bl = (if (rf() < .5f) 1f else -1f) * (8f + rf() * 6f); val ds2 = if (inn) d1 else d0; val de = if (inn) d0 else d1; val f0 = .6f + rf() * .3f
+                          sp = floatArrayOf(X, h0 + 6f + rf() * 8f, Z)
+                          P = mkA(7) { t -> val d = lp(ds2, de, t); val x = X - fx * d + qx * sin(t * 3.1416f) * bl; val z = Z - fz * d + qz * sin(t * 3.1416f) * bl; floatArrayOf(x, base(x, z) + a0 + t * 3f, z) }
+                          T = mkA(3) { floatArrayOf(sp[0], sp[1], sp[2]) }
+                          fov = f0; bank = .15f; shake = .25f; dolly = tan(f0 / 2f) * (if (inn) d1 else d0); ease = 3
+                      }
+                      else -> { // RIDGE-REVEAL
+                          val sg = if (rf() < .5f) 1f else -1f
+                          val ax = X - fx * 20f; val az = Z - fz * 20f; val bx2 = X + fx * 70f; val bz2 = Z + fz * 70f
+                          val lat = sg * (25f + rf() * 20f); val cx = (ax + bx2) / 2 + qx * lat; val cz = (az + bz2) / 2 + qz * lat; val h1 = 22f + rf() * 14f
+                          fun bzr(a: Float, b: Float, d: Float, t: Float) = (1 - t) * (1 - t) * a + 2 * (1 - t) * t * b + t * t * d
+                          P = mkA(14) { t -> val x = bzr(ax, cx, bx2, t); val z = bzr(az, cz, bz2, t); floatArrayOf(x, base(x, z) + lp(2.4f, h1, t * t * (3 - 2 * t)), z) }
+                          T = mkA(6) { t -> val x = lp(ax + fx * 60f, bx2 + fx * 170f, t); val z = lp(az + fz * 60f, bz2 + fz * 170f, t); floatArrayOf(x, base(x, z) + lp(8f, -4f, t), z) }
+                          fov = 1f; bank = .5f; shake = .35f; ease = 3
+                          sp = floatArrayOf(bx2 + fx * 60f, h0, bz2 + fz * 60f)
+                      }
+                  }
+                  // ---- validasi: relaksasi + swept-sphere; naikkan jalur kalau perlu ----
+                  camR = 1.15f
+                  var ok = false
+                  var cp = P
+                  for (att in 0 until 7) {
+                      if (att > 0) cp = P.map { it.copyOf() }.toMutableList()
+                      val lift = if (att >= 3) (att - 2) * 9f else 0f
+                      if (lift > 0) for (p in cp) p[1] += lift
+                      relax(cp, camR, camR * .8f + .9f, 10)
+                      val pa = Path(cp)
+                      if (pathMin(pa, camR) >= .12f) { P = cp as MutableList<FloatArray>; ok = true; break }
+                  }
+                  if (!ok) {
+                      P = mkA(14) { t -> val a = ph + 4 * t; val x = X + cos(a) * 70f; val z = Z + sin(a) * 70f; floatArrayOf(x, base(x, z) + 55f, z) }
+                      T = mkA(3) { floatArrayOf(X, h0 + 4f, Z) }
+                      relax(P, camR, camR * .8f + .9f, 30); fov = .9f; dolly = 0f; sp = floatArrayOf(X, h0 + 4f, Z)
+                  }
+                  val pa = Path(P)
+                  // ---- program lensa & event ----
+                  val ev = ArrayList<Ev>(); val tag = StringBuilder(rigNames[ri])
+                  var z0 = 1f; var z1 = 1f
+                  if (dolly == 0f) {
+                      when (r.nextInt(5)) {
+                          0 -> { z0 = 1.1f + rf() * .1f; z1 = .72f + rf() * .1f; tag.append(" · PUSH-IN") }
+                          1 -> { z0 = .78f + rf() * .1f; z1 = 1.15f + rf() * .1f; tag.append(" · PULL-OUT") }
+                          2 -> { z0 = 1.25f; z1 = 1.25f; tag.append(" · WIDE") }
+                          else -> {}
+                      }
+                  } else tag.append(" · DOLLY-ZOOM")
+                  val nE = (rf() * 3f).toInt() + (if (ri == 3) 1 else 0)
+                  for (k in 0 until nE) {
+                      val t = .18f + rf() * .64f
+                      when (r.nextInt(6)) {
+                          0, 1 -> { ev.add(Ev(0, t, .035f + rf() * .03f, a = .7f + rf() * .5f)); tag.append(" · CRASH-ZOOM") }
+                          2 -> { val a = (if (rf() < .5f) 1f else -1f) * (1.2f + rf() * 1.2f); val dd = 45f + rf() * 70f
+                              ev.add(Ev(1, t, .05f + rf() * .03f, ox = cos(a + ph) * dd, oy = (rf() - .35f) * 20f, oz = sin(a + ph) * dd)); tag.append(" · WHIP-PAN") }
+                          3 -> { ev.add(Ev(2, t, .03f + rf() * .03f, a = .03f + rf() * .05f, f = 25f + rf() * 20f, s = rf() * 6.28f)); tag.append(" · JOLT") }
+                          4 -> { ev.add(Ev(3, t, .12f + rf() * .1f, a = (if (rf() < .5f) 1f else -1f) * (.17f + rf() * .3f))); tag.append(" · DUTCH") }
+                          else -> if (ri == 3 || ri == 5 || rf() < .12f) { ev.add(Ev(4, t, .07f + rf() * .04f, a = (if (rf() < .5f) 1f else -1f) * 6.283f)); tag.append(" · BARREL-ROLL") }
+                      }
+                  }
+                  val dtc = if (rf() < .3f) (if (rf() < .5f) 1f else -1f) * (.08f + rf() * .18f) else 0f
+                  if (ease < 0) ease = r.nextInt(5)
+                  val np = min(8, max(5, ceil(pa.len / 45f).toInt()))
+                  val px = FloatArray(np); val pz = FloatArray(np); val o = FloatArray(3)
+                  for (k in 0 until np) { pa.at(k / (np - 1).toFloat(), o); px[k] = o[0]; pz[k] = o[2] }
+                  val dur = 9f * (.85f + rf() * .3f) * dk
+                  return Shot(pa, T, sp, fov, dur, ease, bank, shake, camR, dolly, z0, z1, dtc, ev, tag.toString(),
+                      names1[r.nextInt(10)] + " " + names2[r.nextInt(8)], X, Z, px, pz)
+              }
+          }
+
+          class CamRig(private val w: World) {
+              private val p = FloatArray(3); private val q = FloatArray(3); private val a = FloatArray(3); private val b = FloatArray(3)
+              private val co = FloatArray(3)
+              private var rollS = 0f
+              private var sfx = 0f; private var sfy = 0f; private var sfz = 0f
+
+              fun ease(u: Float, m: Int): Float = when (m) {
+                  1 -> 1f - (1f - u).pow(2.2f)
+                  2 -> u.pow(1.8f)
+                  3 -> u * u * u * (u * (6f * u - 15f) + 10f)
+                  4 -> u - sin(6.2832f * u) * .09f
+                  else -> u * u * (3f - 2f * u) * .7f + u * .3f
+              }
+
+              private fun wob(t: Float, f: Float, p: Float) = sin(t * f + p) + .5f * sin(t * f * 2.3f + p * 1.7f)
+
+              fun pose(s: Shot, k: Float, t: Float, dt: Float, o: Pose) {
+                  val u = min(1f, t / s.dur)
+                  s.path.at(k, p); crp(s.T, k, q)
+                  val e0 = .012f
+                  s.path.at(max(0f, k - e0), a); s.path.at(min(1f, k + e0), b)
+                  val vx = b[0] - a[0]; val vz = b[2] - a[2]; val ax = b[0] - 2 * p[0] + a[0]; val az = b[2] - 2 * p[2] + a[2]
+                  val vl = hypot(vx, vz).coerceAtLeast(1e-4f)
+                  val cur = 4f * (vx * az - vz * ax) / (vl * vl * vl)
+                  var fovK = lp(s.z0, s.z1, ease(u, 0))
+                  var ro = s.dtc * ss(0f, .25f, u); var yo = 0f; var po = 0f; var ox = 0f; var oy = 0f; var oz = 0f
+                  for (e in s.ev) {
+                      val x = (u - e.t) / e.w; val g = exp(-x * x * 2f); val sw = ss(e.t - e.w, e.t + e.w, u)
+                      when (e.k) {
+                          0 -> fovK *= 1f - .34f * g * e.a
+                          1 -> { ox += e.ox * sw; oy += e.oy * sw; oz += e.oz * sw }
+                          2 -> { val am = e.a * g; yo += sin(t * e.f + e.s) * am; po += sin(t * e.f * 1.3f + e.s * 2) * am * .8f; ro += sin(t * e.f * .9f + e.s * 3) * am * 1.4f }
+                          3 -> ro += e.a * g * 1.6f
+                          4 -> ro += e.a * sw
+                      }
+                  }
+                  val sh = s.shake * .006f
+                  var px = p[0]; var py = p[1]; var pz = p[2]
+                  // jaring pengaman halus (bukan clamp)
+                  val d = w.clr(px, py, pz, s.camR * .55f, co)
+                  var tx = 0f; var ty = 0f; var tz = 0f
+                  if (d < 0f) { tx = co[0] * (-d + .05f); ty = co[1] * (-d + .05f); tz = co[2] * (-d + .05f) }
+                  val kk = 1f - exp(-dt * 6f)
+                  sfx += (tx - sfx) * kk; sfy += (ty - sfy) * kk; sfz += (tz - sfz) * kk
+                  px += sfx + sh * .8f * wob(t, .9f, 7f); py += sfy + sh * .56f * wob(t, 1.1f, 9f); pz += sfz
+                  val dx = q[0] + ox - px; val dy = q[1] + oy - py; val dz = q[2] + oz - pz
+                  val l = hypot(hypot(dx, dy), dz).coerceAtLeast(1e-4f)
+                  o.x = px; o.y = py; o.z = pz
+                  o.yaw = atan2(-dx, -dz) + yo + sh * (.5f * wob(t, 1.7f, 1f) + .27f * wob(t, 5.1f, 2f))
+                  o.pit = (kotlin.math.asin((dy / l).coerceIn(-1f, 1f)) + po + sh * (.43f * wob(t, 1.3f, 3f) + .23f * wob(t, 4.7f, 4f))).coerceIn(-1.45f, 1.45f)
+                  if (s.dolly > 0f) fovK = 2f * atan(s.dolly / max(4f, hypot(hypot(s.sp[0] - px, s.sp[1] - py), s.sp[2] - pz))) / s.fov
+                  o.fov = (s.fov * fovK).coerceIn(.16f, 2.3f)
+                  val bk = (cur * s.bank * 14f).coerceIn(-.6f, .6f)
+                  rollS += (bk + ro + sh * .55f * wob(t, 1.1f, 5f) - rollS) * (1f - exp(-dt * (if (s.bank > 1f) 5f else 3f)))
+                  o.roll = rollS
+              }
+          }
+          EOF
+
+          cat > $P/java/com/infinitepath/app/Renderer.kt <<'EOF'
+          package com.infinitepath.app
+
+          import android.opengl.GLES30 as G
+          import android.opengl.GLSurfaceView
+          import android.opengl.Matrix
+          import java.util.concurrent.Callable
+          import java.util.concurrent.ConcurrentLinkedQueue
+          import java.util.concurrent.Executors
+          import java.util.concurrent.Future
+          import javax.microedition.khronos.egl.EGLConfig
+          import javax.microedition.khronos.opengles.GL10
+          import kotlin.math.abs
+          import kotlin.math.cos
+          import kotlin.math.floor
+          import kotlin.math.hypot
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.sin
+          import kotlin.math.tan
+
+          class Renderer(private val act: MainActivity) : GLSurfaceView.Renderer {
+              val world = World(1)
+              private val planner = Planner(world)
+              private val rig = CamRig(world)
+              private val exec = Executors.newFixedThreadPool(max(2, Runtime.getRuntime().availableProcessors() - 1))
+              private val done = ConcurrentLinkedQueue<MeshData>()
+
+              private class Chunk(val vbo: Int, val n: Int, val wvbo: Int, val wn: Int)
+
+              private val chunks = HashMap<Long, Chunk>()
+              private val pending = HashSet<Long>()
+              private var wanted: List<Long> = emptyList()
+              private var wantKey = Long.MIN_VALUE
+              private var wantStamp = 0L
+
+              @Volatile var moveX = 0f
+              @Volatile var moveY = 0f
+              @Volatile var lookDX = 0f
+              @Volatile var lookDY = 0f
+              @Volatile var cin = false
+              @Volatile var radius = 9
+
+              // kamera
+              private var px = 8f; private var py = 40f; private var pz = 8f
+              private var yaw = .8f; private var pit = -.2f; private var roll = 0f; private var fov = 1.15f
+              private val pose = Pose()
+
+              // sutradara cinematic
+              private var cur: Shot? = null
+              private var nx: Shot? = null
+              private var fut: Future<Shot>? = null
+              private var ct = 0f
+              private var fade = 0f
+              private var shotNo = 0
+              private var anchX = 0f; private var anchZ = 0f
+              private var waitT = 0f
+              private var wasCin = false
+
+              private var progScene = 0; private var progSky = 0; private var progFade = 0
+              private val view = FloatArray(16); private val proj = FloatArray(16); private val mvp = FloatArray(16)
+              private var sw = 1; private var sh = 1
+              private var last = 0L
+              private var fps = 60f
+              private var hudT = 0f
+              private val co = FloatArray(3)
+
+              private val vsScene = """#version 300 es
+          layout(location=0) in vec3 p; layout(location=1) in vec3 c;
+          uniform mat4 m; uniform vec3 cp; out vec3 vc; out float d;
+          void main(){ gl_Position = m*vec4(p,1.); vc = c; d = distance(p,cp); }"""
+              private val fsScene = """#version 300 es
+          precision mediump float;
+          in vec3 vc; in float d; uniform vec3 fogc; uniform float fd, alpha; out vec4 o;
+          void main(){ float f = exp(-pow(d*fd,2.2)); o = vec4(mix(fogc, vc, f), alpha); }"""
+              private val vsSky = """#version 300 es
+          out vec2 nd;
+          void main(){ vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2)); nd = p*2.-1.; gl_Position = vec4(nd,1.,1.); }"""
+              private val fsSky = """#version 300 es
+          precision highp float;
+          in vec2 nd; uniform vec3 R, U, F, sun; uniform vec2 th; out vec4 o;
+          void main(){
+            vec3 d = normalize(F + R*nd.x*th.x + U*nd.y*th.y);
+            float y = clamp(d.y,0.,1.);
+            vec3 hor = vec3(.72,.84,.95), zen = vec3(.20,.42,.84);
+            vec3 c = mix(hor, zen, pow(y,.55));
+            float s = max(dot(d,sun),0.);
+            c += vec3(1.,.85,.6)*(pow(s,600.)*3. + pow(s,12.)*.25);
+            o = vec4(c,1.);
+          }"""
+              private val fsFade = """#version 300 es
+          precision mediump float;
+          uniform float a; out vec4 o;
+          void main(){ o = vec4(0.,0.,0.,a); }"""
+
+              private fun compile(t: Int, src: String): Int {
+                  val s = G.glCreateShader(t); G.glShaderSource(s, src); G.glCompileShader(s)
+                  val ok = IntArray(1); G.glGetShaderiv(s, G.GL_COMPILE_STATUS, ok, 0)
+                  if (ok[0] == 0) throw RuntimeException("shader: " + G.glGetShaderInfoLog(s))
+                  return s
+              }
+
+              private fun prog(v: String, f: String): Int {
+                  val p = G.glCreateProgram()
+                  G.glAttachShader(p, compile(G.GL_VERTEX_SHADER, v)); G.glAttachShader(p, compile(G.GL_FRAGMENT_SHADER, f))
+                  G.glLinkProgram(p)
+                  val ok = IntArray(1); G.glGetProgramiv(p, G.GL_LINK_STATUS, ok, 0)
+                  if (ok[0] == 0) throw RuntimeException("link: " + G.glGetProgramInfoLog(p))
+                  return p
+              }
+
+              override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+                  progScene = prog(vsScene, fsScene); progSky = prog(vsSky, fsSky); progFade = prog(vsSky, fsFade)
+                  G.glEnable(G.GL_DEPTH_TEST)
+                  G.glDisable(G.GL_CULL_FACE)
+                  chunks.clear(); pending.clear(); wantKey = Long.MIN_VALUE
+                  last = System.nanoTime()
+              }
+
+              override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) { sw = w; sh = h; G.glViewport(0, 0, w, h) }
+
+              private fun key(cx: Int, cz: Int) = (cx.toLong() shl 32) or (cz.toLong() and 0xffffffffL)
+              private fun kx(k: Long) = (k shr 32).toInt()
+              private fun kz(k: Long) = k.toInt()
+
+              // ---------- streaming ----------
+              private fun addRing(set: HashMap<Long, Float>, cx: Int, cz: Int, r: Int) {
+                  for (dx in -r..r) for (dz in -r..r) {
+                      val d = hypot(dx.toFloat(), dz.toFloat())
+                      if (d > r) continue
+                      val k = key(cx + dx, cz + dz); val o = set[k]
+                      if (o == null || d < o) set[k] = d
+                  }
+              }
+
+              private fun updateWanted(now: Long) {
+                  val cx = floor(px / 16f).toInt(); val cz = floor(pz / 16f).toInt()
+                  val k = key(cx, cz)
+                  if (k == wantKey && now - wantStamp < 700) return
+                  wantKey = k; wantStamp = now
+                  val set = HashMap<Long, Float>()
+                  addRing(set, cx, cz, radius)
+                  val n = nx
+                  if (n != null) for (i in n.ptsX.indices) addRing(set, floor(n.ptsX[i] / 16f).toInt(), floor(n.ptsZ[i] / 16f).toInt(), if (i == 0) 7 else 4)
+                  wanted = set.entries.sortedBy { it.value }.map { it.key }
+                  // buang yang jauh
+                  val keep = set.keys
+                  val it = chunks.entries.iterator()
+                  while (it.hasNext()) {
+                      val e = it.next()
+                      if (!keep.contains(e.key)) {
+                          val dx = abs(kx(e.key) - cx); val dz = abs(kz(e.key) - cz)
+                          if (max(dx, dz) > radius + 2 || n != null) {
+                              G.glDeleteBuffers(1, intArrayOf(e.value.vbo), 0)
+                              if (e.value.wvbo != 0) G.glDeleteBuffers(1, intArrayOf(e.value.wvbo), 0)
+                              it.remove()
+                          }
+                      }
+                  }
+              }
+
+              private fun pump() {
+                  var budget = 8
+                  for (k in wanted) {
+                      if (budget <= 0 || pending.size >= 10) break
+                      if (chunks.containsKey(k) || pending.contains(k)) continue
+                      pending.add(k); budget--
+                      val cx = kx(k); val cz = kz(k)
+                      exec.execute { try { done.add(world.build(cx, cz)) } catch (e: Throwable) { } }
+                  }
+                  var up = 3
+                  while (up > 0) {
+                      val m = done.poll() ?: break
+                      val k = key(m.cx, m.cz); pending.remove(k)
+                      if (!wanted.contains(k) && chunks.size > 4) continue
+                      val b = IntArray(2)
+                      G.glGenBuffers(2, b, 0)
+                      G.glBindBuffer(G.GL_ARRAY_BUFFER, b[0])
+                      G.glBufferData(G.GL_ARRAY_BUFFER, m.n * 24, m.v, G.GL_STATIC_DRAW)
+                      var wv = 0
+                      if (m.w != null && m.wn > 0) {
+                          G.glBindBuffer(G.GL_ARRAY_BUFFER, b[1])
+                          G.glBufferData(G.GL_ARRAY_BUFFER, m.wn * 24, m.w, G.GL_STATIC_DRAW)
+                          wv = b[1]
+                      } else G.glDeleteBuffers(1, intArrayOf(b[1]), 0)
+                      chunks[k] = Chunk(b[0], m.n, wv, m.wn)
+                      up--
+                  }
+              }
+
+              private fun ready(s: Shot): Boolean {
+                  val cx = floor(s.ptsX[0] / 16f).toInt(); val cz = floor(s.ptsZ[0] / 16f).toInt()
+                  var tot = 0; var ok = 0
+                  for (dx in -6..6) for (dz in -6..6) if (hypot(dx.toFloat(), dz.toFloat()) <= 6f) { tot++; if (chunks.containsKey(key(cx + dx, cz + dz))) ok++ }
+                  return ok >= tot * .98f
+              }
+
+              // ---------- kamera ----------
+              private fun freeStep(dt: Float) {
+                  yaw -= lookDX * .0045f; pit = (pit - lookDY * .0045f).coerceIn(-1.45f, 1.45f); lookDX = 0f; lookDY = 0f
+                  val f = -moveY; val r = moveX; val sp = 16f
+                  px += (-sin(yaw) * f + cos(yaw) * r) * sp * dt
+                  pz += (-cos(yaw) * f - sin(yaw) * r) * sp * dt
+                  val tgt = world.hg(px, pz) + 3f
+                  py += (tgt - py) * min(1f, dt * 5f)
+                  val d = world.clr(px, py, pz, .8f, co)
+                  if (d < 0f) { px += co[0] * -d; py += co[1] * -d; pz += co[2] * -d }
+                  roll += (0f - roll) * min(1f, dt * 4f); fov += (1.15f - fov) * min(1f, dt * 4f)
+              }
+
+              private fun cut() {
+                  cur = nx; nx = null; ct = 0f; fade = 1f; shotNo++
+                  val c = cur!!
+                  anchX = c.ax; anchZ = c.az
+                  val n = shotNo; val a = anchX; val b = anchZ
+                  fut = exec.submit(Callable<Shot> { planner.make(n, 1, a, b) })
+                  act.showTitle("SCENE " + String.format("%02d", shotNo) + " — " + c.tag, c.name)
+                  wantKey = Long.MIN_VALUE
+              }
+
+              private fun cinStep(dt: Float, now: Long) {
+                  if (!wasCin) {
+                      wasCin = true; cur = null; nx = null; shotNo = 0; anchX = px; anchZ = pz; waitT = 0f
+                      fut = exec.submit(Callable<Shot> { planner.make(0, 1, anchX, anchZ) })
+                  }
+                  val f = fut
+                  if (f != null && f.isDone) {
+                      try { nx = f.get() } catch (e: Exception) { nx = null }
+                      fut = null; wantKey = Long.MIN_VALUE
+                  }
+                  val c = cur
+                  if (c == null) {
+                      val n = nx ?: return
+                      waitT += dt
+                      rig.pose(n, 0f, waitT, dt, pose); apply()
+                      if (ready(n) || waitT > 14f) cut()
+                      return
+                  }
+                  ct += dt
+                  fade = max(0f, fade - dt / 1.2f)
+                  val u = min(1f, ct / c.dur)
+                  rig.pose(c, rig.ease(u, c.ease), ct, dt, pose); apply()
+                  val n = nx
+                  if (n != null && ct >= c.dur && (ready(n) || ct > c.dur + 8f)) cut()
+              }
+
+              private fun apply() { px = pose.x; py = pose.y; pz = pose.z; yaw = pose.yaw; pit = pose.pit; roll = pose.roll; fov = pose.fov }
+
+              fun setCinematic(on: Boolean) {
+                  cin = on
+                  if (!on) { wasCin = false; cur = null; nx = null; fut = null; fade = 0f; roll = 0f; wantKey = Long.MIN_VALUE; act.hideTitle() }
+              }
+
+              // ---------- frame ----------
+              override fun onDrawFrame(gl: GL10?) {
+                  val t = System.nanoTime()
+                  val dt = min(.05f, (t - last) / 1e9f); last = t
+                  fps += (1f / max(dt, 1e-3f) - fps) * .05f
+                  if (cin) cinStep(dt, t) else { wasCin = false; freeStep(dt) }
+                  updateWanted(t / 1000000L); pump()
+
+                  val cp = cos(pit); val sp = sin(pit)
+                  val fw = floatArrayOf(-sin(yaw) * cp, sp, -cos(yaw) * cp)
+                  val r0 = floatArrayOf(cos(yaw), 0f, -sin(yaw)); val u0 = floatArrayOf(sin(yaw) * sp, cp, cos(yaw) * sp)
+                  val cr = cos(roll); val sr = sin(roll)
+                  val rv = FloatArray(3) { r0[it] * cr + u0[it] * sr }; val uv = FloatArray(3) { u0[it] * cr - r0[it] * sr }
+                  val e = floatArrayOf(px, py, pz)
+                  fun dot(a: FloatArray, b: FloatArray) = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+                  val z = floatArrayOf(-fw[0], -fw[1], -fw[2])
+                  view[0] = rv[0]; view[1] = uv[0]; view[2] = z[0]; view[3] = 0f
+                  view[4] = rv[1]; view[5] = uv[1]; view[6] = z[1]; view[7] = 0f
+                  view[8] = rv[2]; view[9] = uv[2]; view[10] = z[2]; view[11] = 0f
+                  view[12] = -dot(rv, e); view[13] = -dot(uv, e); view[14] = -dot(z, e); view[15] = 1f
+                  val asp = sw / sh.toFloat()
+                  Matrix.perspectiveM(proj, 0, Math.toDegrees(fov.toDouble()).toFloat(), asp, .1f, 1500f)
+                  Matrix.multiplyMM(mvp, 0, proj, 0, view, 0)
+
+                  G.glViewport(0, 0, sw, sh)
+                  G.glClearColor(.72f, .84f, .95f, 1f)
+                  G.glClear(G.GL_COLOR_BUFFER_BIT or G.GL_DEPTH_BUFFER_BIT)
+                  val sun = floatArrayOf(.5f, .55f, .35f)
+                  val sl = hypot(hypot(sun[0], sun[1]), sun[2]); for (i in 0..2) sun[i] /= sl
+                  // langit
+                  G.glDisable(G.GL_DEPTH_TEST)
+                  G.glUseProgram(progSky)
+                  G.glUniform3fv(G.glGetUniformLocation(progSky, "R"), 1, rv, 0)
+                  G.glUniform3fv(G.glGetUniformLocation(progSky, "U"), 1, uv, 0)
+                  G.glUniform3fv(G.glGetUniformLocation(progSky, "F"), 1, fw, 0)
+                  G.glUniform3fv(G.glGetUniformLocation(progSky, "sun"), 1, sun, 0)
+                  G.glUniform2f(G.glGetUniformLocation(progSky, "th"), tan(fov / 2f) * asp, tan(fov / 2f))
+                  G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
+                  G.glEnable(G.GL_DEPTH_TEST)
+                  // dunia
+                  G.glUseProgram(progScene)
+                  G.glUniformMatrix4fv(G.glGetUniformLocation(progScene, "m"), 1, false, mvp, 0)
+                  G.glUniform3f(G.glGetUniformLocation(progScene, "cp"), px, py, pz)
+                  G.glUniform3f(G.glGetUniformLocation(progScene, "fogc"), .72f, .84f, .95f)
+                  G.glUniform1f(G.glGetUniformLocation(progScene, "fd"), 1f / (radius * 16f * .95f))
+                  val uAlpha = G.glGetUniformLocation(progScene, "alpha")
+                  G.glEnableVertexAttribArray(0); G.glEnableVertexAttribArray(1)
+                  G.glUniform1f(uAlpha, 1f)
+                  var drawn = 0
+                  for ((k, c) in chunks) {
+                      val vx = kx(k) * 16f + 8f - px; val vz = kz(k) * 16f + 8f - pz
+                      if (vx * fw[0] + vz * fw[2] < -28f * (1f + 0f) && hypot(vx, vz) > 40f) continue
+                      G.glBindBuffer(G.GL_ARRAY_BUFFER, c.vbo)
+                      G.glVertexAttribPointer(0, 3, G.GL_FLOAT, false, 24, 0); G.glVertexAttribPointer(1, 3, G.GL_FLOAT, false, 24, 12)
+                      G.glDrawArrays(G.GL_TRIANGLES, 0, c.n); drawn++
+                  }
+                  G.glEnable(G.GL_BLEND); G.glBlendFunc(G.GL_SRC_ALPHA, G.GL_ONE_MINUS_SRC_ALPHA); G.glDepthMask(false)
+                  G.glUniform1f(uAlpha, .62f)
+                  for ((k, c) in chunks) {
+                      if (c.wvbo == 0) continue
+                      G.glBindBuffer(G.GL_ARRAY_BUFFER, c.wvbo)
+                      G.glVertexAttribPointer(0, 3, G.GL_FLOAT, false, 24, 0); G.glVertexAttribPointer(1, 3, G.GL_FLOAT, false, 24, 12)
+                      G.glDrawArrays(G.GL_TRIANGLES, 0, c.wn)
+                  }
+                  G.glDepthMask(true)
+                  // fade antar scene
+                  if (cin && fade > 0f) {
+                      G.glDisable(G.GL_DEPTH_TEST); G.glUseProgram(progFade)
+                      G.glUniform1f(G.glGetUniformLocation(progFade, "a"), fade * fade * (3f - 2f * fade))
+                      G.glDrawArrays(G.GL_TRIANGLES, 0, 3); G.glEnable(G.GL_DEPTH_TEST)
+                  }
+                  G.glDisable(G.GL_BLEND)
+                  // letterbox 2.39:1
+                  if (cin) {
+                      val bh = ((sh - sw / 2.39f) / 2f).toInt()
+                      if (bh > 0) {
+                          G.glEnable(G.GL_SCISSOR_TEST); G.glClearColor(0f, 0f, 0f, 1f)
+                          G.glScissor(0, 0, sw, bh); G.glClear(G.GL_COLOR_BUFFER_BIT)
+                          G.glScissor(0, sh - bh, sw, bh); G.glClear(G.GL_COLOR_BUFFER_BIT)
+                          G.glDisable(G.GL_SCISSOR_TEST)
+                      }
+                  }
+                  hudT += dt
+                  if (hudT > .5f) {
+                      hudT = 0f
+                      act.setHud(fps.toInt().toString() + " fps · chunk " + drawn + "/" + chunks.size + " · antre " + pending.size + (if (cin) " · cinematic" else ""))
+                  }
+              }
+
+              fun destroy() { exec.shutdownNow() }
+          }
+          EOF
+
+          cat > $P/java/com/infinitepath/app/MainActivity.kt <<'EOF'
+          package com.infinitepath.app
+
+          import android.app.Activity
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.opengl.GLSurfaceView
+          import android.os.Build
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowInsets
+          import android.view.WindowInsetsController
+          import android.view.WindowManager
+          import android.widget.Button
+          import android.widget.FrameLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              private lateinit var gv: GLSurfaceView
+              private lateinit var r: Renderer
+              private lateinit var hud: TextView
+              private lateinit var titleTv: TextView
+              private var mvId = -1; private var mx0 = 0f; private var my0 = 0f
+              private var lkId = -1; private var lx = 0f; private var ly = 0f
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  try { window.setSustainedPerformanceMode(true) } catch (_: Throwable) {}
+                  pickHighRefresh()
+                  val root = FrameLayout(this)
+                  gv = GLSurfaceView(this)
+                  gv.setEGLContextClientVersion(3)
+                  gv.setEGLConfigChooser(8, 8, 8, 0, 24, 0)
+                  r = Renderer(this)
+                  gv.setRenderer(r)
+                  root.addView(gv)
+
+                  hud = TextView(this)
+                  hud.setTextColor(Color.WHITE); hud.textSize = 11f; hud.setShadowLayer(4f, 0f, 1f, Color.BLACK)
+                  root.addView(hud, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).also { it.setMargins(24, 16, 0, 0) })
+
+                  titleTv = TextView(this)
+                  titleTv.setTextColor(Color.WHITE); titleTv.textSize = 22f; titleTv.typeface = Typeface.SERIF
+                  titleTv.letterSpacing = .3f; titleTv.setShadowLayer(14f, 0f, 2f, Color.BLACK); titleTv.alpha = 0f
+                  root.addView(title, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).also { it.setMargins(80, 0, 0, 140) })
+
+                  val cb = Button(this)
+                  cb.text = "\uD83C\uDFAC"; cb.setOnClickListener { r.setCinematic(!r.cin) }
+                  root.addView(cb, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).also { it.setMargins(0, 8, 8, 0) })
+                  val ub = Button(this)
+                  ub.text = "\u2B06"; ub.setOnClickListener { Updater.check(this, true) }
+                  root.addView(ub, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).also { it.setMargins(0, 130, 8, 0) })
+                  setContentView(root)
+
+                  gv.setOnTouchListener { v, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                              val i = e.actionIndex; val id = e.getPointerId(i); val x = e.getX(i); val y = e.getY(i)
+                              if (x < v.width * .45f && mvId < 0) { mvId = id; mx0 = x; my0 = y }
+                              else if (lkId < 0) { lkId = id; lx = x; ly = y }
+                          }
+                          MotionEvent.ACTION_MOVE -> for (i in 0 until e.pointerCount) {
+                              val id = e.getPointerId(i)
+                              if (id == mvId) {
+                                  r.moveX = ((e.getX(i) - mx0) / 90f).coerceIn(-1f, 1f); r.moveY = ((e.getY(i) - my0) / 90f).coerceIn(-1f, 1f)
+                              } else if (id == lkId) {
+                                  r.lookDX += e.getX(i) - lx; r.lookDY += e.getY(i) - ly; lx = e.getX(i); ly = e.getY(i)
+                              }
+                          }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                              val id = e.getPointerId(e.actionIndex)
+                              if (id == mvId) { mvId = -1; r.moveX = 0f; r.moveY = 0f }
+                              if (id == lkId) lkId = -1
+                          }
+                      }
+                      true
+                  }
+                  Updater.check(this, false)
+              }
+
+              fun setHud(s: String) { runOnUiThread { hud.text = s } }
+              fun showTitle(s: String, name: String) {
+                  runOnUiThread {
+                      titleTv.text = s + "\n" + name.uppercase()
+                      titleTv.animate().cancel(); titleTv.alpha = 0f
+                      titleTv.animate().setStartDelay(600).alpha(1f).setDuration(900).withEndAction {
+                          titleTv.animate().setStartDelay(3500).alpha(0f).setDuration(1200).start()
+                      }.start()
+                  }
+              }
+              fun hideTitle() { runOnUiThread { titleTv.animate().cancel(); titleTv.alpha = 0f } }
+
+              private fun pickHighRefresh() {
+                  try {
+                      @Suppress("DEPRECATION")
+                      val m = windowManager.defaultDisplay.supportedModes.maxByOrNull { it.refreshRate }
+                      if (m != null) { val lp = window.attributes; lp.preferredDisplayModeId = m.modeId; window.attributes = lp }
+                  } catch (_: Throwable) {}
+              }
+
+              override fun onWindowFocusChanged(hasFocus: Boolean) {
+                  super.onWindowFocusChanged(hasFocus)
+                  if (!hasFocus) return
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      window.setDecorFitsSystemWindows(false)
+                      window.insetsController?.let {
+                          it.hide(WindowInsets.Type.systemBars())
+                          it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                      }
+                  } else {
+                      @Suppress("DEPRECATION")
+                      window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or
+                          View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                          View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                  }
+              }
+
+              override fun onPause() { super.onPause(); gv.onPause() }
+              override fun onResume() { super.onResume(); gv.onResume() }
+              override fun onDestroy() { r.destroy(); super.onDestroy() }
+          }
+          EOF
+
+          cat > $P/java/com/infinitepath/app/Updater.kt <<'EOF'
+          package com.infinitepath.app
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.app.DownloadManager
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.net.Uri
+          import android.os.Environment
+          import android.provider.Settings
+          import android.widget.Toast
+          import androidx.core.content.ContextCompat
+          import androidx.core.content.FileProvider
+          import org.json.JSONObject
+          import java.io.File
+          import java.net.HttpURLConnection
+          import java.net.URL
+
+          object Updater {
+              private fun toast(a: Activity, s: String) = a.runOnUiThread { Toast.makeText(a, s, Toast.LENGTH_LONG).show() }
+
+              fun check(a: Activity, manual: Boolean) {
+                  Thread {
+                      try {
+                          val c = URL("https://api.github.com/repos/" + BuildConfig.GH_REPO + "/releases/latest").openConnection() as HttpURLConnection
+                          c.setRequestProperty("Accept", "application/vnd.github+json")
+                          c.connectTimeout = 8000
+                          c.readTimeout = 8000
+                          val j = JSONObject(c.inputStream.bufferedReader().use { it.readText() })
+                          val code = j.getString("tag_name").takeLastWhile { it.isDigit() }.toIntOrNull() ?: 0
+                          val assets = j.getJSONArray("assets")
+                          var found: String? = null
+                          for (i in 0 until assets.length()) {
+                              val o = assets.getJSONObject(i)
+                              if (o.getString("name").endsWith(".apk")) found = o.getString("browser_download_url")
+                          }
+                          val url = found
+                          if (url != null && code > BuildConfig.VERSION_CODE) {
+                              a.runOnUiThread {
+                                  AlertDialog.Builder(a)
+                                      .setTitle("Update tersedia")
+                                      .setMessage("Build #" + code + " (terpasang #" + BuildConfig.VERSION_CODE + ")")
+                                      .setPositiveButton("Update") { _, _ -> download(a, url) }
+                                      .setNegativeButton("Nanti", null)
+                                      .show()
+                              }
+                          } else if (manual) {
+                              toast(a, "Sudah versi terbaru (#" + BuildConfig.VERSION_CODE + ")")
+                          }
+                      } catch (e: Exception) {
+                          if (manual) toast(a, "Gagal cek update: " + e.message)
+                      }
+                  }.start()
+              }
+
+              private fun download(a: Activity, url: String) {
+                  val f = File(a.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk")
+                  if (f.exists()) f.delete()
+                  val dm = a.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                  val req = DownloadManager.Request(Uri.parse(url))
+                      .setTitle("Infinite Path update")
+                      .setDestinationInExternalFilesDir(a, Environment.DIRECTORY_DOWNLOADS, "update.apk")
+                      .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                  val id = dm.enqueue(req)
+                  val rc = object : BroadcastReceiver() {
+                      override fun onReceive(c: Context, i: Intent) {
+                          if (i.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) != id) return
+                          try { a.unregisterReceiver(this) } catch (_: Exception) {}
+                          if (f.exists() && f.length() > 0) install(a, f) else toast(a, "Unduhan gagal")
+                      }
+                  }
+                  ContextCompat.registerReceiver(a, rc, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), ContextCompat.RECEIVER_EXPORTED)
+                  toast(a, "Mengunduh update...")
+              }
+
+              private fun install(a: Activity, f: File) {
+                  if (!a.packageManager.canRequestPackageInstalls()) {
+                      a.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + a.packageName)))
+                      toast(a, "Izinkan install dari app ini, lalu tekan Cek update APK lagi")
+                      return
+                  }
+                  val u = FileProvider.getUriForFile(a, a.packageName + ".fp", f)
+                  a.startActivity(
+                      Intent(Intent.ACTION_VIEW)
+                          .setDataAndType(u, "application/vnd.android.package-archive")
+                          .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                  )
+              }
+          }
+          EOF
+
+
+      - name: Signing keystore (stabil supaya update bisa ditimpa)
+        id: ks
+        run: |
+          set -e
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > ci.jks
+            echo "keystore dari secret"
+          elif [ -f ci.jks ]; then
+            echo "keystore dari repo"
+          else
+            keytool -genkeypair -keystore ci.jks -storepass "$KS_PASS" -keypass "$KS_PASS" \
+              -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 36500 \
+              -dname "CN=InfinitePath, O=Personal, C=ID"
+            echo "gen=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Simpan keystore baru ke repo (sekali saja)
+        if: steps.ks.outputs.gen == 'true'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add ci.jks
+          git commit -m "ci: signing keystore"
+          git push
+
+      - name: Build release APK
+        working-directory: android
+        env:
+          KS_FILE: ${{ github.workspace }}/ci.jks
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          gradle assembleRelease --no-daemon --stacktrace -PverCode=${{ github.run_number }} -PghRepo=${{ github.repository }}
+          cp app/build/outputs/apk/release/app-release.apk ../InfinitePath.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: InfinitePath-apk
+          path: InfinitePath.apk
+
+      - name: Publish release (dipakai updater di app)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: InfinitePath.apk
+          make_latest: true
