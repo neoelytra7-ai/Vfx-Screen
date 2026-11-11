@@ -1555,8 +1555,34 @@ jobs:
           #pw::before{left:0;background:linear-gradient(90deg,#0007,transparent)}
           #pw::after{right:0;background:linear-gradient(270deg,#0007,transparent)}
           #pw.l::before,#pw.r::after{opacity:1}
-          .s,#pm,#th{transition:transform .15s cubic-bezier(.3,1.6,.5,1),border-radius .3s}
-          #pm:active,#th:active{transform:scale(.9)}
+          .s,#pm,#th,#sr,#so{transition:transform .15s cubic-bezier(.3,1.6,.5,1),border-radius .3s}
+          #pm:active,#th:active,#sr:active,#so:active{transform:scale(.9)}
+          #sr,#so{width:40px;height:34px;padding:0;background:#000;box-shadow:inset 0 0 0 2px var(--al);display:flex;align-items:center;justify-content:center;flex:none}
+          #sr svg,#so svg{width:21px;height:21px;fill:none;stroke:#fff;stroke-width:2.3;shape-rendering:crispEdges;stroke-linecap:square}
+          /* ---------- search bar ---------- */
+          #sb{flex:none;display:none;align-items:center;gap:8px;padding:8px 10px;background:var(--pn);border-bottom:4px solid #000;box-shadow:inset 0 3px 0 var(--pn3)}
+          #sb.on{display:flex;animation:rise .25s both}
+          #sq{flex:1;height:36px;padding:0 10px;background:#000;border:3px solid #000;box-shadow:inset 0 0 0 2px #555;color:#fff;font:19px 'VT323',monospace}
+          #sq::placeholder{color:#777}
+          #sx{width:36px;height:36px;flex:none;background:var(--t);border:3px solid #000;box-shadow:inset 2px 2px 0 var(--tl),inset -2px -2px 0 var(--td);font-size:16px}
+          #sx:active{transform:scale(.88)}
+          /* ---------- dropdown urutkan ---------- */
+          #sm{position:absolute;top:calc(58px + env(safe-area-inset-top));right:52px;z-index:12;display:none;flex-direction:column;gap:6px;padding:8px;background:var(--pn);border:4px solid #000;box-shadow:inset 0 0 0 2px var(--pn3)}
+          #sm.on{display:flex;animation:pop .25s both}
+          #sm button{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 6px;min-width:190px;background:var(--t);border:3px solid #000;box-shadow:inset 2px 2px 0 var(--tl),inset -2px -2px 0 var(--td);font-size:20px;text-shadow:2px 2px 0 #000;text-align:left}
+          #sm button.on{background:var(--a);box-shadow:inset 2px 2px 0 var(--al),inset -2px -2px 0 var(--ad)}
+          /* ---------- badge BARU & pin di ikon ---------- */
+          .s{position:relative}
+          .s .nb{position:absolute;top:-3px;left:-5px;background:var(--ah);color:#000;font:700 11px var(--ff),monospace;padding:2px 5px;border:2px solid #000;transform:rotate(-8deg);letter-spacing:.5px;z-index:2;animation:pop .3s both}
+          .s .pb{position:absolute;top:-6px;right:-4px;font-size:16px;color:var(--y);text-shadow:1px 1px 0 #000;z-index:2;animation:pop .3s both}
+          .s.pin{box-shadow:inset 3px 3px 0 var(--tl),inset -3px -3px 0 var(--td),0 0 0 2px var(--ah)}
+          /* ---------- popup aksi cepat (long-press) ---------- */
+          #qa{position:fixed;z-index:14;display:none;flex-direction:column;gap:6px;padding:8px;background:var(--pn);border:4px solid #000;box-shadow:inset 0 0 0 2px var(--pn3),0 10px 0 #0006}
+          #qa.on{display:flex;animation:pop .2s both}
+          #qa button{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 6px;min-width:168px;background:var(--t);border:3px solid #000;box-shadow:inset 2px 2px 0 var(--tl),inset -2px -2px 0 var(--td);font-size:20px;text-shadow:2px 2px 0 #000;text-align:left}
+          #qa button.rd{background:#6b1c12;box-shadow:inset 2px 2px 0 #b0422f,inset -2px -2px 0 #3a0e06}
+          #qa b{width:22px;text-align:center;flex:none}
+          #qa svg{width:20px;height:20px;flex:none;fill:none;stroke:#fff;stroke-width:2.3;shape-rendering:crispEdges;stroke-linecap:square}
           #e{position:absolute;left:0;right:0;top:46%;text-align:center;color:#9a9a9a;font-size:24px;pointer-events:none}
           /* ---------- sheet detail ---------- */
           #dt{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;background:linear-gradient(var(--bgd),#000);transform:translateY(100%);visibility:hidden;transition:transform .35s cubic-bezier(.2,.9,.2,1),visibility 0s .35s}
@@ -1624,7 +1650,9 @@ jobs:
           .bt.rd{background:#6b1c12;box-shadow:inset 3px 3px 0 #b0422f,inset -3px -3px 0 #3a0e06}
           @media (prefers-reduced-motion:reduce){#play,#play::after,#play i,#da{animation:none!important}}
           #wd{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;z-index:0}#top,#pg,#dots{position:relative;z-index:1}.s{background-image:var(--tex);background-size:32px;image-rendering:pixelated}#e{color:#ddd;text-shadow:2px 2px 0 #000}#lg{cursor:pointer;filter:drop-shadow(0 0 6px var(--glow))}#th{width:40px;height:34px;padding:0;background:#000;box-shadow:inset 0 0 0 2px var(--al);display:flex;align-items:center;justify-content:center}#th img{width:26px;height:26px}#tm{position:absolute;top:calc(58px + env(safe-area-inset-top));right:8px;z-index:12;display:none;flex-direction:column;gap:6px;padding:8px;background:var(--pn);border:4px solid #000;box-shadow:inset 0 0 0 2px var(--pn3)}#tm.on{display:flex;animation:pop .25s both}#tm button{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 6px;min-width:176px;background:var(--t);border:3px solid #000;box-shadow:inset 2px 2px 0 var(--tl),inset -2px -2px 0 var(--td);font-size:21px;text-shadow:2px 2px 0 #000;text-align:left}#tm button.on{background:var(--a);box-shadow:inset 2px 2px 0 var(--al),inset -2px -2px 0 var(--ad)}#tm img{width:26px;height:26px}#fx{position:fixed;inset:0;z-index:30;pointer-events:none;overflow:hidden}#fx.on{pointer-events:auto}#fx .lb{position:absolute;left:0;right:0;height:0;background:#000;transition:height .35s cubic-bezier(.2,.9,.2,1)}#fx .t{top:0}#fx .b{bottom:0}#fx.on .lb{height:14%}#fx i{position:absolute;pointer-events:none}#ft{position:absolute;top:50%;left:0;right:0;margin-top:-20px;text-align:center;font:700 34px var(--ff),monospace;letter-spacing:3px;color:var(--ah);text-shadow:3px 0 #f0f,-3px 0 #0ff;opacity:0}#fx.on #ft{opacity:1;animation:jit .12s steps(2) infinite}@keyframes jit{50%{transform:translate(3px,-2px)}}.s{border-radius:var(--rad)}.s span,#dnm,#dn{font-family:var(--ff),monospace}#tm .sp{color:var(--mu);font-size:16px;margin-top:4px}body[data-th=lc] #top{border-radius:0 0 24px 24px}body[data-th=lc] .s{background-image:linear-gradient(160deg,rgba(255,255,255,.14),transparent 55%),var(--tex);box-shadow:inset 0 -6px 0 var(--td),inset 0 3px 0 var(--tl),0 6px 14px rgba(0,0,0,.45);animation:pop .35s both,bob 4s ease-in-out .6s infinite}@keyframes bob{50%{transform:translateY(-3px)}}body[data-th=ne] #top{border-bottom:6px double #000}body[data-th=ne] h1{font-size:17px;text-transform:uppercase}body[data-th=ne] .s{clip-path:polygon(0 6px,6px 0,calc(100% - 6px) 0,100% 6px,100% 100%,0 100%);border-width:2px;padding:2px;gap:6px}body[data-th=ne] .s span{white-space:normal;text-align:center;line-height:1.4;max-height:3em}body[data-th=ne] #dnm,body[data-th=ne] #dn{font-size:14px}body[data-th=ne] #play{font-size:20px}body[data-th=en] h1{text-align:center;letter-spacing:4px}body[data-th=en] .s{flex-direction:row;justify-content:flex-start;gap:8px;padding:4px 8px;box-shadow:inset 0 0 0 2px var(--al),0 0 12px rgba(var(--ahr),.35);animation:pop .35s both,glow 3s ease-in-out infinite}body[data-th=en] .s span{text-align:left;flex:1}@keyframes glow{50%{box-shadow:inset 0 0 0 2px var(--ah),0 0 20px rgba(var(--ahr),.7)}}</style></head><body><canvas id="wd"></canvas>
-          <div id="top"><img id="lg" alt=""><h1>Foxle Hub</h1><button id="pm">Akses file</button><button id="th"></button></div>
+          <div id="top"><img id="lg" alt=""><h1>Foxle Hub</h1><button id="sr" hidden><svg viewBox="0 0 24 24"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-5.2-5.2"/></svg></button><button id="so" hidden><svg viewBox="0 0 24 24"><path d="M7 4v16M4 7l3-3 3 3M17 20V4M14 17l3 3 3-3"/></svg></button><button id="pm">Akses file</button><button id="th"></button></div>
+          <div id="sb"><input id="sq" placeholder="Cari projek..." autocomplete="off" autocapitalize="off"><button id="sx">&#10005;</button></div>
+          <div id="sm"></div>
           <div id="pw"><div id="pg"></div></div>
           <div id="dots"></div>
           <div id="e" hidden>Belum ada projek<br>Tap + untuk impor .html / .zip</div>
@@ -1641,6 +1669,7 @@ jobs:
           </div>
           <div id="rd"><div id="rb"></div></div>
           <div id="go"></div>
+          <div id="qa"></div>
           <script>
           const $=s=>document.querySelector(s);
           const pal=['#e8802a','#5fb02f','#4a7fd4','#d6403a','#9b59c9','#fcdb5a','#7cff3a','#e86fb0'];
@@ -1663,16 +1692,43 @@ jobs:
 
           /* ---------- grid ---------- */
           let PER=24,P=[],cur=0;const pg=$('#pg');
-          function refresh(){let n;try{n=Host.list()}catch(e){n='[]'}if(n===window.__ls&&pg.firstChild)return;window.__ls=n;try{P=JSON.parse(n)}catch(e){P=[]}draw()}
+          /* ---------- cari / urutkan / pin / baru / terakhir main (client-side, per perangkat) ---------- */
+          const ls=(k,d)=>{try{return JSON.parse(localStorage.getItem(k)||d)}catch(e){return JSON.parse(d)}};
+          let Q='',SORT=localStorage.getItem('fxSort')||'az',PIN=new Set(ls('fxPin','[]')),ADDED=ls('fxAdded','{}'),LAST=ls('fxLast','{}');
+          const svPin=()=>localStorage.setItem('fxPin',JSON.stringify([...PIN]));
+          const svAdded=()=>localStorage.setItem('fxAdded',JSON.stringify(ADDED));
+          const svLast=()=>localStorage.setItem('fxLast',JSON.stringify(LAST));
+          const SORTS=[['az','Nama (A-Z)'],['new','Baru ditambahkan'],['last','Terakhir dimainkan']];
+          function touchAdded(){
+            const first=!localStorage.getItem('fxAddedInit');let ch=false;
+            P.forEach(p=>{if(!(p.id in ADDED)){ADDED[p.id]=first?0:Date.now();ch=true}});
+            if(first)localStorage.setItem('fxAddedInit','1');
+            if(ch)svAdded();
+          }
+          function view(){
+            let v=Q?P.filter(p=>p.name.toLowerCase().includes(Q.toLowerCase())):P.slice();
+            const cmp={az:(a,b)=>a.name.localeCompare(b.name),
+             new:(a,b)=>(ADDED[b.id]||0)-(ADDED[a.id]||0),
+             last:(a,b)=>(LAST[b.id]||0)-(LAST[a.id]||0)||a.name.localeCompare(b.name)}[SORT];
+            v.sort((a,b)=>(PIN.has(b.id)-PIN.has(a.id))||cmp(a,b));
+            return v;
+          }
+          function refresh(){let n;try{n=Host.list()}catch(e){n='[]'}if(n===window.__ls&&pg.firstChild)return;window.__ls=n;try{P=JSON.parse(n)}catch(e){P=[]}touchAdded();draw()}
           function draw(){
-            const it=P.map((p,i)=>`<div class="s" data-id="${p.id}" style="animation-delay:${Math.min(i%PER,23)*18}ms"><img src="${av(p.name)}" alt=""><span>${esc(p.name)}</span></div>`);
-            it.push(`<div class="s add" id="add"><b>+</b><span>Impor</span></div>`);
-            const n=Math.ceil(it.length/PER);let h='';
+            $('#sr').hidden=$('#so').hidden=P.length<=6;
+            const V=view(),now=Date.now();
+            const it=V.map((p,i)=>{
+              const isNew=now-(ADDED[p.id]||0)<3*864e5,pin=PIN.has(p.id);
+              return `<div class="s${pin?' pin':''}" data-id="${p.id}" style="animation-delay:${Math.min(i%PER,23)*18}ms"><img src="${av(p.name)}" alt=""><span>${esc(p.name)}</span>${isNew?'<b class="nb">BARU</b>':''}${pin?'<i class="pb">&#9733;</i>':''}</div>`;
+            });
+            if(!Q)it.push(`<div class="s add" id="add"><b>+</b><span>Impor</span></div>`);
+            const n=Math.max(1,Math.ceil(it.length/PER));let h='';
             for(let i=0;i<n;i++)h+=`<div class="pc">${it.slice(i*PER,(i+1)*PER).join('')}</div>`;
             pg.innerHTML=h;
             $('#dots').innerHTML=n>1?Array.from({length:n},(_,i)=>'<i></i>').join(''):'';
             cur=Math.min(cur,n-1);pg.scrollLeft=cur*pg.clientWidth;dots();
-            $('#e').hidden=P.length>0;
+            $('#e').innerHTML=Q&&!V.length?'Nggak ketemu projek "'+esc(Q)+'"':'Belum ada projek<br>Tap + untuk impor .html / .zip';
+            $('#e').hidden=P.length>0&&!(Q&&!V.length);
           }
           const pw=$('#pw');
           function dots(){const d=$('#dots').children;for(let i=0;i<d.length;i++)d[i].className=i===cur?'on':'';
@@ -1684,11 +1740,50 @@ jobs:
             navigator.vibrate&&navigator.vibrate(10);cur=i;pg.scrollTo({left:i*pg.clientWidth,behavior:'smooth'});dots();
           });
           pg.addEventListener('click',e=>{
+            if(lp){lp=false;return}
             const s=e.target.closest('.s');if(!s)return;
             navigator.vibrate&&navigator.vibrate(8);
             if(s.id==='add')return Host.imp();
             openDt(s.dataset.id);
           });
+
+          /* ---------- cari ---------- */
+          const sr=$('#sr'),sb=$('#sb'),sq=$('#sq');
+          sr.onclick=()=>{sb.classList.toggle('on');if(sb.classList.contains('on'))sq.focus();else{sq.value='';Q='';cur=0;draw()}};
+          $('#sx').onclick=()=>{sq.value='';Q='';cur=0;sq.focus();draw()};
+          sq.addEventListener('input',()=>{Q=sq.value;cur=0;draw()});
+
+          /* ---------- urutkan ---------- */
+          const so=$('#so'),sm=$('#sm');
+          so.onclick=e=>{e.stopPropagation();sm.innerHTML=SORTS.map(([k,n])=>`<button data-k="${k}" class="${SORT===k?'on':''}">${n}</button>`).join('');sm.classList.toggle('on')};
+          sm.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;SORT=b.dataset.k;localStorage.setItem('fxSort',SORT);sm.classList.remove('on');draw()});
+          document.addEventListener('click',e=>{if(!e.target.closest('#sm')&&!e.target.closest('#so'))sm.classList.remove('on')});
+
+          /* ---------- long-press: aksi cepat Main/Pin/Hapus tanpa buka sheet ---------- */
+          const qa=$('#qa');let lpT=null,lp=false;
+          function closeQa(){qa.classList.remove('on')}
+          function openQa(pid,x,y){
+            const p=P.find(x=>x.id===pid);if(!p)return;const pinned=PIN.has(pid);
+            qa.innerHTML=`<button data-a="run"><b>&#9654;</b>Main</button><button data-a="pin"><b>&#9733;</b>${pinned?'Lepas pin':'Pin ke depan'}</button><button data-a="dl" class="rd">${ic.dl}Hapus</button>`;
+            qa.dataset.id=pid;
+            const w=170,vw=innerWidth,vh=innerHeight;
+            qa.style.left=Math.max(8,Math.min(x-w/2,vw-w-8))+'px';qa.style.top=Math.min(y+10,vh-180)+'px';
+            qa.classList.add('on');
+          }
+          pg.addEventListener('pointerdown',e=>{
+            const s=e.target.closest('.s');if(!s||s.id==='add')return;
+            clearTimeout(lpT);lp=false;
+            lpT=setTimeout(()=>{lp=true;navigator.vibrate&&navigator.vibrate([15,30,15]);openQa(s.dataset.id,e.clientX,e.clientY)},480);
+          });
+          ['pointerup','pointercancel','pointermove'].forEach(t=>pg.addEventListener(t,()=>clearTimeout(lpT)));
+          qa.addEventListener('click',e=>{
+            const b=e.target.closest('button');if(!b)return;const pid=qa.dataset.id,a=b.dataset.a;closeQa();
+            if(a==='run'){LAST[pid]=Date.now();svLast();Host.run(pid)}
+            else if(a==='pin'){PIN.has(pid)?PIN.delete(pid):PIN.add(pid);svPin();draw()}
+            else if(a==='dl'){const p=P.find(x=>x.id===pid);if(confirm('Hapus "'+p.name+'"?')){Host.drop(pid);refresh()}}
+          });
+          document.addEventListener('click',e=>{if(!e.target.closest('#qa'))closeQa()});
+          addEventListener('foxlback',e=>{if(qa.classList.contains('on')){e.preventDefault();closeQa()}});
 
           /* ---------- detail ---------- */
           const DEF={fs:false,or:'auto',res:100,ka:false,st:true,cam:true,mic:true,net:true,ex:true,mn:true,av:true,mon:false};
@@ -1720,6 +1815,7 @@ jobs:
              SC('Tampilan',[T('fs','Layar penuh',C.fs,oo(C.fs)),T('or','Orientasi',C.or!=='auto',ORN[C.or]),T('rs','Resolusi',C.res!==100,C.res+'%'),T('ka','Tetap nyala',C.ka,oo(C.ka))])+
              SC('Izin',[T('st','Penyimpanan',C.st,oo(C.st)),T('cam','Kamera',C.cam,oo(C.cam)),T('mic','Mikrofon',C.mic,oo(C.mic)),T('net','Internet',C.net,oo(C.net))])+
              SC('Perilaku',[T('ex','Tautan luar',C.ex,oo(C.ex)),T('mn','Menu game',C.mn,oo(C.mn)),T('av','Auto-unlock',C.av,oo(C.av)),T('mon','Monitor game',C.mon,oo(C.mon))])+
+             SC('Lainnya',[`<button class="ob${PIN.has(id)?' on':''}" data-o="pin"><b style="width:22px;text-align:center">&#9733;</b>${PIN.has(id)?'Lepas pin':'Pin ke depan'}</button>`])+
              SC('Data',[`<button class="ob" data-o="sh">${ic.sh}Bagikan</button>`,`<button class="ob rd" data-o="rst">${ic.rst}Reset data</button>`,`<button class="ob" data-o="rn">${ic.rn}Ganti nama</button>`,`<button class="ob rd" data-o="dl">${ic.dl}Hapus</button>`]);
           }
           function openDt(i){
@@ -1732,7 +1828,8 @@ jobs:
              `<div><small>Ukuran</small><b>${sz(f.size||0)}</b></div>`+
              `<div><small>Berkas</small><b>${f.files||0}</b></div>`+
              `<div><small>Diubah</small><b>${f.mod?new Date(f.mod).toLocaleDateString('id-ID',{day:'numeric',month:'short',year:'numeric'}):'-'}</b></div>`+
-             `<div><small>index.html</small><b>${f.entry?'Ada':'Tidak ada'}</b></div>`;
+             `<div><small>index.html</small><b>${f.entry?'Ada':'Tidak ada'}</b></div>`+
+             `<div><small>Terakhir main</small><b>${LAST[i]?new Date(LAST[i]).toLocaleDateString('id-ID',{day:'numeric',month:'short',year:'numeric'}):'Belum pernah'}</b></div>`;
             ops();$('#dt').classList.add('on');openD=true;
           }
           function closeDt(){$('#dt').classList.remove('on');openD=false;$('#go').classList.remove('on')}
@@ -1768,6 +1865,7 @@ jobs:
             else if(o==='or'){C.or=ORS[(ORS.indexOf(C.or)+1)%3];saveC();ops()}
             else if(o==='rs'){C.res=RES[(RES.indexOf(C.res)+1)%RES.length];saveC();ops()}
             else if(TG.includes(o)){C[o]=!C[o];saveC();ops()}
+            else if(o==='pin'){PIN.has(id)?PIN.delete(id):PIN.add(id);svPin();ops()}
             else if(o==='sh'){if(!Host.shareProj(id))Host.toast('Gagal membagikan')}
                       else if(o==='rst')openRd();
             else if(o==='rn'){const p=P.find(x=>x.id===id);const n=prompt('Nama baru',p.name);if(n&&n.trim()){Host.rename(id,n.trim());refresh();openDt(id)}}
@@ -1789,7 +1887,7 @@ jobs:
             const go=$('#go');go.style.left=(r.left+r.width/2)+'px';go.style.top=(r.top+r.height/2)+'px';
             go.style.setProperty('--k',Math.hypot(innerWidth,innerHeight)/18);
             setTimeout(()=>go.classList.add('on'),120);
-            setTimeout(()=>{Host.run(id)},480);
+            setTimeout(()=>{LAST[id]=Date.now();svLast();Host.run(id)},480);
             setTimeout(()=>{go.classList.remove('on');delete play.dataset.b},1300);
           });
 
