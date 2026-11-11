@@ -1090,7 +1090,7 @@ jobs:
                   titleTv = TextView(this)
                   titleTv.setTextColor(Color.WHITE); titleTv.textSize = 22f; titleTv.typeface = Typeface.SERIF
                   titleTv.letterSpacing = .3f; titleTv.setShadowLayer(14f, 0f, 2f, Color.BLACK); titleTv.alpha = 0f
-                  root.addView(title, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).also { it.setMargins(80, 0, 0, 140) })
+                  root.addView(titleTv, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).also { it.setMargins(80, 0, 0, 140) })
 
                   val cb = Button(this)
                   cb.text = "\uD83C\uDFAC"; cb.setOnClickListener { r.setCinematic(!r.cin) }
@@ -1295,8 +1295,16 @@ jobs:
           KS_FILE: ${{ github.workspace }}/ci.jks
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          gradle assembleRelease --no-daemon --stacktrace -PverCode=${{ github.run_number }} -PghRepo=${{ github.repository }}
+          set -o pipefail
+          gradle assembleRelease --no-daemon -PverCode=${{ github.run_number }} -PghRepo=${{ github.repository }} 2>&1 | tee ../build.log
           cp app/build/outputs/apk/release/app-release.apk ../InfinitePath.apk
+
+      - name: Ringkasan error compile
+        if: failure()
+        run: |
+          echo "===== ERROR KOMPILASI ====="
+          grep -E '^e: ' build.log | sed -E 's#file:///home/runner/work/[^/]+/[^/]+/##' | head -60 || true
+          echo "==========================="
 
       - uses: actions/upload-artifact@v4
         with:
