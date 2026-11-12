@@ -2282,7 +2282,7 @@ jobs:
           .ch button.on{background:var(--ac);border-color:var(--ac);color:var(--on)}
           .sec{display:flex;align-items:baseline;justify-content:space-between;margin:18px 2px 10px}.sec b{font-size:16px}.sec small{color:var(--mu)}
           /* lanjutkan */
-          .rw{display:flex;gap:12px;overflow-x:auto;scrollbar-width:none;margin:0 -16px;padding:0 16px;scroll-snap-type:x proximity}
+          .rw{display:flex;gap:12px;overflow-x:auto;scrollbar-width:none;margin:0 -16px;padding:0 16px;scroll-snap-type:x proximity;scroll-padding:0 16px}
           .rc{flex:none;width:min(78%,300px);scroll-snap-align:start;position:relative;border-radius:18px;overflow:hidden;cursor:pointer}
           .rc .cv{aspect-ratio:16/9;border-radius:0}
           .rc .tx{position:absolute;left:0;right:0;bottom:0;padding:26px 14px 12px;background:linear-gradient(transparent,rgba(0,0,0,.78));color:#fff}
@@ -2290,6 +2290,7 @@ jobs:
           /* kartu */
           .gd{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
           .cd{position:relative;cursor:pointer;min-width:0}
+          .cw{position:relative}
           .cd:active .cv{transform:scale(.97)}
           .cv{position:relative;aspect-ratio:4/3;border-radius:16px;overflow:hidden;display:flex;align-items:center;justify-content:center;transition:transform .15s;box-shadow:0 1px 0 rgba(255,255,255,.08) inset}
           .cv .gl{font-size:46px;font-weight:800;color:rgba(255,255,255,.88);text-shadow:0 2px 12px rgba(0,0,0,.35)}
@@ -2305,8 +2306,8 @@ jobs:
           .rc .fv{display:none}
           .ls .gd{grid-template-columns:1fr;gap:10px}
           .ls .cd{display:flex;align-items:center;gap:14px;padding:8px;border-radius:16px;background:var(--s1);border:1px solid var(--ln)}
-          .ls .cv{width:84px;flex:none;aspect-ratio:1;border-radius:12px}.ls .cv .gl{font-size:30px}
-          .ls .ct{flex:1;padding:0}.ls .pl{position:static;flex:none}.ls .fv{left:auto;top:50%;right:62px;transform:translateY(-50%);background:none;color:var(--mu)}
+          .ls .cw{display:contents}.ls .cv{width:84px;flex:none;aspect-ratio:1;border-radius:12px}.ls .cv .gl{font-size:30px}
+          .ls .ct{flex:1;padding:0;order:1}.ls .pl{position:static;flex:none;order:3}.ls .fv{position:static;flex:none;order:2;background:none;color:var(--mu)}
           .ls .fv.on{color:var(--wa)}
           .em{text-align:center;padding:48px 24px;color:var(--mu)}
           .em svg{width:64px;height:64px;color:var(--ac);margin-bottom:12px}.em h2{color:var(--tx);font-size:20px;margin-bottom:6px}.em p{max-width:300px;margin:0 auto 18px}
@@ -2323,7 +2324,9 @@ jobs:
           .sh .sc{position:absolute;inset:0;background:rgba(0,0,0,.55);opacity:0;transition:opacity .25s}
           .sh .pn{position:absolute;left:0;right:0;bottom:0;max-height:94%;max-width:640px;margin:0 auto;display:flex;flex-direction:column;background:var(--bg);border-radius:24px 24px 0 0;border:1px solid var(--ln);border-bottom:0;transform:translateY(103%);transition:transform .32s cubic-bezier(.2,.9,.2,1)}
           .sh.on{pointer-events:auto}.sh.on .sc{opacity:1}.sh.on .pn{transform:none}
+          .hero,#shh{touch-action:none}
           .gr{flex:none;width:44px;height:5px;border-radius:3px;background:var(--s3);margin:10px auto 6px}
+          .sb>*,.dc>*{flex:none}
           .sb{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:6px 18px calc(24px + var(--sab));display:flex;flex-direction:column;gap:14px}
           .hero{position:relative;margin:0 -18px;height:150px;overflow:hidden}
           .hero .cv{position:absolute;inset:0;aspect-ratio:auto;border-radius:0}.hero .cv .gl{font-size:70px}
@@ -2345,7 +2348,7 @@ jobs:
           details.ac[open]>summary::after{transform:rotate(-135deg);margin-top:3px}
           .ib2{padding:2px 14px 16px;display:flex;flex-direction:column;gap:14px}
           .lb{display:block;color:var(--mu);font-size:12.5px;font-weight:650;margin-bottom:7px}
-          .sg{display:flex;gap:6px;flex-wrap:wrap}.sg button{flex:1 1 auto;min-width:56px;padding:10px 8px;border-radius:12px;background:var(--s2);border:1px solid var(--ln);font-weight:650;text-align:center}
+          .sg{display:flex;gap:6px;flex-wrap:wrap}.sg button{flex:1 1 64px;min-width:0;padding:10px 4px;font-size:13.5px;border-radius:12px;background:var(--s2);border:1px solid var(--ln);font-weight:650;text-align:center}
           .sg button.on{background:var(--ac);border-color:var(--ac);color:var(--on)}
           .sw{display:flex;align-items:center;gap:12px;width:100%;padding:11px 12px;border-radius:13px;background:var(--s2);text-align:left}
           .sw span{flex:1;min-width:0}.sw em{display:block;font-style:normal;color:var(--mu);font-size:12.5px;font-weight:400}
@@ -2481,7 +2484,7 @@ jobs:
             if(rec.length)h+=`<div class="sec"><b>Lanjutkan bermain</b></div><div class="rw">${rec.map(p=>`<div class="rc" data-id="${p.id}">${cover(p)}<div class="tx"><b>${esc(p.name)}</b><small>${ago(p.lp)}</small></div><button class="pl" data-a="play" aria-label="Main ${esc(p.name)}">${ico('play')}</button></div>`).join('')}</div>`;
             h+=`<div class="sec"><b>${S.f==='fav'?'Favorit':q?'Hasil pencarian':'Semua game'}</b><small>${L.length} game</small></div>`;
             if(!L.length)h+=`<div class="em"><h2>Tidak ada hasil</h2><p>${q?'Coba kata kunci lain.':'Belum ada game di filter ini.'}</p></div>`;
-            else h+=`<div class="gd">${L.map(p=>`<div class="cd" data-id="${p.id}">${cover(p)}<button class="fv${p.fav?' on':''}" data-a="fav" aria-label="Favorit">${ico('star')}</button><button class="pl" data-a="play" aria-label="Main ${esc(p.name)}">${ico('play')}</button><div class="ct"><b>${esc(p.name)}</b><small>${p.lp?ago(p.lp)+(p.pt>=60?' • '+dur(p.pt):''):'Belum dimainkan'}</small></div></div>`).join('')}</div>`;
+            else h+=`<div class="gd">${L.map(p=>`<div class="cd" data-id="${p.id}"><div class="cw">${cover(p)}<button class="fv${p.fav?' on':''}" data-a="fav" aria-label="Favorit">${ico('star')}</button><button class="pl" data-a="play" aria-label="Main ${esc(p.name)}">${ico('play')}</button></div><div class="ct"><b>${esc(p.name)}</b><small>${p.lp?ago(p.lp)+(p.pt>=60?' • '+dur(p.pt):''):'Belum dimainkan'}</small></div></div>`).join('')}</div>`;
            }
            $('#lib').className=S.view==='list'?'ls':'';
            $('#lib').innerHTML=h;
@@ -2810,6 +2813,7 @@ jobs:
            '#x{width:36px;height:36px;border-radius:10px;background:var(--s1);font-size:18px}'+
            '#tb{display:flex;gap:4px;padding:4px 12px 8px;border-bottom:1px solid rgba(255,255,255,.08)}'+
            '#tb button{flex:1;padding:8px 0;border-radius:10px;color:var(--mu);font-weight:600}#tb button.on{background:var(--s2);color:#fff;box-shadow:inset 0 -2px 0 var(--ac)}'+
+           '#bd>*{flex:none}'+
            '#bd{flex:1;min-height:0;overflow-y:auto;padding:14px 16px 20px;display:flex;flex-direction:column;gap:16px}'+
            '.g>small{display:block;color:var(--mu);font-size:12px;margin-bottom:7px;font-weight:600}'+
            '.sg{display:flex;gap:5px;flex-wrap:wrap}.sg button{flex:1 1 auto;min-width:54px;padding:9px 6px;border-radius:10px;background:var(--s1);border:1px solid rgba(255,255,255,.08);font-weight:600;text-align:center}'+
@@ -2819,7 +2823,7 @@ jobs:
            '.sw.on i{background:var(--ac)}.sw.on i::after{transform:translateX(17px)}'+
            'input[type=range]{width:100%;accent-color:var(--ac);height:28px}.rv{display:flex;justify-content:space-between;color:var(--mu);font-size:12px}.rv b{color:#fff;font-size:14px}'+
            '.kv{display:grid;grid-template-columns:1fr auto;gap:6px 10px;padding:12px;border-radius:12px;background:var(--s1);font-size:13px}.kv span{color:var(--mu)}.kv b{font-weight:600;text-align:right}'+
-           '.ok{color:#4ad295}.no{color:#ff7a7a}'+
+           '.kv .ok,.ok{color:#4ad295}.kv .no,.no{color:#ff7a7a}'+
            '.bt{width:100%;padding:11px;border-radius:12px;background:var(--s2);font-weight:600}.bt.rd{background:#5b2020;color:#ffb4b4}'+
            '#f{position:fixed;top:calc(6px + env(safe-area-inset-top,0px));left:calc(8px + env(safe-area-inset-left,0px));background:rgba(0,0,0,.65);color:#7cff9a;padding:2px 8px;border-radius:6px;font:600 13px/1.4 ui-monospace,monospace;display:none;pointer-events:none}'+
            '</style><div id="w" class="dim"><div id="f"></div><div id="sc"></div>'+
