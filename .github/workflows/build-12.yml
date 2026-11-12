@@ -704,6 +704,7 @@ jobs:
               private lateinit var pSky: Prog
               private lateinit var pFade: Prog
               private lateinit var pVig: Prog
+              private lateinit var pUw: Prog
               private var texAtlas = 0
               private var texWn = 0
               private var broken = false
@@ -740,7 +741,7 @@ jobs:
                   try {
                       pT = prog(Shaders.vt(false), Shaders.fs(false)); pF = prog(Shaders.vt(true), Shaders.fs(true))
                       pWA = prog(Shaders.VW, Shaders.fw(false)); pWB = prog(Shaders.VW, Shaders.fw(true))
-                      pSky = prog(Shaders.VQ, Shaders.FSKY); pFade = prog(Shaders.VQ, Shaders.FFADE); pVig = prog(Shaders.VQ, Shaders.FVIG)
+                      pSky = prog(Shaders.VQ, Shaders.FSKY); pFade = prog(Shaders.VQ, Shaders.FFADE); pVig = prog(Shaders.VQ, Shaders.FVIG); pUw = prog(Shaders.VQ, Shaders.FUW)
                       broken = false
                   } catch (e: Throwable) {
                       broken = true
@@ -1163,7 +1164,15 @@ jobs:
                   val el = cfg.sunEl; val az = cfg.sunAz
                   val sdx = (cos(el) * sin(az)).toFloat(); val sdy = sin(el).toFloat(); val sdz = (cos(el) * cos(az)).toFloat()
                   val scs = cfg.sun.toFloat()
-                  val fog = max(cfg.fog.toFloat(), 3.2f / (cfg.rd.toFloat() * 16f))
+                  fun kf(k: String): Float = cfg.getK(k).toFloat()
+                  val wyU = main.waterY(px.toDouble(), pz.toDouble()).toFloat()
+                  val under = kf("uwOn") > .5f && wyU > -1e8f && py < wyU
+                  val fog = max(cfg.fog.toFloat(), 3.2f / (cfg.rd.toFloat() * 16f)) * (if (under) 1f + 2.2f * kf("uwDens") else 1f)
+                  val mAz: Double; val mEl: Double
+                  if (kf("mnAuto") > .5f) { mAz = az + Math.PI + kf("mnAzOff"); mEl = Math.abs(el) * .9 + kf("mnElOff") }
+                  else { mAz = kf("mnAz").toDouble(); mEl = kf("mnEl").toDouble() }
+                  val mdx = (Math.cos(mEl) * Math.sin(mAz)).toFloat(); val mdy = Math.sin(mEl).toFloat(); val mdz = (Math.cos(mEl) * Math.cos(mAz)).toFloat()
+
 
                   G.glViewport(0, 0, sw, sh)
                   G.glClearColor(.3f, .5f, .9f, 1f)
@@ -1178,6 +1187,16 @@ jobs:
                   G.glUseProgram(pSky.id); common(pSky)
                   G.glUniform3fv(pSky.u("R"), 1, rv, 0); G.glUniform3fv(pSky.u("U"), 1, uv, 0); G.glUniform3fv(pSky.u("F"), 1, fw, 0)
                   G.glUniform2f(pSky.u("th"), tan(fov / 2f) * asp, tan(fov / 2f))
+                  G.glUniform1f(pSky.u("tm"), tm); G.glUniform1f(pSky.u("stT"), kf("stMWTilt"))
+                  G.glUniform4f(pSky.u("stA"), kf("stDens"), kf("stBr"), kf("stSz"), kf("stTw"))
+                  G.glUniform4f(pSky.u("stB"), kf("stOn"), kf("stCol"), kf("stMW"), kf("stDark"))
+                  G.glUniform4f(pSky.u("mnA"), kf("mnOn"), kf("mnSize"), kf("mnBr"), kf("mnPhase"))
+                  G.glUniform3f(pSky.u("md"), mdx, mdy, mdz)
+                  G.glUniform4f(pSky.u("mnB"), kf("mnTint"), kf("mnGlow"), kf("mnDay"), kf("mnRot"))
+                  G.glUniform4f(pSky.u("mnC"), kf("mnMaria"), kf("mnCrat"), kf("mnEs"), 0f)
+                  G.glUniform4f(pSky.u("clA"), kf("cloud"), kf("c2Sc"), kf("c2Sp"), kf("c2Br"))
+                  G.glUniform4f(pSky.u("clB"), kf("c2Dir"), kf("c2Soft"), kf("c2Sh"), kf("c2Hz"))
+                  G.glUniform4f(pSky.u("clC"), kf("c2Ci"), kf("c2Ac"), kf("c2Cu"), kf("c2St"))
                   G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
                   G.glEnable(G.GL_DEPTH_TEST)
 
@@ -1239,6 +1258,14 @@ jobs:
                   }
                   G.glBindVertexArray(0)
                   G.glDepthMask(true)
+                  // overlay bawah air (tint + kaustik + sinar)
+                  if (under) {
+                      G.glEnable(G.GL_BLEND); G.glBlendFunc(G.GL_SRC_ALPHA, G.GL_ONE_MINUS_SRC_ALPHA)
+                      G.glUseProgram(pUw.id)
+                      G.glUniform1f(pUw.u("tm"), tm); G.glUniform1f(pUw.u("amt"), kf("uwAmt")); G.glUniform1f(pUw.u("dens"), kf("uwDens"))
+                      G.glUniform1f(pUw.u("caus"), kf("uwCaus")); G.glUniform1f(pUw.u("sdy"), sdy)
+                      G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
+                  }
                   // vignette (kali layar)
                   G.glDisable(G.GL_DEPTH_TEST)
                   G.glBlendFunc(G.GL_ZERO, G.GL_SRC_COLOR)
@@ -1753,7 +1780,7 @@ jobs:
                   dyn["ruinShrine"] = 1.0
                   dyn["ruinRound"] = 1.0
               }
-              fun d(k: String): Double = dyn[k] ?: 1.0
+              fun d(k: String): Double = dyn[k] ?: Schema.defOf(k)
 
               /** profil low-RAM HTML (LOWK) + radius seperti yang dipakai HTML di HP */
               fun applyLow() {
@@ -4865,8 +4892,105 @@ jobs:
           void main(){vec2 q=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));nd=q*2.-1.;gl_Position=vec4(nd,1.,1.);}
           """
 
-              val FSKY: String = "#version 300 es\nprecision highp float;\nin vec2 nd;uniform vec3 R,U,F;uniform vec2 th;uniform float hs;\n" + SKYF + FIN +
-                  "out vec4 o;\nvoid main(){vec3 d=normalize(F+R*nd.x*th.x+U*nd.y*th.y);o=vec4(fin(skyc(d)*hs),1.);}\n"
+              val FSKY: String = "#version 300 es\nprecision highp float;\nin vec2 nd;uniform vec3 R,U,F,md;uniform vec2 th;uniform float hs,tm,stT;\n" +
+                  "uniform vec4 stA,stB,mnA,mnB,mnC,clA,clB,clC;\n" + SKYF + FIN +
+                  "out vec4 o;\n" +
+                  """
+          float h21(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+          float h31(vec3 p){return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453);}
+          float vn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y);}
+          float fbm(vec2 p){float a=.5,s=0.;for(int i=0;i<5;i++){s+=a*vn(p);p=p*2.03+vec2(17.1,9.2);a*=.5;}return s;}
+          vec3 stars(vec3 d){
+           vec3 col=vec3(0.);
+           for(int l=0;l<2;l++){
+            float S=(l==0)?70.:150.;
+            vec3 q=d*S,id=floor(q),f=fract(q)-.5;
+            float h=h31(id+float(l)*17.);
+            if(h>1.-.045*stA.x){
+             vec3 off=(vec3(h31(id+1.3),h31(id+2.7),h31(id+4.1))-.5)*.7;
+             float dd=length(f-off);
+             float r=.10*stA.z*((l==0)?1.:.7);
+             float b=smoothstep(r,0.,dd);
+             float tw=1.+.45*stA.w*sin(tm*(1.5+h*5.)+h*40.);
+             vec3 tc=mix(vec3(1.),mix(vec3(.65,.78,1.),vec3(1.,.8,.55),h31(id+9.1)),clamp(stB.y*.8,0.,1.));
+             col+=tc*b*tw*stA.y*((l==0)?1.4:.8)*(.4+h31(id+5.5));
+            }
+           }
+           return col;
+          }
+          void main(){
+           vec3 d=normalize(F+R*nd.x*th.x+U*nd.y*th.y);
+           vec3 sk=skyc(d);
+           float ni=1.-smoothstep(-.14,.12,sd.y);
+           float dayv=smoothstep(-.05,.35,sd.y);
+           if(stB.x>.5&&ni>.01&&d.y>-.02){
+            float up=smoothstep(0.,.1,d.y);
+            vec3 nrm=normalize(vec3(sin(stT),cos(stT),.35));
+            float bd=dot(d,nrm);
+            float mw=exp(-bd*bd*18.)*(.35+.9*fbm(d.xz*5.+d.y*3.))*stB.z*.16;
+            sk=sk*(1.-.55*stB.w*ni)+(stars(d)+vec3(.55,.62,.85)*mw)*ni*up;
+           }
+           if(mnA.x>.5){
+            float r=mnA.y,c=dot(d,md),ang=acos(clamp(c,-1.,1.));
+            float vis=mix(1.,mnB.z,dayv);
+            if(ang<r*4.){sk+=vec3(.7,.78,1.)*exp(-ang*ang/(r*r*14.))*mnB.y*.16*mnA.z*vis;}
+            if(ang<r*1.04){
+             vec3 tx=normalize(cross(md,vec3(0.,1.,0.)+vec3(1e-3)));
+             vec3 ty=cross(md,tx);
+             vec2 p=vec2(dot(d,tx),dot(d,ty))/r;
+             float rr=dot(p,p),m=1.-smoothstep(.9,1.,sqrt(rr));
+             vec3 n3=-md*sqrt(max(1.-rr,0.))+tx*p.x+ty*p.y;
+             float a=mnA.w*6.2832;
+             vec3 ld=normalize(md*cos(a)+tx*sin(a));
+             float df=smoothstep(-.05,.25,dot(n3,ld));
+             float cr=cos(mnB.w),sr=sin(mnB.w);
+             vec2 pr=vec2(cr*p.x-sr*p.y,sr*p.x+cr*p.y);
+             float maria=smoothstep(.45,.6,fbm(pr*1.6+4.2)),cra=fbm(pr*8.);
+             vec3 alb=mix(vec3(.82,.83,.86),vec3(1.,.88,.68),mnB.x)*(1.-.45*maria*mnC.x)*(.85+.3*(cra-.5)*mnC.y);
+             vec3 mc=alb*df*2.6*mnA.z+vec3(.025,.035,.06)*mnC.z*(1.-df);
+             sk=mix(sk,mc,m*vis);
+            }
+           }
+           float cv=clA.x;
+           if(cv>.01&&d.y>.004){
+            float hh=d.y+.1;
+            vec2 pl=d.xz/hh;
+            vec2 dr=vec2(cos(clB.x),sin(clB.x));
+            vec2 p=pl*.55*clA.y+dr*tm*.012*clA.z;
+            vec2 w=vec2(fbm(p*1.3+3.1),fbm(p*1.3+9.4))-.5;p+=w*.6;
+            float so=clB.y*.2;
+            float n=fbm(p);
+            float cu=smoothstep(.62-cv*.30,.62-cv*.30+so+.04,n)*clC.z;
+            float ac=smoothstep(.58-cv*.22,.78,fbm(p*2.7+7.3))*clC.y*.55;
+            float ci=smoothstep(.45,.9,fbm(vec2(p.x*.35,p.y*2.1)*3.+1.7))*clC.x*.35*smoothstep(.12,.5,d.y);
+            float st=clC.w*(1.-smoothstep(0.,.22,d.y))*smoothstep(.35,.7,fbm(p*.5+2.))*.6;
+            float a=1.-(1.-cu)*(1.-ac)*(1.-ci)*(1.-st);
+            a*=smoothstep(0.,.06+.05*clB.w,d.y);
+            float ns=fbm(p+normalize(sd.xz+1e-4)*.09);
+            float lit=1.-clamp((ns-n)*3.2*clB.z,0.,1.)*.85;
+            vec3 amb=vec3(.60,.70,.95)*(.28+.5*dayv);
+            vec3 cc=(amb*(1.-.5*(1.-lit))+sc*.55*lit*clamp(sd.y*1.3+.2,0.,1.))*clA.w;
+            cc*=mix(.05,1.,smoothstep(-.14,.12,sd.y));
+            cc=mix(cc,cc*vec3(1.4,.85,.55),(1.-dayv)*pow(max(dot(normalize(d.xz+1e-4),normalize(sd.xz+1e-4)),0.),2.)*.7);
+            sk=mix(sk,cc,clamp(a,0.,1.));
+           }
+           o=vec4(fin(sk*hs),1.);}
+          """
+
+              const val FUW = """#version 300 es
+          precision highp float;
+          in vec2 nd;uniform float tm,amt,dens,caus,sdy;out vec4 o;
+          void main(){
+           vec2 uv=nd*.5+.5;
+           float lt=.3+.7*clamp(sdy*1.4+.35,0.,1.);
+           vec3 base=vec3(.015,.19,.24)*lt;
+           float c1=sin(uv.x*26.+tm*1.2+sin(uv.y*19.+tm*.8)*1.5),c2=sin(uv.y*23.-tm*1.+sin(uv.x*15.-tm*.6)*1.7);
+           float ca=pow(max(0.,1.-abs(c1*c2)*1.6),4.)*smoothstep(.15,1.,uv.y)*caus*amt*.22*lt;
+           float ry=pow(max(0.,sin(uv.x*8.+sin(tm*.35)*2.+uv.y*3.)),10.)*smoothstep(.2,1.,uv.y)*caus*amt*.10*lt;
+           vec3 col=base+vec3(.45,.9,.85)*(ca+ry);
+           o=vec4(col,clamp(.28*dens+.10*(1.-uv.y)*dens,0.,.8));
+          }
+          """
 
               const val FFADE = """#version 300 es
           precision mediump float;
@@ -4953,6 +5077,49 @@ jobs:
                       Item("sky", "Intensitas langit", 1.0, 0.0, 4.0, 0.05, true),
                       Item("sunAz", "Azimut matahari (rad)", 1.81, 0.0, 6.283, 0.01, true),
                       Item("sunEl", "Elevasi matahari (rad)", 0.6, -0.5, 1.57, 0.01, true),
+                  )),
+                  Cat("Night Sky", listOf(
+                      Item("stOn", "Stars enabled", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("stDens", "Star density", 1.0, 0.0, 4.0, 0.05, false),
+                      Item("stBr", "Star brightness", 1.0, 0.0, 4.0, 0.05, false),
+                      Item("stSz", "Star size", 1.0, 0.3, 3.0, 0.05, false),
+                      Item("stTw", "Twinkle", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("stCol", "Star colour variety", 1.0, 0.0, 1.5, 0.05, false),
+                      Item("stMW", "Milky Way", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("stMWTilt", "Milky Way tilt (rad)", 0.9, 0.0, 3.14, 0.01, false),
+                      Item("stDark", "Night sky darkness", 0.85, 0.0, 1.0, 0.01, false),
+                  )),
+                  Cat("Moon", listOf(
+                      Item("mnOn", "Moon enabled", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("mnAuto", "Moon opposite the sun (auto)", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("mnAz", "Azimuth (manual, rad)", 4.0, 0.0, 6.283, 0.01, false),
+                      Item("mnEl", "Elevation (manual, rad)", 0.8, -0.3, 1.5, 0.01, false),
+                      Item("mnAzOff", "Auto: azimuth offset", 0.0, -3.14, 3.14, 0.01, false),
+                      Item("mnElOff", "Auto: elevation offset", 0.25, -0.5, 1.2, 0.01, false),
+                      Item("mnSize", "Angular radius (rad)", 0.034, 0.008, 0.2, 0.002, false),
+                      Item("mnPhase", "Phase (0 new, .5 full)", 0.62, 0.0, 1.0, 0.01, false),
+                      Item("mnBr", "Brightness", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("mnTint", "Warm tint", 0.45, 0.0, 1.0, 0.01, false),
+                      Item("mnMaria", "Dark maria", 1.0, 0.0, 1.5, 0.05, false),
+                      Item("mnCrat", "Crater detail", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("mnRot", "Surface rotation (rad)", 0.3, 0.0, 6.283, 0.01, false),
+                      Item("mnGlow", "Glow / halo", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("mnEs", "Earthshine", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("mnDay", "Daytime visibility", 0.45, 0.0, 1.5, 0.01, false),
+                  )),
+                  Cat("Clouds", listOf(
+                      Item("cloud", "Cloud coverage", 0.05, 0.0, 1.5, 0.05, false),
+                      Item("c2Ci", "2D: cirrus amount", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("c2Ac", "2D: altocumulus amount", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("c2Cu", "2D: cumulus amount", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("c2St", "2D: horizon stratus amount", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("c2Sc", "2D: pattern scale", 1.0, 0.3, 3.0, 0.05, false),
+                      Item("c2Sp", "2D: drift speed", 1.0, 0.0, 5.0, 0.05, false),
+                      Item("c2Dir", "2D: drift direction (rad)", 0.38, 0.0, 6.283, 0.01, false),
+                      Item("c2Br", "2D: brightness", 1.0, 0.3, 2.0, 0.05, false),
+                      Item("c2Soft", "2D: edge softness", 1.0, 0.3, 3.0, 0.05, false),
+                      Item("c2Sh", "2D: self-shadow contrast", 1.0, 0.0, 2.5, 0.05, false),
+                      Item("c2Hz", "2D: horizon haze", 1.0, 0.0, 2.0, 0.05, false),
                   )),
                   Cat("Post FX", listOf(
                       Item("sat", "Saturasi", 1.08, 0.0, 2.0, 0.02, false),
@@ -5084,6 +5251,12 @@ jobs:
                       Item("swAnem", "Sea anemones", 0.5, 0.0, 4.0, 0.05, true),
                       Item("lily", "Lily pads", 1.0, 0.0, 4.0, 0.05, true),
                   )),
+                  Cat("Underwater Look", listOf(
+                      Item("uwOn", "Bawah air volumetrik (0/1)", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("uwAmt", "Kekuatan efek (riak lensa, partikel, sinar)", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("uwDens", "Kekeruhan / serapan warna", 1.0, 0.2, 3.0, 0.05, false),
+                      Item("uwCaus", "Kaustik & sinar menyelam", 1.0, 0.0, 3.0, 0.05, false),
+                  )),
                   Cat("Ruins", listOf(
                       Item("ruinOn", "Ruined buildings enabled", 1.0, 0.0, 1.0, 1.0, true),
                       Item("ruinDens", "Frequency", 0.6, 0.0, 3.0, 0.05, true),
@@ -5109,6 +5282,8 @@ jobs:
                       Item("lowRam", "Low-RAM mode flag (use the buttons below)", 1.0, 0.0, 1.0, 1.0, true),
                   )),
               )
+              private val DEFS = HashMap<String, Double>().also { m -> for (c in CATS) for (i in c.items) m[i.key] = i.def }
+              @JvmStatic fun defOf(k: String): Double = DEFS[k] ?: 1.0
           }
           EOF
 
