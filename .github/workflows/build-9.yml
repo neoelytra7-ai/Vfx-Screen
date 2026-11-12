@@ -610,6 +610,7 @@ jobs:
               // ---------- konfigurasi & kualitas ----------
               @Volatile var cfg: Cfg = makeCfg(1)
               @Volatile var quality = 1
+                  private set
               @Volatile private var pendingQ = -1
 
               // ---------- dunia ----------
