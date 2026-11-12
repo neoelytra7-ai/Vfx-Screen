@@ -705,6 +705,14 @@ jobs:
               private lateinit var pFade: Prog
               private lateinit var pVig: Prog
               private lateinit var pUw: Prog
+              private lateinit var pFa: Prog
+              private lateinit var pFl: Prog
+              private var kick = 0f
+              private var flareVis = 0f
+              private var lastPx = 0f
+              private var lastPz = 0f
+              private var wTick = 0
+              @JvmField val audio = Audio { cfg }
               private var texAtlas = 0
               private var texWn = 0
               private var broken = false
@@ -741,7 +749,7 @@ jobs:
                   try {
                       pT = prog(Shaders.vt(false), Shaders.fs(false)); pF = prog(Shaders.vt(true), Shaders.fs(true))
                       pWA = prog(Shaders.VW, Shaders.fw(false)); pWB = prog(Shaders.VW, Shaders.fw(true))
-                      pSky = prog(Shaders.VQ, Shaders.FSKY); pFade = prog(Shaders.VQ, Shaders.FFADE); pVig = prog(Shaders.VQ, Shaders.FVIG); pUw = prog(Shaders.VQ, Shaders.FUW)
+                      pSky = prog(Shaders.VQ, Shaders.FSKY); pFade = prog(Shaders.VQ, Shaders.FFADE); pVig = prog(Shaders.VQ, Shaders.FVIG); pUw = prog(Shaders.VQ, Shaders.FUW); pFa = prog(Shaders.VFA, Shaders.FFA); pFl = prog(Shaders.VQ, Shaders.FFL)
                       broken = false
                   } catch (e: Throwable) {
                       broken = true
@@ -995,7 +1003,8 @@ jobs:
               }
 
               private fun look() {
-                  yaw -= lookDX * .0045f; pit = (pit - lookDY * .0045f).coerceIn(-1.45f, 1.45f); lookDX = 0f; lookDY = 0f
+                  val ks = cfg.touch.toFloat()
+                  yaw -= lookDX * ks; pit = (pit - lookDY * ks).coerceIn(-1.45f, 1.45f); lookDX = 0f; lookDY = 0f
               }
 
               private fun walkStep(dt: Float) {
@@ -1156,7 +1165,9 @@ jobs:
                   view[8] = rv[2]; view[9] = uv[2]; view[10] = z[2]; view[11] = 0f
                   view[12] = -dot(rv, eye); view[13] = -dot(uv, eye); view[14] = -dot(z, eye); view[15] = 1f
                   val asp = sw / sh.toFloat()
-                  Matrix.perspectiveM(proj, 0, Math.toDegrees(fov.toDouble()).toFloat(), asp, .1f, 1500f)
+                  kick += ((if (sprint && !cin) 1f else 0f) - kick) * min(1f, dt * 5f)
+                  val fovE = fov + .14f * kick * cfg.getK("fovKick").toFloat()
+                  Matrix.perspectiveM(proj, 0, Math.toDegrees(fovE.toDouble()).toFloat(), asp, .1f, 1500f)
                   Matrix.multiplyMM(mvp, 0, proj, 0, view, 0)
                   extractPlanes()
 
@@ -1168,6 +1179,8 @@ jobs:
                   val wyU = main.waterY(px.toDouble(), pz.toDouble()).toFloat()
                   val under = kf("uwOn") > .5f && wyU > -1e8f && py < wyU
                   val fog = max(cfg.fog.toFloat(), 3.2f / (cfg.rd.toFloat() * 16f)) * (if (under) 1f + 2.2f * kf("uwDens") else 1f)
+                  val pf = if (kf("post") > .5f) 1f else 0f
+                  val gA = if (kf("gOn") > .5f) kf("gAmt") * pf else 0f
                   val mAz: Double; val mEl: Double
                   if (kf("mnAuto") > .5f) { mAz = az + Math.PI + kf("mnAzOff"); mEl = Math.abs(el) * .9 + kf("mnElOff") }
                   else { mAz = kf("mnAz").toDouble(); mEl = kf("mnEl").toDouble() }
@@ -1181,12 +1194,20 @@ jobs:
                       G.glUniform3f(p.u("sd"), sdx, sdy, sdz); G.glUniform3f(p.u("sc"), 1.3f * scs, 1.1f * scs, .85f * scs)
                       G.glUniform1f(p.u("cex"), cfg.cex.toFloat()); G.glUniform1f(p.u("sat"), cfg.sat.toFloat()); G.glUniform1f(p.u("con"), cfg.con.toFloat())
                       G.glUniform1f(p.u("hs"), 1f)
+                      G.glUniform4f(p.u("g1"), gA, kf("gEv"), kf("gTemp"), kf("gTint"))
+                      G.glUniform4f(p.u("g2"), kf("gCon"), kf("gPiv"), kf("gSat"), kf("gVib"))
+                      G.glUniform4f(p.u("g3"), kf("gBlk"), kf("gWht"), kf("matte") * pf, kf("bleach") * pf)
+                      G.glUniform4f(p.u("g4"), kf("stSH"), kf("stSS"), kf("stHH"), kf("stHS"))
+                      G.glUniform4f(p.u("g5"), kf("grade") * pf, kf("grain") * pf, (tm % 100f), 0f)
+                      G.glUniform3f(p.u("gLi"), kf("glR"), kf("glG"), kf("glB"))
+                      G.glUniform3f(p.u("gGa"), kf("ggR"), kf("ggG"), kf("ggB"))
+                      G.glUniform3f(p.u("gGn"), kf("gnR"), kf("gnG"), kf("gnB"))
                   }
                   // langit
                   G.glDisable(G.GL_DEPTH_TEST)
                   G.glUseProgram(pSky.id); common(pSky)
                   G.glUniform3fv(pSky.u("R"), 1, rv, 0); G.glUniform3fv(pSky.u("U"), 1, uv, 0); G.glUniform3fv(pSky.u("F"), 1, fw, 0)
-                  G.glUniform2f(pSky.u("th"), tan(fov / 2f) * asp, tan(fov / 2f))
+                  G.glUniform2f(pSky.u("th"), tan(fovE / 2f) * asp, tan(fovE / 2f))
                   G.glUniform1f(pSky.u("tm"), tm); G.glUniform1f(pSky.u("stT"), kf("stMWTilt"))
                   G.glUniform4f(pSky.u("stA"), kf("stDens"), kf("stBr"), kf("stSz"), kf("stTw"))
                   G.glUniform4f(pSky.u("stB"), kf("stOn"), kf("stCol"), kf("stMW"), kf("stDark"))
@@ -1197,6 +1218,11 @@ jobs:
                   G.glUniform4f(pSky.u("clA"), kf("cloud"), kf("c2Sc"), kf("c2Sp"), kf("c2Br"))
                   G.glUniform4f(pSky.u("clB"), kf("c2Dir"), kf("c2Soft"), kf("c2Sh"), kf("c2Hz"))
                   G.glUniform4f(pSky.u("clC"), kf("c2Ci"), kf("c2Ac"), kf("c2Cu"), kf("c2St"))
+                  val saAzD = kf("saAz").toDouble(); val saElD = kf("saEl").toDouble()
+                  G.glUniform3f(pSky.u("sad"), (Math.cos(saElD) * Math.sin(saAzD)).toFloat(), Math.sin(saElD).toFloat(), (Math.cos(saElD) * Math.cos(saAzD)).toFloat())
+                  G.glUniform4f(pSky.u("saA"), kf("saOn"), kf("saSize"), kf("saBr"), kf("saBands"))
+                  G.glUniform4f(pSky.u("saB"), kf("saRoll"), kf("saOpen"), kf("saRing"), kf("saGlow"))
+                  G.glUniform4f(pSky.u("saC"), kf("saShadow"), kf("saTint"), kf("saDay"), 0f)
                   G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
                   G.glEnable(G.GL_DEPTH_TEST)
 
@@ -1258,6 +1284,74 @@ jobs:
                   }
                   G.glBindVertexArray(0)
                   G.glDepthMask(true)
+                  // ---- fauna prosedural, debu, kunang-kunang ----
+                  run {
+                      val faOn = kf("faOn") > .5f
+                      val nFF = if (faOn && !under) (Math.min(kf("ff"), 600f) / 4f).toInt() else 0
+                      val nDu = if (!under) Math.min(kf("dust"), 600f).toInt() else 0
+                      val nBu = if (faOn && !under) kf("butN").toInt() else 0
+                      val nDr = if (faOn && !under) kf("drgN").toInt() else 0
+                      val nBi = if (faOn && !under) kf("birdN").toInt() else 0
+                      if (nFF + nDu + nBu + nDr + nBi > 0) {
+                          val d0 = ((sdy + .05f) / .4f).coerceIn(0f, 1f)
+                          val dayf = d0 * d0 * (3f - 2f * d0)
+                          val gyy = main.hfn(floor(px).toInt(), floor(pz).toInt()) + 1f
+                          G.glEnable(G.GL_BLEND); G.glDepthMask(false)
+                          G.glUseProgram(pFa.id)
+                          G.glUniformMatrix4fv(pFa.u("m"), 1, false, mvp, 0); G.glUniform3f(pFa.u("cp"), px, py, pz)
+                          G.glUniform1f(pFa.u("tm"), tm); G.glUniform1f(pFa.u("gy"), gyy); G.glUniform1f(pFa.u("dayf"), dayf)
+                          G.glUniform1f(pFa.u("ps"), sh / (2f * tan(fovE / 2f)))
+                          G.glUniform4f(pFa.u("cn"), nFF.toFloat(), nDu.toFloat(), nBu.toFloat(), nDr.toFloat())
+                          G.glUniform4f(pFa.u("fa1"), kf("ffSpd"), kf("ffAlt"), kf("ffWander"), kf("ffBlink"))
+                          G.glUniform4f(pFa.u("fa2"), kf("butSpd"), kf("butFlap"), kf("butErr"), kf("butSize"))
+                          G.glUniform4f(pFa.u("fa3"), kf("drgSpd"), kf("drgSize"), kf("birdAlt"), kf("birdSpd"))
+                          G.glUniform4f(pFa.u("fa4"), kf("birdSize"), kf("ffSize"), kf("ffHalo") * (.55f + kf("ffBright")), kf("ffDay"))
+                          G.glUniform3f(pFa.u("fa5"), kf("faRange"), 0f, 0f)
+                          if (nFF + nDu > 0) { G.glBlendFunc(G.GL_ONE, G.GL_ONE); G.glDrawArrays(G.GL_POINTS, 0, nFF + nDu) }
+                          if (nBu + nDr + nBi > 0) { G.glBlendFunc(G.GL_SRC_ALPHA, G.GL_ONE_MINUS_SRC_ALPHA); G.glDrawArrays(G.GL_POINTS, nFF + nDu, nBu + nDr + nBi) }
+                          G.glDepthMask(true)
+                      }
+                  }
+                  // ---- lens flare / glare / streak / halation ----
+                  run {
+                      val fl = kf("flare"); val st = kf("streak"); val gl = kf("glare"); val ha = kf("halat")
+                      if (!under && pf > 0f && fl + st + gl + ha > 0f) {
+                          val wx = px + sdx * 1000f; val wy2 = py + sdy * 1000f; val wz = pz + sdz * 1000f
+                          val cw = mvp[3] * wx + mvp[7] * wy2 + mvp[11] * wz + mvp[15]
+                          var tgt = 0f; var nx = 0f; var ny = 0f
+                          if (cw > .01f && sdy > -.05f) {
+                              nx = (mvp[0] * wx + mvp[4] * wy2 + mvp[8] * wz + mvp[12]) / cw
+                              ny = (mvp[1] * wx + mvp[5] * wy2 + mvp[9] * wz + mvp[13]) / cw
+                              var occ = false; var dd = 3f
+                              while (dd < 260f && !occ) { if (main.getP((px + sdx * dd).toDouble(), (py + sdy * dd).toDouble(), (pz + sdz * dd).toDouble()) != 0) occ = true; dd *= 1.18f }
+                              val e = Math.max(Math.abs(nx), Math.abs(ny))
+                              tgt = if (occ) 0f else ((1.7f - e) / .9f).coerceIn(0f, 1f) * ((sdy + .05f) / .2f).coerceIn(0f, 1f)
+                          }
+                          flareVis += (tgt - flareVis) * min(1f, dt * 8f)
+                          if (flareVis > .003f) {
+                              G.glDisable(G.GL_DEPTH_TEST); G.glEnable(G.GL_BLEND); G.glBlendFunc(G.GL_ONE, G.GL_ONE)
+                              G.glUseProgram(pFl.id)
+                              G.glUniform2f(pFl.u("sp"), nx, ny); G.glUniform1f(pFl.u("asp"), asp); G.glUniform1f(pFl.u("vis"), flareVis)
+                              G.glUniform4f(pFl.u("fl"), fl, st, gl, ha)
+                              G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
+                          }
+                      } else { flareVis = 0f }
+                  }
+                  // ---- parameter audio ----
+                  run {
+                      audio.day = ((sdy + .05f) / .4f).coerceIn(0f, 1f)
+                      audio.wind = cfg.wind.toFloat() * cfg.swayAmp.toFloat()
+                      audio.under = under
+                      audio.alt = py - (main.hfn(floor(px).toInt(), floor(pz).toInt()) + 1f)
+                      if (dt > 0f) { audio.speed = Math.hypot((px - lastPx).toDouble(), (pz - lastPz).toDouble()).toFloat() / dt; audio.grounded = audio.alt < 2.2f }
+                      lastPx = px; lastPz = pz
+                      if (++wTick % 10 == 0) {
+                          var n = 0
+                          for (o in arrayOf(0f, 8f, -8f)) for (o2 in arrayOf(0f, 8f, -8f)) if (main.waterY((px + o).toDouble(), (pz + o2).toDouble()) > -1e8) n++
+                          audio.water = n / 9f
+                      }
+                  }
+
                   // overlay bawah air (tint + kaustik + sinar)
                   if (under) {
                       G.glEnable(G.GL_BLEND); G.glBlendFunc(G.GL_SRC_ALPHA, G.GL_ONE_MINUS_SRC_ALPHA)
@@ -1455,8 +1549,9 @@ jobs:
               @Suppress("DEPRECATION")
               override fun onBackPressed() { if (menu.isOpen()) menu.close() else super.onBackPressed() }
 
-              override fun onPause() { super.onPause(); gv.onPause() }
-              override fun onResume() { super.onResume(); gv.onResume() }
+              override fun onPause() { super.onPause(); r.audio.stop(); gv.onPause() }
+              override fun onResume() { super.onResume(); gv.onResume(); r.audio.start() }
+          
               override fun onDestroy() { r.destroy(); super.onDestroy() }
           }
           EOF
@@ -4852,10 +4947,37 @@ jobs:
           """
 
               const val FIN = """
-          uniform float cex,sat,con;
+          uniform float cex,sat,con;uniform vec4 g1,g2,g3,g4,g5;uniform vec3 gLi,gGa,gGn;
           const vec3 LW=vec3(.2126,.7152,.0722);
           vec3 aces(vec3 x){return clamp((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14),0.,1.);}
-          vec3 fin(vec3 c){c=pow(aces(c*cex),vec3(.4545));float ll=dot(c,LW);return clamp((mix(vec3(ll),c,sat)-.5)*con+.5,0.,1.);}
+          vec3 hue2(float h){return clamp(abs(fract(h+vec3(0.,.6667,.3333))*6.-3.)-1.,0.,1.);}
+          vec3 fin(vec3 c){
+           float ga=g1.x;
+           vec3 wb=vec3(1.+.2*g1.z,1.-.1*g1.w,1.-.2*g1.z+.05*g1.w);
+           c=pow(aces(c*cex*mix(vec3(1.),wb*exp2(g1.y),ga)),vec3(.4545));
+           float ll=dot(c,LW);
+           c=(mix(vec3(ll),c,sat)-.5)*con+.5;
+           if(ga>0.){
+            vec3 g=clamp(c,0.,1.);
+            g=g*gGn+gLi*(1.-g);
+            g=pow(max(g,vec3(0.)),1./max(gGa,vec3(.01)));
+            g=(g-g2.y)*g2.x+g2.y;
+            float gl2=dot(g,LW);
+            g=mix(vec3(gl2),g,g2.z);
+            float mx=max(g.r,max(g.g,g.b)),mn=min(g.r,min(g.g,g.b));
+            g=mix(vec3(gl2),g,1.+g2.w*(1.-(mx-mn)));
+            g=(g-g3.x)/max(1.-g3.x,.05)*(1.1/max(g3.y,.3));
+            float lw2=dot(g,LW);
+            g+=(hue2(g4.x)-.5)*g4.y*.25*(1.-lw2)+(hue2(g4.z)-.5)*g4.w*.25*lw2;
+            c=mix(c,g,ga);
+           }
+           float l2=dot(c,LW);
+           c=mix(c,(vec3(l2)*.6+c*.4-.5)*1.35+.5,g3.w*.7);
+           c+=g5.x*(vec3(-.025,.01,.035)*(1.-l2)+vec3(.035,.014,-.03)*l2);
+           c=g3.z+c*(1.-g3.z);
+           c+=(fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233))+g5.z*61.)*43758.5453)-.5)*g5.y;
+           return clamp(c,0.,1.);
+          }
           """
 
               fun vt(sway: Boolean): String = "#version 300 es\n" +
@@ -4892,8 +5014,8 @@ jobs:
           void main(){vec2 q=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));nd=q*2.-1.;gl_Position=vec4(nd,1.,1.);}
           """
 
-              val FSKY: String = "#version 300 es\nprecision highp float;\nin vec2 nd;uniform vec3 R,U,F,md;uniform vec2 th;uniform float hs,tm,stT;\n" +
-                  "uniform vec4 stA,stB,mnA,mnB,mnC,clA,clB,clC;\n" + SKYF + FIN +
+              val FSKY: String = "#version 300 es\nprecision highp float;\nin vec2 nd;uniform vec3 R,U,F,md,sad;uniform vec2 th;uniform float hs,tm,stT;\n" +
+                  "uniform vec4 stA,stB,mnA,mnB,mnC,clA,clB,clC,saA,saB,saC;\n" + SKYF + FIN +
                   "out vec4 o;\n" +
                   """
           float h21(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
@@ -4951,6 +5073,34 @@ jobs:
              sk=mix(sk,mc,m*vis);
             }
            }
+
+           if(saA.x>.5){
+            float r=saA.y,c=dot(d,sad),ang=acos(clamp(c,-1.,1.));
+            float vis=mix(1.,saC.z,dayv);
+            if(ang<r*5.){
+             sk+=vec3(1.,.9,.7)*exp(-ang*ang/(r*r*10.))*saB.w*.05*saA.z*vis;
+             vec3 tx=normalize(cross(sad,vec3(0.,1.,0.)+vec3(1e-3)));vec3 ty=cross(sad,tx);
+             vec2 p=vec2(dot(d,tx),dot(d,ty))/r;
+             float cr=cos(saB.x),sr=sin(saB.x);vec2 pr=vec2(cr*p.x+sr*p.y,-sr*p.x+cr*p.y);
+             vec2 q=vec2(pr.x,pr.y/max(saB.y,.05));float rq=length(q);
+             float ringA=smoothstep(1.25,1.3,rq)*smoothstep(2.35,2.3,rq);
+             ringA*=(.55+.45*sin(rq*38.))*(1.-.8*smoothstep(1.62,1.66,rq)*smoothstep(1.78,1.74,rq));
+             ringA*=saB.z*.8;
+             vec3 ringC=mix(vec3(.85,.78,.62),vec3(1.,.85,.6),saC.y)*saA.z*2.2;
+             float pr2=length(pr);
+             float plA=1.-smoothstep(.93,1.,pr2);
+             vec3 n3=vec3(pr,sqrt(max(1.-pr2*pr2,0.)));
+             float lg=clamp(dot(n3,normalize(vec3(.55,.45,.7)))*1.2+.15,0.,1.);
+             float bands=.5+.5*sin(pr.y*14.+sin(pr.y*5.+pr.x*1.5)*1.4);
+             vec3 pc=mix(vec3(.78,.66,.46),vec3(.92,.82,.62),bands*saA.w*.7+.3)*mix(vec3(1.),vec3(1.1,.9,.7),saC.y)*lg*2.4*saA.z;
+             float front=step(q.y,0.);
+             vec3 col=sk;
+             col=mix(col,ringC,ringA*(1.-front)*vis);
+             col=mix(col,pc,plA*vis);
+             col=mix(col,ringC*.9,ringA*front*vis);
+             sk=col;
+            }
+           }
            float cv=clA.x;
            if(cv>.01&&d.y>.004){
             float hh=d.y+.1;
@@ -4989,6 +5139,82 @@ jobs:
            float ry=pow(max(0.,sin(uv.x*8.+sin(tm*.35)*2.+uv.y*3.)),10.)*smoothstep(.2,1.,uv.y)*caus*amt*.10*lt;
            vec3 col=base+vec3(.45,.9,.85)*(ca+ry);
            o=vec4(col,clamp(.28*dens+.10*(1.-uv.y)*dens,0.,.8));
+          }
+          """
+
+              const val VFA = """#version 300 es
+          uniform mat4 m;uniform vec3 cp;uniform float tm,gy,ps,dayf;
+          uniform vec4 cn,fa1,fa2,fa3,fa4;uniform vec3 fa5;
+          out vec4 vc;out float vk;out float vf;
+          vec3 h3(float n){return fract(sin(vec3(n*12.9898,n*78.233,n*37.719))*43758.5453);}
+          void main(){
+           float id=float(gl_VertexID);
+           float i0=cn.x,i1=i0+cn.y,i2=i1+cn.z,i3=i2+cn.w;
+           vec3 h=h3(id*1.37+3.1),h2=h3(id*2.11+9.7);
+           vec3 pos=cp;float size=.05;vk=0.;vf=0.;vc=vec4(0.);
+           float R=max(fa5.x,4.);
+           if(id<i0){
+            vec3 p0=h*2.*R;float t=tm*fa1.x;
+            vec3 wd=vec3(sin(t*(.4+h2.x)+h.y*30.),sin(t*(.5+h2.y)*1.3+h.z*30.)*.4,cos(t*(.45+h2.z)+h.x*30.))*fa1.z*2.;
+            vec3 rel=mod(p0+wd-cp+R,2.*R)-R;
+            pos=vec3(cp.x+rel.x,gy+.7+h.y*fa1.y+wd.y*.5,cp.z+rel.z);
+            float on=smoothstep(.2,.9,sin(tm*fa1.w*(1.+h2.x)+h.x*60.)*.5+.5);
+            vc=vec4(.75,1.,.3,on*fa4.z*mix(1.,fa4.w,dayf));size=fa4.y*.12;
+           }else if(id<i1){
+            float Rd=R*.5;vec3 p0=h*2.*Rd;
+            vec3 wd=vec3(sin(tm*.2+h.x*50.),sin(tm*.15+h.y*40.)*.5,cos(tm*.18+h.z*50.))*.8;
+            vec3 rel=mod(p0+wd-cp+Rd,2.*Rd)-Rd;
+            pos=cp+vec3(rel.x,rel.y*.5,rel.z);vc=vec4(.95,.92,.8,.10+.20*dayf);size=.012;
+           }else if(id<i2){
+            vec3 p0=h*2.*R;float t=tm*fa2.x;
+            vec3 wd=vec3(sin(t*.6*(.5+h2.x)+h.y*20.)*3.,0.,cos(t*.5*(.5+h2.y)+h.z*20.)*3.)+vec3(sin(t*5.+h.x*10.),sin(t*7.),cos(t*6.))*.25*fa2.z;
+            vec3 rel=mod(p0+wd-cp+R,2.*R)-R;
+            pos=vec3(cp.x+rel.x,gy+.8+h.y*2.2+sin(t*1.3+h.z*9.)*.4,cp.z+rel.z);
+            vc=vec4(.5+.5*cos(6.28318*(h2.x+vec3(0.,.33,.67))),.95*dayf);vk=1.;vf=sin(tm*fa2.y*14.+h.x*30.);size=fa2.w*.16;
+           }else if(id<i3){
+            vec3 p0=h*2.*R;float t=tm*max(fa3.x,.1);
+            vec3 wd=vec3(sin(t*1.4*(.5+h2.x)+h.y*20.)*6.,0.,cos(t*1.2*(.5+h2.y)+h.z*20.)*6.)+vec3(sin(t*9.+h.x*10.),0.,cos(t*8.))*.3;
+            vec3 rel=mod(p0+wd-cp+R,2.*R)-R;
+            pos=vec3(cp.x+rel.x,gy+1.+h.y*1.8,cp.z+rel.z);
+            vc=vec4(mix(vec3(.1,.5,.8),vec3(.2,.8,.6),h2.x),.9*dayf);vk=2.;vf=sin(tm*60.+h.x*30.);size=fa3.y*.12;
+           }else{
+            float ang=tm*fa3.w*.15*(.5+h.x)+h.y*6.28318,rad=30.+h.z*90.;
+            pos=vec3(cp.x+cos(ang)*rad,gy+fa3.z+h2.y*25.+sin(tm*.3+h.x*9.)*3.,cp.z+sin(ang)*rad);
+            vc=vec4(.05,.05,.06,.85*smoothstep(.0,.3,dayf));vk=3.;vf=.5+.5*sin(tm*6.+h.x*20.);size=fa4.x*.5*(.7+h.z);
+           }
+           gl_Position=m*vec4(pos,1.);
+           gl_PointSize=clamp(size*ps/max(gl_Position.w,.5),1.,48.);
+          }
+          """
+
+              const val FFA = """#version 300 es
+          precision mediump float;
+          in vec4 vc;in float vk;in float vf;out vec4 o;
+          void main(){
+           vec2 p=gl_PointCoord*2.-1.;float r=length(p);
+           if(vk<.5){float a=pow(max(1.-r,0.),2.2);o=vec4(vc.rgb*a*vc.a*2.2,1.);return;}
+           float a=0.;
+           if(vk<1.5){float fl=.45+.55*abs(vf);vec2 q=vec2(abs(p.x)-.38,p.y*.8);a=smoothstep(.55*fl+.15,.35*fl,length(q));a=max(a,smoothstep(.12,.06,abs(p.x))*smoothstep(.7,.5,abs(p.y)));}
+           else if(vk<2.5){a=smoothstep(.2,.1,abs(p.y))*smoothstep(1.,.7,abs(p.x))+smoothstep(.6,.2,length(vec2(p.x,p.y*(.5+.5*abs(vf)))))*.4;}
+           else{a=smoothstep(.22,.08,abs(p.y+abs(p.x)*.6*(.4+.6*vf)-.2))*smoothstep(1.,.8,abs(p.x));}
+           o=vec4(vc.rgb*(.6+.4*(1.-r)),clamp(a,0.,1.)*vc.a);
+          }
+          """
+
+              const val FFL = """#version 300 es
+          precision highp float;
+          in vec2 nd;uniform vec2 sp;uniform float asp,vis;uniform vec4 fl;out vec4 o;
+          void main(){
+           vec2 q=(nd-sp)*vec2(asp,1.);float r=length(q);
+           vec3 col=vec3(1.,.85,.6)*fl.z*.30*(exp(-r*r*3.)+.25/(1.+r*r*12.));
+           col+=vec3(.4,.6,1.)*fl.y*.30*exp(-abs(q.y)*55.)*exp(-abs(q.x)*1.6);
+           col+=vec3(1.,.4,.1)*fl.w*.12*exp(-r*5.);
+           for(int i=1;i<5;i++){
+            vec2 g=mix(sp,-sp,float(i)*.26);float r2=length((nd-g)*vec2(asp,1.));
+            vec3 tc=.5+.5*cos(6.28318*(float(i)*.23+vec3(0.,.33,.67)));
+            col+=tc*(smoothstep(.02,.0,abs(r2-.05*float(i)-.03))*.18+smoothstep(.06,.0,r2)*.06)*fl.x;
+           }
+           o=vec4(col*vis,1.);
           }
           """
 
@@ -5107,6 +5333,21 @@ jobs:
                       Item("mnEs", "Earthshine", 1.0, 0.0, 3.0, 0.05, false),
                       Item("mnDay", "Daytime visibility", 0.45, 0.0, 1.5, 0.01, false),
                   )),
+                  Cat("Saturn", listOf(
+                      Item("saOn", "Saturn enabled", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("saAz", "Azimuth (rad)", 2.4, 0.0, 6.283, 0.01, false),
+                      Item("saEl", "Elevation (rad)", 0.62, -0.3, 1.5, 0.01, false),
+                      Item("saSize", "Planet radius (rad)", 0.02, 0.005, 0.15, 0.001, false),
+                      Item("saRoll", "Ring axis roll (rad)", 0.45, -3.14, 3.14, 0.01, false),
+                      Item("saOpen", "Ring opening (0 edge-on, 1 face-on)", 0.38, 0.05, 0.95, 0.01, false),
+                      Item("saBr", "Brightness", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("saBands", "Cloud band contrast", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("saRing", "Ring density", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("saGlow", "Glow", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("saShadow", "Ring/planet shadows", 1.0, 0.0, 1.5, 0.05, false),
+                      Item("saTint", "Colour warmth", 0.3, 0.0, 1.0, 0.01, false),
+                      Item("saDay", "Daytime visibility", 0.12, 0.0, 1.0, 0.01, false),
+                  )),
                   Cat("Clouds", listOf(
                       Item("cloud", "Cloud coverage", 0.05, 0.0, 1.5, 0.05, false),
                       Item("c2Ci", "2D: cirrus amount", 1.0, 0.0, 2.0, 0.05, false),
@@ -5122,10 +5363,49 @@ jobs:
                       Item("c2Hz", "2D: horizon haze", 1.0, 0.0, 2.0, 0.05, false),
                   )),
                   Cat("Post FX", listOf(
+                      Item("post", "Post-processing (0/1)", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("grade", "Color grade sinematik (teal/orange)", 0.4, 0.0, 1.0, 0.05, false),
                       Item("sat", "Saturasi", 1.08, 0.0, 2.0, 0.02, false),
                       Item("con", "Kontras", 1.06, 0.6, 1.6, 0.02, false),
                       Item("cex", "Eksposur sinema", 0.57435, 0.3, 3.0, 0.05, false),
                       Item("vig", "Vignette", 0.2, 0.0, 1.0, 0.02, false),
+                      Item("grain", "Film grain", 0.02, 0.0, 0.2, 0.005, false),
+                  )),
+                  Cat("Lens & Film", listOf(
+                      Item("flare", "Lens flare matahari", 0.4, 0.0, 2.0, 0.05, false),
+                      Item("streak", "Streak anamorfik biru", 0.35, 0.0, 2.0, 0.05, false),
+                      Item("glare", "Glare / veil sekitar matahari", 0.35, 0.0, 2.0, 0.05, false),
+                      Item("halat", "Halation (glow oranye di highlight)", 0.3, 0.0, 1.5, 0.05, false),
+                      Item("bleach", "Bleach bypass", 0.0, 0.0, 1.0, 0.05, false),
+                      Item("matte", "Hitam matte / fade film", 0.03, 0.0, 0.3, 0.01, false),
+                  )),
+                  Cat("Grade: Basics", listOf(
+                      Item("gOn", "Grading aktif (0/1)", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("gAmt", "Kekuatan stack di bawah", 1.0, 0.0, 1.0, 0.01, false),
+                      Item("gEv", "Eksposur (EV)", 0.0, -3.0, 3.0, 0.01, false),
+                      Item("gTemp", "Temperatur (- dingin / + hangat)", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("gTint", "Tint (- hijau / + magenta)", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("gCon", "Kontras", 1.0, 0.5, 1.8, 0.01, false),
+                      Item("gPiv", "Titik pivot kontras", 0.45, 0.1, 0.8, 0.01, false),
+                      Item("gSat", "Saturasi", 1.0, 0.0, 2.0, 0.01, false),
+                      Item("gVib", "Vibrance", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("gBlk", "Titik hitam (angkat bayangan)", 0.0, -0.1, 0.2, 0.001, false),
+                      Item("gWht", "Titik putih", 1.1, 0.6, 1.1, 0.005, false),
+                  )),
+                  Cat("Grade: Wheels", listOf(
+                      Item("glR", "Lift R (bayangan)", 0.0, -0.2, 0.2, 0.002, false),
+                      Item("glG", "Lift G", 0.0, -0.2, 0.2, 0.002, false),
+                      Item("glB", "Lift B", 0.0, -0.2, 0.2, 0.002, false),
+                      Item("ggR", "Gamma R (midtone)", 1.0, 0.5, 2.0, 0.01, false),
+                      Item("ggG", "Gamma G", 1.0, 0.5, 2.0, 0.01, false),
+                      Item("ggB", "Gamma B", 1.0, 0.5, 2.0, 0.01, false),
+                      Item("gnR", "Gain R (highlight)", 1.0, 0.5, 1.6, 0.01, false),
+                      Item("gnG", "Gain G", 1.0, 0.5, 1.6, 0.01, false),
+                      Item("gnB", "Gain B", 1.0, 0.5, 1.6, 0.01, false),
+                      Item("stSH", "Split-tone bayangan: hue", 0.58, 0.0, 1.0, 0.01, false),
+                      Item("stSS", "Split-tone bayangan: kekuatan", 0.0, 0.0, 1.0, 0.01, false),
+                      Item("stHH", "Split-tone highlight: hue", 0.1, 0.0, 1.0, 0.01, false),
+                      Item("stHS", "Split-tone highlight: kekuatan", 0.0, 0.0, 1.0, 0.01, false),
                   )),
                   Cat("Terrain & Seed", listOf(
                       Item("seed", "Seed", 1.0, 0.0, 999999999.0, 1.0, true),
@@ -5257,6 +5537,29 @@ jobs:
                       Item("uwDens", "Kekeruhan / serapan warna", 1.0, 0.2, 3.0, 0.05, false),
                       Item("uwCaus", "Kaustik & sinar menyelam", 1.0, 0.0, 3.0, 0.05, false),
                   )),
+                  Cat("Fauna (land & air)", listOf(
+                      Item("faOn", "Fauna aktif (0/1)", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("faRange", "Radius fauna (m)", 36.0, 12.0, 90.0, 1.0, false),
+                      Item("faDay", "Fauna siang pudar saat malam (0-1)", 0.8, 0.0, 1.0, 0.05, false),
+                      Item("butN", "Kupu-kupu: jumlah", 22.0, 0.0, 120.0, 1.0, false),
+                      Item("butSize", "Kupu-kupu: ukuran", 1.0, 0.4, 3.0, 0.05, false),
+                      Item("butSpd", "Kupu-kupu: kecepatan", 1.0, 0.3, 3.0, 0.05, false),
+                      Item("butFlap", "Kupu-kupu: laju kepak", 1.0, 0.4, 2.5, 0.05, false),
+                      Item("butErr", "Kupu-kupu: kelincahan/zig-zag", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("drgN", "Capung: jumlah (dekat air)", 6.0, 0.0, 40.0, 1.0, false),
+                      Item("drgSize", "Capung: ukuran", 1.0, 0.4, 3.0, 0.05, false),
+                      Item("drgSpd", "Capung: kecepatan sambar", 1.0, 0.3, 3.0, 0.05, false),
+                      Item("birdN", "Burung jauh: jumlah (kawanan 5)", 8.0, 0.0, 40.0, 1.0, false),
+                      Item("birdSize", "Burung: ukuran", 1.0, 0.4, 3.0, 0.05, false),
+                      Item("birdAlt", "Burung: tinggi terbang (m)", 26.0, 8.0, 80.0, 1.0, false),
+                      Item("birdSpd", "Burung: kecepatan", 1.0, 0.3, 3.0, 0.05, false),
+                      Item("ffWander", "Kunang: liukan terbang", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("ffSpd", "Kunang: kecepatan", 1.0, 0.2, 4.0, 0.05, false),
+                      Item("ffAlt", "Kunang: tinggi melayang (m)", 2.6, 0.8, 8.0, 0.1, false),
+                      Item("ffBlink", "Kunang: laju kedip", 1.0, 0.2, 3.0, 0.05, false),
+                      Item("ffHalo", "Kunang: halo", 1.0, 0.0, 2.5, 0.05, false),
+                      Item("ffMesh", "Kunang: jumlah bentuk 3D (sisanya cahaya)", 60.0, 0.0, 200.0, 1.0, false),
+                  )),
                   Cat("Ruins", listOf(
                       Item("ruinOn", "Ruined buildings enabled", 1.0, 0.0, 1.0, 1.0, true),
                       Item("ruinDens", "Frequency", 0.6, 0.0, 3.0, 0.05, true),
@@ -5272,11 +5575,49 @@ jobs:
                       Item("ruinShrine", "Type weight: shrine gate", 1.0, 0.0, 3.0, 0.05, true),
                       Item("ruinRound", "Type weight: round tower", 1.0, 0.0, 3.0, 0.05, true),
                   )),
+                  Cat("Particles", listOf(
+                      Item("ff", "Jumlah kunang-kunang", 999.0, 0.0, 600.0, 5.0, false),
+                      Item("ffSize", "Ukuran kunang-kunang", 0.2, 0.2, 5.0, 0.05, false),
+                      Item("ffBright", "Kecerahan kunang-kunang", 0.0, 0.0, 6.0, 0.05, false),
+                      Item("dust", "Debu/serbuk", 999.0, 0.0, 600.0, 5.0, false),
+                      Item("pr", "Radius partikel", 30.0, 5.0, 100.0, 1.0, false),
+                  )),
                   Cat("Player", listOf(
                       Item("spd", "Kecepatan jalan", 4.4, 1.0, 20.0, 0.1, false),
                       Item("spr", "Kecepatan lari", 7.0, 1.0, 30.0, 0.1, false),
                       Item("jump", "Kekuatan lompat", 8.5, 2.0, 20.0, 0.1, false),
                       Item("grav", "Gravitasi", 26.0, 5.0, 60.0, 0.5, false),
+                      Item("touch", "Sensitivitas sentuh", 0.005, 0.001, 0.02, 0.0002, false),
+                  )),
+                  Cat("Master & Mix", listOf(
+                      Item("sndOn", "Sound enabled", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("sndMaster", "Master volume", 0.8, 0.0, 1.5, 0.01, false),
+                      Item("sndAmb", "Ambience bed", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndTod", "Day / night variation", 1.0, 0.0, 1.5, 0.05, false),
+                  )),
+                  Cat("Wind & Foliage", listOf(
+                      Item("sndWind", "Wind volume", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndGust", "Gust dynamics", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndAlt", "Wind louder with altitude", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndFol", "Foliage rustle (overall)", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndGrass", "Grass swish", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndLeaf", "Leaf canopy rustle", 1.0, 0.0, 2.0, 0.05, false),
+                  )),
+                  Cat("Water", listOf(
+                      Item("sndWater", "Rivers & streams", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndUnder", "Underwater audio", 1.0, 0.0, 2.0, 0.05, false),
+                  )),
+                  Cat("Creatures", listOf(
+                      Item("sndBird", "Birdsong", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndInsect", "Insects (crickets, cicadas)", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndFrog", "Frogs", 1.0, 0.0, 2.0, 0.05, false),
+                  )),
+                  Cat("Player & Space", listOf(
+                      Item("sndFoot", "Footsteps", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndHP", "High-frequency damping", 0.5, 0.0, 1.0, 0.05, false),
+                  )),
+                  Cat("Camera Feel", listOf(
+                      Item("fovKick", "FOV kick saat lari", 0.0, 0.0, 2.0, 0.05, false),
                   )),
                   Cat("Performance", listOf(
                       Item("lowRam", "Low-RAM mode flag (use the buttons below)", 1.0, 0.0, 1.0, 1.0, true),
@@ -5521,6 +5862,145 @@ jobs:
                   for (item in Schema.CATS[ci].items) { r.resetSetting(item.key); if (item.regen) rg = true }
                   if (rg) r.requestRegen()
                   openKey = null; showCat(ci)
+              }
+          }
+          EOF
+
+          cat > $P/java/com/infinitepath/app/Audio.kt <<'EOF'
+          package com.infinitepath.app
+
+          import android.media.AudioAttributes
+          import android.media.AudioFormat
+          import android.media.AudioTrack
+          import java.util.Random
+          import kotlin.math.PI
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.sin
+          import kotlin.math.tanh
+
+          /** Ambience prosedural (angin, dedaunan, air, burung, jangkrik, katak, langkah, bawah air). Dibuat langsung sebagai PCM di thread terpisah. */
+          class Audio(private val cfg: () -> Cfg) {
+              @Volatile var day = 1f
+              @Volatile var wind = 1f
+              @Volatile var water = 0f
+              @Volatile var under = false
+              @Volatile var speed = 0f
+              @Volatile var alt = 0f
+              @Volatile var grounded = true
+              @Volatile private var run = false
+              private var th: Thread? = null
+              private val SR = 22050
+
+              fun start() {
+                  if (run) return
+                  run = true
+                  th = Thread { loop() }.also { it.isDaemon = true; it.start() }
+              }
+
+              fun stop() {
+                  run = false
+                  try { th?.join(400) } catch (_: Throwable) {}
+                  th = null
+              }
+
+              private fun loop() {
+                  val at: AudioTrack = try {
+                      val minB = AudioTrack.getMinBufferSize(SR, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                      val tr = AudioTrack.Builder()
+                          .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+                          .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(SR).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                          .setBufferSizeInBytes(max(minB, 8192))
+                          .setTransferMode(AudioTrack.MODE_STREAM)
+                          .build()
+                      tr.play()
+                      tr
+                  } catch (_: Throwable) { run = false; return }
+                  val rnd = Random(7)
+                  val buf = ShortArray(1024)
+                  var w1 = 0f; var w2 = 0f; var w3 = 0f; var bn = 0f; var u1 = 0f; var hp = 0f; var ft = 0f
+                  var t = 0.0
+                  var chL = 0; var chN = 1; var chF0 = 3000f; var chF1 = 3500f; var chPh = 0f
+                  var crPh = 0f; var crPh2 = 0f; var frPh = 0f; var frPh2 = 0f
+                  var stepIn = 0; var fL = 0
+                  while (run) {
+                      val c = cfg()
+                      val on = c.getK("sndOn") > .5
+                      val master = c.getK("sndMaster").toFloat()
+                      val amb = c.getK("sndAmb").toFloat()
+                      val tod = c.getK("sndTod").toFloat()
+                      val dy = day; val nt = 1f - dy
+                      val wv = min(2.2f, wind)
+                      val gust = (.5f + .5f * sin(t * .35 + 1.0).toFloat()) * (.6f + .4f * sin(t * 1.13).toFloat())
+                      val gustK = 1f + (gust - .5f) * c.getK("sndGust").toFloat()
+                      val altK = 1f + c.getK("sndAlt").toFloat() * min(1.5f, max(0f, alt) / 35f)
+                      val windG = c.getK("sndWind").toFloat() * (.07f + .16f * wv / 1.45f) * gustK * altK * amb
+                      val folG = (c.getK("sndFol").toFloat() * (.5f * c.getK("sndLeaf").toFloat() + .5f * c.getK("sndGrass").toFloat())) * .10f * (wv / 1.45f) * (wv / 1.45f) * gustK * amb
+                      val watG = water * c.getK("sndWater").toFloat() * .30f * amb
+                      val birdRate = 1.4f * c.getK("sndBird").toFloat() * (1f - tod * .0f) * (dy * dy) * amb * (if (under) 0f else 1f)
+                      val crG = c.getK("sndInsect").toFloat() * .035f * nt * tod * amb
+                      val frG = c.getK("sndFrog").toFloat() * .09f * nt * min(1f, water * 3f) * tod * amb
+                      val footG = c.getK("sndFoot").toFloat() * .55f
+                      val hpd = c.getK("sndHP").toFloat() * .4f
+                      val un = under
+                      val underG = c.getK("sndUnder").toFloat()
+                      val aLp = .02f + .10f * gust * wv / 1.45f
+                      val sp = speed; val gr = grounded
+                      for (i in 0 until buf.size) {
+                          if (!on) { buf[i] = 0; continue }
+                          val n = rnd.nextFloat() * 2f - 1f
+                          w1 += (n - w1) * aLp; w3 += (w1 - w3) * .5f
+                          var s = w3 * windG * 9f
+                          w2 += (n - w2) * .35f
+                          s += (n - w2) * folG
+                          bn = (bn + .02f * n) / 1.02f
+                          s += bn * watG * (.65f + .35f * sin(t * 3.1 + i * .0).toFloat()) * 7f
+                          // burung
+                          if (chL <= 0) {
+                              if (rnd.nextFloat() < birdRate / SR) {
+                                  chN = 1 + rnd.nextInt(3); chL = (SR * (.07f + rnd.nextFloat() * .09f)).toInt()
+                                  chF0 = 2300f + rnd.nextFloat() * 2200f; chF1 = chF0 * (.7f + rnd.nextFloat() * .9f); chPh = 0f
+                              }
+                          } else {
+                              val dur = 1600f
+                              val fr = chF0 + (chF1 - chF0) * (1f - chL / dur).coerceIn(0f, 1f)
+                              chPh += (2f * PI.toFloat() * fr) / SR
+                              s += sin(chPh) * sin(PI.toFloat() * (chL / dur).coerceIn(0f, 1f)) * .11f * c.getK("sndBird").toFloat() * dy
+                              chL--
+                              if (chL <= 0 && chN > 1) { chN--; chL = (SR * .09f).toInt(); chF0 = chF0 * (.9f + rnd.nextFloat() * .25f); chF1 = chF0 * (.7f + rnd.nextFloat() * .9f) }
+                          }
+                          // jangkrik
+                          if (crG > 0f) {
+                              crPh += 2f * PI.toFloat() * 4300f / SR; crPh2 += 2f * PI.toFloat() * 26f / SR
+                              val g = if (sin(crPh2) > .1f) 1f else 0f
+                              s += sin(crPh) * g * crG
+                          }
+                          // katak
+                          if (frG > 0f) {
+                              frPh += 2f * PI.toFloat() * 230f / SR; frPh2 += 2f * PI.toFloat() * 7f / SR
+                              val g = max(0f, sin(frPh2)) * max(0f, sin(frPh2 * .27f))
+                              s += sin(frPh + sin(frPh * .5f) * 2f) * g * frG
+                          }
+                          // langkah
+                          if (sp > .5f && gr && !un) {
+                              stepIn--
+                              if (stepIn <= 0) { fL = (SR * .09f).toInt(); stepIn = (SR * .62f * (4.4f / max(sp, 1f))).toInt() }
+                          } else stepIn = 0
+                          if (fL > 0) {
+                              ft += (n - ft) * .18f
+                              s += ft * (fL / (SR * .09f)) * footG
+                              fL--
+                          }
+                          if (un) { u1 += (s - u1) * .035f; s = u1 * (1.8f + underG) * .9f + w1 * .15f * underG }
+                          hp += (s - hp) * .25f
+                          s = s * (1f - hpd) + hp * hpd
+                          val o = tanh((s * master * 1.6f).toDouble()).toFloat()
+                          buf[i] = (o * 28000f).toInt().coerceIn(-32768, 32767).toShort()
+                          t += 1.0 / SR
+                      }
+                      try { at.write(buf, 0, buf.size) } catch (_: Throwable) { break }
+                  }
+                  try { at.stop(); at.release() } catch (_: Throwable) {}
               }
           }
           EOF
