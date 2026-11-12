@@ -608,7 +608,7 @@ jobs:
               }
 
               // ---------- konfigurasi & kualitas ----------
-              @Volatile var cfg: Cfg = makeCfg(1)
+              @Volatile var cfg: Cfg = Store.apply(act, makeCfg(1))
               @Volatile var quality = 1
                   private set
               @Volatile private var pendingQ = -1
@@ -943,8 +943,38 @@ jobs:
               /** ganti kualitas (aman dipanggil dari thread UI; dikerjakan di thread GL) */
               fun setQuality(q: Int) { pendingQ = q }
 
+              // ---------- setting dari menu ----------
+              @Volatile private var wantRegen = false
+
+              /** Terapkan satu setting ke cfg render + Core fisika/planner; persist=true => simpan permanen. */
+              fun setSetting(k: String, v: Double, persist: Boolean) {
+                  cfg.setK(k, v); main.S.setK(k, v); plCore.S.setK(k, v)
+                  if (persist) Store.put(act, k, v)
+              }
+
+              /** Kembalikan satu setting ke default preset kualitas saat ini. */
+              fun resetSetting(k: String) {
+                  val v = makeCfg(quality).getK(k)
+                  Store.remove(act, k)
+                  setSetting(k, v, false)
+              }
+
+              fun requestRegen() { wantRegen = true }
+
+              private fun regenWorld() {
+                  main.reconfig(); synchronized(plWorld) { plCore.reconfig() }
+                  genId++
+                  exec.shutdownNow(); exec = newPool(); tlEng = ThreadLocal()
+                  done.clear(); inflight = 0
+                  for (c in chunks.values) { c.dead = true; freeGpu(c) }
+                  chunks.clear(); tasks.clear(); main.clearVox()
+                  spawned = false
+                  planKey = Long.MIN_VALUE
+              }
+
+
               private fun applyQuality(q: Int) {
-                  quality = q; cfg = makeCfg(q)
+                  quality = q; Store.remove(act, "rd", "lodScale", "spp", "bounce"); cfg = Store.apply(act, makeCfg(q))
                   genId++
                   exec.shutdownNow(); exec = newPool(); tlEng = ThreadLocal()
                   done.clear(); inflight = 0
@@ -1104,6 +1134,7 @@ jobs:
                   if (broken) { G.glClearColor(.1f, 0f, 0f, 1f); G.glClear(G.GL_COLOR_BUFFER_BIT); return }
                   val pq = pendingQ
                   if (pq >= 0) { pendingQ = -1; applyQuality(pq) }
+                  if (wantRegen) { wantRegen = false; regenWorld() }
                   val t = System.nanoTime()
                   val dt = min(.05f, (t - last) / 1e9f); last = t
                   val tm = (t - t0) / 1e9f
@@ -1269,6 +1300,7 @@ jobs:
               private lateinit var r: Renderer
               private lateinit var hud: TextView
               private lateinit var titleTv: TextView
+              private lateinit var menu: SettingsMenu
               private var mvId = -1; private var mx0 = 0f; private var my0 = 0f
               private var lkId = -1; private var lx = 0f; private var ly = 0f
 
@@ -1322,6 +1354,11 @@ jobs:
                       true
                   }
                   root.addView(jb, FrameLayout.LayoutParams(220, 220, Gravity.BOTTOM or Gravity.END).also { it.setMargins(0, 0, 60, 50) })
+                  val gb = Button(this)
+                  gb.text = "\u2699"; gb.setOnClickListener { menu.toggle() }
+                  root.addView(gb, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).also { it.setMargins(0, 496, 8, 0) })
+                  menu = SettingsMenu(this, r)
+                  root.addView(menu.root, FrameLayout.LayoutParams(-1, -1))
                   setContentView(root)
 
                   gv.setOnTouchListener { v, e ->
@@ -1387,6 +1424,9 @@ jobs:
                           View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                   }
               }
+
+              @Suppress("DEPRECATION")
+              override fun onBackPressed() { if (menu.isOpen()) menu.close() else super.onBackPressed() }
 
               override fun onPause() { super.onPause(); gv.onPause() }
               override fun onResume() { super.onResume(); gv.onResume() }
@@ -1937,7 +1977,7 @@ jobs:
               }
 
               // ---- state per-instance (JS: variabel modul CORE) ----
-              private val SV: Double = run {
+              private var SV: Double = run {
                   val s = abs(S.seed)
                   if (s <= 200.0) s else ((s * 0.6180339887498949) % 1.0) * 199.0 + 1.0173
               }
@@ -1970,6 +2010,13 @@ jobs:
                   HC.clear(); TC.clear(); VOX.clear(); CARD.clear(); RUC.clear()
                   val th = SV * 1.713 + .6
                   GDX = cos(th); GDZ = sin(th)
+              }
+
+              /** dipanggil saat setting dunia (seed dll) berubah di runtime */
+              fun reconfig() {
+                  val s = abs(S.seed)
+                  SV = if (s <= 200.0) s else ((s * 0.6180339887498949) % 1.0) * 199.0 + 1.0173
+                  clearWorld()
               }
 
               fun ck(a: Int, b: Int): Long = (a + 32768L) * 65536L + (b + 32768L)
@@ -4881,6 +4928,425 @@ jobs:
           """ else """
            o=vec4(pow(clamp(Aw0,0.,1.),vec3(.4545)),1.);}
           """)
+          }
+          EOF
+
+          cat > $P/java/com/infinitepath/app/Schema.kt <<'EOF'
+          package com.infinitepath.app
+
+          // GENERATED dari HTML v20 (SCH + RNG). Hanya setting yang benar-benar dibaca engine native.
+          object Schema {
+              class Item(@JvmField val key: String, @JvmField val label: String, @JvmField val def: Double, @JvmField val min: Double, @JvmField val max: Double, @JvmField val step: Double, @JvmField val regen: Boolean)
+              class Cat(@JvmField val name: String, @JvmField val items: List<Item>)
+              @JvmField val CATS: List<Cat> = listOf(
+                  Cat("Render & LOD", listOf(
+                      Item("rd", "Jarak render (chunk)", 10.0, 2.0, 24.0, 1.0, false),
+                      Item("lodScale", "Skala LOD (10 level)", 0.2, 0.2, 3.0, 0.05, false),
+                      Item("fog", "Kepadatan kabut", 0.01, 0.0, 0.05, 0.0005, false),
+                      Item("fov", "FOV (rad)", 1.41725, 0.5, 2.2, 0.01, false),
+                      Item("exp", "Exposure", 1.2, 0.2, 4.0, 0.05, false),
+                  )),
+                  Cat("Lighting & Sun", listOf(
+                      Item("spp", "SPP bake", 12.0, 1.0, 128.0, 1.0, true),
+                      Item("bounce", "Pantulan GI", 3.0, 0.0, 69.0, 1.0, true),
+                      Item("sun", "Intensitas matahari", 2.45, 0.0, 4.0, 0.05, true),
+                      Item("sky", "Intensitas langit", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("sunAz", "Azimut matahari (rad)", 1.81, 0.0, 6.283, 0.01, true),
+                      Item("sunEl", "Elevasi matahari (rad)", 0.6, -0.5, 1.57, 0.01, true),
+                  )),
+                  Cat("Post FX", listOf(
+                      Item("sat", "Saturasi", 1.08, 0.0, 2.0, 0.02, false),
+                      Item("con", "Kontras", 1.06, 0.6, 1.6, 0.02, false),
+                      Item("cex", "Eksposur sinema", 0.57435, 0.3, 3.0, 0.05, false),
+                      Item("vig", "Vignette", 0.2, 0.0, 1.0, 0.02, false),
+                  )),
+                  Cat("Terrain & Seed", listOf(
+                      Item("seed", "Seed", 1.0, 0.0, 999999999.0, 1.0, true),
+                      Item("hscale", "Skala tinggi", 16.0, 0.0, 60.0, 0.5, true),
+                      Item("freq", "Frekuensi terrain", 0.04, 0.005, 0.15, 0.001, true),
+                      Item("sea", "Tinggi laut", 9.0, 0.0, 30.0, 1.0, true),
+                      Item("mtnTh", "Mountain threshold (lower = more mountains)", 0.52, 0.3, 0.8, 0.01, true),
+                      Item("mtnAmt", "Mountain height multiplier", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("rockLine", "Bare-rock height line", 22.0, 8.0, 50.0, 1.0, true),
+                      Item("snowLine", "Snow-cap height line", 40.0, 12.0, 60.0, 1.0, true),
+                  )),
+                  Cat("Biomes", listOf(
+                      Item("biomeOn", "Biomes enabled (0 = classic temperate)", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("biomeScale", "Biome size (bigger = larger regions)", 1.0, 0.2, 4.0, 0.05, true),
+                      Item("bTemp", "Temperature bias (- cold / + hot)", 0.0, -0.5, 0.5, 0.01, true),
+                      Item("bMoist", "Moisture bias (- dry / + wet)", 0.0, -0.5, 0.5, 0.01, true),
+                      Item("bTint", "Biome grass tint strength", 1.0, 0.0, 2.0, 0.05, true),
+                      Item("dune", "Desert dune strength", 1.0, 0.0, 2.0, 0.05, true),
+                      Item("bFor", "Biome: Temperate forest", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bMea", "Biome: Flower meadow", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bDes", "Biome: Desert", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bSav", "Biome: Savanna", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bTai", "Biome: Taiga", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bTun", "Biome: Snow tundra", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bSwa", "Biome: Swamp", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bJun", "Biome: Jungle", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bChe", "Biome: Cherry grove", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("bAut", "Biome: Autumn forest", 1.0, 0.0, 1.0, 1.0, true),
+                  )),
+                  Cat("Coast & Beach", listOf(
+                      Item("beach", "Beach strength (0 = none)", 1.0, 0.0, 2.0, 0.05, true),
+                      Item("beachW", "Beach width (sand height band)", 2.0, 0.5, 8.0, 0.1, true),
+                      Item("beachSlope", "Beach gentleness (flatten shoreline)", 0.6, 0.0, 1.0, 0.05, true),
+                      Item("beachRock", "Rocky / gravel coast frequency", 0.25, 0.0, 1.0, 0.05, true),
+                      Item("beachProps", "Shells, starfish, driftwood, pebbles", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("beachGrass", "Dune grass tufts", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("beachPalm", "Coastal palm trees", 1.0, 0.0, 4.0, 0.05, true),
+                  )),
+                  Cat("Water & Rivers", listOf(
+                      Item("riv", "Kepadatan sungai (0=mati)", 1.0, 0.0, 2.0, 0.05, true),
+                      Item("rivW", "Lebar sungai", 1.0, 0.4, 2.5, 0.05, true),
+                      Item("rivD", "Kedalaman sungai", 2.2, 0.8, 5.0, 0.1, true),
+                      Item("wRip", "Kekuatan riak", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("wFlow", "Kecepatan aliran", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("wFoam", "Busa", 0.0, 0.0, 2.0, 0.05, false),
+                      Item("wClar", "Kejernihan air", 1.0, 0.2, 4.0, 0.05, false),
+                      Item("wSpec", "Kilau matahari", 3.0, 0.0, 3.0, 0.05, false),
+                      Item("wvSwell", "Wave swell height", 1.0, 0.0, 3.0, 0.05, false),
+                      Item("wvLen", "Wave length scale", 1.0, 0.4, 3.0, 0.05, false),
+                      Item("wvChop", "Wave crest sharpness", 0.6, 0.0, 1.5, 0.05, false),
+                      Item("wvSpd", "Wave speed", 1.0, 0.0, 3.0, 0.05, false),
+                  )),
+                  Cat("Tree Species", listOf(
+                      Item("tree", "Kepadatan pohon", 1.0, 0.0, 5.0, 0.05, true),
+                      Item("leafN", "Kepadatan daun", 0.6, 0.0, 4.0, 0.05, true),
+                      Item("leafS", "Ukuran daun", 1.0, 0.3, 3.0, 0.05, true),
+                      Item("treeVar", "Variasi spesies pohon (0 = hanya ek)", 1.0, 0.0, 1.0, 0.05, true),
+                      Item("treeSz", "Variasi ukuran pohon", 1.0, 0.0, 2.0, 0.05, true),
+                      Item("treeGiant", "Frekuensi pohon raksasa", 1.0, 0.0, 4.0, 0.1, true),
+                      Item("tOak", "Frequency: Oak", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tBirch", "Frequency: Birch", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tSpruce", "Frequency: Spruce", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tPine", "Frequency: Stone pine", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tPalm", "Frequency: Palm", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tAcacia", "Frequency: Acacia", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tBaobab", "Frequency: Baobab", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tCherry", "Frequency: Cherry blossom", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tMaple", "Frequency: Maple (autumn)", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tWillow", "Frequency: Willow", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tJungle", "Frequency: Jungle giant", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tDead", "Frequency: Dead snag", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tCactus", "Frequency: Cactus", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tRedwood", "Frequency: Redwood", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tMangrove", "Frequency: Mangrove", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("tBamboo", "Frequency: Bamboo", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("bushD", "Bush density", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("treeLean", "Trunk lean / curvature", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("treeBranch", "Branchiness", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("treeRoot", "Root flare / buttress", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("treeFall", "Fallen logs", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("treeLeafVar", "Leaf colour variation", 1.0, 0.0, 3.0, 0.05, true),
+                  )),
+                  Cat("Ground Cover", listOf(
+                      Item("grassH", "Grass height multiplier", 1.0, 0.3, 3.0, 0.05, true),
+                      Item("grassW", "Grass width multiplier", 1.0, 0.3, 3.0, 0.05, true),
+                      Item("fern", "Fern density", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("shroom", "Mushroom density", 1.0, 0.0, 6.0, 0.05, true),
+                      Item("reeds", "Reed / cattail density (swamp)", 1.0, 0.0, 4.0, 0.05, true),
+                  )),
+                  Cat("Vegetation", listOf(
+                      Item("grass", "Kepadatan rumput", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("flower", "Kepadatan bunga", 0.6, 0.0, 6.0, 0.1, true),
+                      Item("grassVar", "Variasi jenis rumput (0 = satu jenis)", 1.0, 0.0, 1.0, 0.05, true),
+                      Item("plCap", "Max vegetation quads per chunk (lower = less RAM)", 2200.0, 600.0, 20000.0, 100.0, true),
+                  )),
+                  Cat("Wind & Sway", listOf(
+                      Item("wind", "Kekuatan angin", 1.45, 0.0, 4.0, 0.05, false),
+                      Item("swayAmp", "Foliage sway amplitude", 1.8, 0.0, 6.0, 0.05, false),
+                      Item("swayGust", "Travelling gust waves", 1.0, 0.0, 4.0, 0.05, false),
+                      Item("swayFlut", "Blade flutter", 1.0, 0.0, 4.0, 0.05, false),
+                      Item("windDir", "Wind direction (rad)", 0.38, 0.0, 6.283, 0.01, false),
+                      Item("cinWind", "Wind boost in cinematic mode", 2.2, 1.0, 6.0, 0.05, false),
+                  )),
+                  Cat("Flower Fields", listOf(
+                      Item("fldOn", "Flower fields enabled", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("fld", "Field coverage", 0.35, 0.0, 1.2, 0.01, true),
+                      Item("fldD", "Density inside fields", 0.5, 0.0, 5.0, 0.05, true),
+                      Item("fldScale", "Field patch size", 1.0, 0.3, 4.0, 0.05, true),
+                      Item("fldTypes", "Species in use (of 64)", 64.0, 1.0, 64.0, 1.0, true),
+                      Item("fldMix", "Species mixed per patch", 2.0, 1.0, 5.0, 1.0, true),
+                      Item("fldBg", "Scattered flowers outside fields", 1.0, 0.0, 4.0, 0.05, true),
+                      Item("fldH", "Flower height", 1.0, 0.4, 2.5, 0.05, true),
+                      Item("fldSize", "Flower size", 1.2, 0.5, 3.0, 0.05, true),
+                      Item("fldBiome", "Biome influence on fields", 1.0, 0.0, 2.0, 0.05, true),
+                      Item("fldGrass", "Grass kept inside fields", 0.6, 0.0, 1.5, 0.05, true),
+                      Item("fldSeed", "Field pattern offset", 0.0, 0.0, 999.0, 1.0, true),
+                  )),
+                  Cat("Coastal & Underwater Plants", listOf(
+                      Item("swGrass", "Seagrass meadows", 0.5, 0.0, 4.0, 0.05, true),
+                      Item("swKelp", "Kelp forests", 0.5, 0.0, 4.0, 0.05, true),
+                      Item("swKelpH", "Kelp height", 1.0, 0.3, 3.0, 0.05, true),
+                      Item("swCoral", "Coral reefs (warm biomes)", 0.5, 0.0, 4.0, 0.05, true),
+                      Item("swAnem", "Sea anemones", 0.5, 0.0, 4.0, 0.05, true),
+                      Item("lily", "Lily pads", 1.0, 0.0, 4.0, 0.05, true),
+                  )),
+                  Cat("Ruins", listOf(
+                      Item("ruinOn", "Ruined buildings enabled", 1.0, 0.0, 1.0, 1.0, true),
+                      Item("ruinDens", "Frequency", 0.6, 0.0, 3.0, 0.05, true),
+                      Item("ruinDecay", "Decay / collapse", 0.5, 0.0, 1.0, 0.01, true),
+                      Item("ruinMoss", "Moss overgrowth", 1.0, 0.0, 2.0, 0.05, true),
+                      Item("ruinVines", "Vines / plants on ruins", 1.0, 0.0, 2.0, 0.05, true),
+                      Item("ruinTower", "Type weight: watchtower", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("ruinHouse", "Type weight: house", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("ruinArch", "Type weight: arch & wall", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("ruinTemple", "Type weight: stepped temple", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("ruinHenge", "Type weight: standing stones", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("ruinCabin", "Type weight: log cabin", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("ruinShrine", "Type weight: shrine gate", 1.0, 0.0, 3.0, 0.05, true),
+                      Item("ruinRound", "Type weight: round tower", 1.0, 0.0, 3.0, 0.05, true),
+                  )),
+                  Cat("Player", listOf(
+                      Item("spd", "Kecepatan jalan", 4.4, 1.0, 20.0, 0.1, false),
+                      Item("spr", "Kecepatan lari", 7.0, 1.0, 30.0, 0.1, false),
+                      Item("jump", "Kekuatan lompat", 8.5, 2.0, 20.0, 0.1, false),
+                      Item("grav", "Gravitasi", 26.0, 5.0, 60.0, 0.5, false),
+                  )),
+                  Cat("Performance", listOf(
+                      Item("lowRam", "Low-RAM mode flag (use the buttons below)", 1.0, 0.0, 1.0, 1.0, true),
+                  )),
+              )
+          }
+          EOF
+
+          cat > $P/java/com/infinitepath/app/SettingsMenu.kt <<'EOF'
+          package com.infinitepath.app
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.FrameLayout
+          import android.widget.HorizontalScrollView
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.TextView
+          import java.util.Locale
+          import kotlin.math.ceil
+          import kotlin.math.log10
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.roundToInt
+
+          /** Akses Cfg per nama key (field statis lewat refleksi, sisanya lewat dyn). */
+          object CfgX {
+              private val fl = HashMap<String, java.lang.reflect.Field?>()
+              @Synchronized fun f(k: String): java.lang.reflect.Field? {
+                  if (!fl.containsKey(k)) fl[k] = try { Cfg::class.java.getField(k) } catch (_: Throwable) { null }
+                  return fl[k]
+              }
+          }
+          fun Cfg.getK(k: String): Double { val f = CfgX.f(k); return if (f != null) f.getDouble(this) else d(k) }
+          fun Cfg.setK(k: String, v: Double) { val f = CfgX.f(k); if (f != null) f.setDouble(this, v) else dyn[k] = v }
+
+          /** Setting yang diubah user disimpan di SharedPreferences dan ditimpakan ke Cfg saat start. */
+          object Store {
+              private fun p(c: Context) = c.getSharedPreferences("ibp_cfg", Context.MODE_PRIVATE)
+              fun apply(c: Context, cfg: Cfg): Cfg {
+                  try {
+                      for ((k, v) in p(c).all) { val d = (v as? String)?.toDoubleOrNull() ?: continue; cfg.setK(k, d) }
+                  } catch (_: Throwable) {}
+                  return cfg
+              }
+              fun put(c: Context, k: String, v: Double) { p(c).edit().putString(k, v.toString()).apply() }
+              fun remove(c: Context, vararg ks: String) { val e = p(c).edit(); for (k in ks) e.remove(k); e.apply() }
+              fun clear(c: Context) { p(c).edit().clear().apply() }
+          }
+
+          /**
+           * Menu pengaturan: kategori horizontal di bawah, daftar item di panel atasnya, slider muncul saat item diketuk.
+           * Slider digeser => menu menghilang (dunia terlihat penuh) dan nilai tampil di atas layar. Ketuk di luar / tombol X menutup.
+           */
+          class SettingsMenu(private val act: MainActivity, private val r: Renderer) {
+              val root = FrameLayout(act)
+              private val dp = act.resources.displayMetrics.density
+              private fun px(v: Float) = (v * dp).toInt()
+              private val dim = 0x44000000
+              private val cBg = Color.argb(235, 20, 27, 23)
+              private val cBd = Color.parseColor("#060908")
+              private val cFg = Color.parseColor("#E4EEDC")
+              private val cAc = Color.parseColor("#7CCF4F")
+              private val cAc2 = Color.parseColor("#FFA63A")
+              private val cBt = Color.parseColor("#2E3A31")
+
+              private val col = LinearLayout(act)
+              private val list = LinearLayout(act)
+              private val bar = LinearLayout(act)
+              private val chipRow = LinearLayout(act)
+              private val pv = TextView(act)
+              private val h = Handler(Looper.getMainLooper())
+              private var regenRun: Runnable? = null
+              private val chips = ArrayList<TextView>()
+              private var ci = 0
+              private var openKey: String? = null
+
+              private class MaxScroll(c: Context) : ScrollView(c) {
+                  override fun onMeasure(w: Int, hh: Int) {
+                      val mh = (resources.displayMetrics.heightPixels * .44f).toInt()
+                      super.onMeasure(w, View.MeasureSpec.makeMeasureSpec(mh, View.MeasureSpec.AT_MOST))
+                  }
+              }
+
+              private fun box(fill: Int, rad: Float = 6f): GradientDrawable {
+                  val g = GradientDrawable(); g.setColor(fill); g.cornerRadius = rad * dp; g.setStroke(px(2f), cBd); return g
+              }
+
+              private fun btn(t: String, w: Int = 40): TextView {
+                  val b = TextView(act)
+                  b.text = t; b.setTextColor(cFg); b.textSize = 15f; b.gravity = Gravity.CENTER; b.typeface = Typeface.DEFAULT_BOLD
+                  b.background = box(cBt, 4f)
+                  b.layoutParams = LinearLayout.LayoutParams(px(w.toFloat()), px(38f)).also { it.setMargins(px(2f), 0, px(2f), 0) }
+                  return b
+              }
+
+              init {
+                  root.visibility = View.GONE
+                  root.setBackgroundColor(dim)
+                  root.setOnClickListener { close() }
+
+                  pv.setTextColor(cAc2); pv.textSize = 15f; pv.typeface = Typeface.DEFAULT_BOLD
+                  pv.background = box(cBg); pv.setPadding(px(14f), px(6f), px(14f), px(6f)); pv.visibility = View.GONE
+                  root.addView(pv, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).also { it.topMargin = px(52f) })
+
+                  col.orientation = LinearLayout.VERTICAL
+                  col.isClickable = true
+                  val sw = act.resources.displayMetrics.widthPixels
+                  val cw = min(px(560f), sw - px(16f))
+                  root.addView(col, FrameLayout.LayoutParams(cw, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = px(8f) })
+
+                  val sc = MaxScroll(act)
+                  sc.background = box(cBg); sc.isVerticalScrollBarEnabled = false
+                  list.orientation = LinearLayout.VERTICAL; list.setPadding(px(10f), px(2f), px(10f), px(2f))
+                  sc.addView(list, FrameLayout.LayoutParams(-1, -2))
+                  col.addView(sc, LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = px(6f) })
+
+                  bar.orientation = LinearLayout.HORIZONTAL; bar.gravity = Gravity.CENTER_VERTICAL
+                  bar.background = box(cBg); bar.setPadding(px(5f), px(5f), px(5f), px(5f))
+                  val hs = HorizontalScrollView(act); hs.isHorizontalScrollBarEnabled = false
+                  chipRow.orientation = LinearLayout.HORIZONTAL
+                  hs.addView(chipRow)
+                  bar.addView(hs, LinearLayout.LayoutParams(0, -2, 1f))
+                  val rs = btn("\u21BA"); rs.setOnClickListener { resetCat() }
+                  val cl = btn("\u2715"); cl.setOnClickListener { close() }
+                  bar.addView(rs); bar.addView(cl)
+                  col.addView(bar, LinearLayout.LayoutParams(-1, -2))
+
+                  for ((i, c) in Schema.CATS.withIndex()) {
+                      val t = TextView(act)
+                      t.text = c.name; t.textSize = 11f; t.typeface = Typeface.DEFAULT_BOLD; t.setTextColor(cFg)
+                      t.setPadding(px(11f), px(9f), px(11f), px(9f)); t.background = box(cBt, 3f)
+                      t.setOnClickListener { openKey = null; showCat(i) }
+                      chipRow.addView(t, LinearLayout.LayoutParams(-2, -2).also { it.setMargins(px(2f), 0, px(2f), 0) })
+                      chips.add(t)
+                  }
+                  showCat(0)
+              }
+
+              fun isOpen() = root.visibility == View.VISIBLE
+              fun open() { showCat(ci); root.visibility = View.VISIBLE }
+              fun close() { peek(false); root.visibility = View.GONE }
+              fun toggle() { if (isOpen()) close() else open() }
+
+              private fun peek(on: Boolean) {
+                  col.alpha = if (on) 0f else 1f
+                  root.setBackgroundColor(if (on) 0 else dim)
+                  pv.visibility = if (on) View.VISIBLE else View.GONE
+              }
+
+              private fun fmt(it: Schema.Item, v: Double): String {
+                  val st = it.step
+                  val d = if (st >= 1.0) 0 else min(5, max(1, ceil(-log10(st) - 1e-9).toInt()))
+                  return String.format(Locale.US, "%." + d + "f", v)
+              }
+              private fun isToggle(it: Schema.Item) = it.min == 0.0 && it.max == 1.0 && it.step == 1.0
+
+              private fun showCat(i: Int) {
+                  ci = i
+                  for ((k, t) in chips.withIndex()) {
+                      t.background = box(if (k == i) cAc else cBt, 3f)
+                      t.setTextColor(if (k == i) Color.WHITE else cFg)
+                  }
+                  list.removeAllViews()
+                  for (item in Schema.CATS[i].items) addRow(item)
+              }
+
+              private fun addRow(item: Schema.Item) {
+                  val row = LinearLayout(act)
+                  row.orientation = LinearLayout.HORIZONTAL; row.gravity = Gravity.CENTER_VERTICAL
+                  row.setPadding(px(2f), px(6f), px(2f), px(6f))
+                  val lb = TextView(act); lb.text = item.label; lb.setTextColor(cFg); lb.textSize = 12f; lb.typeface = Typeface.DEFAULT_BOLD
+                  val vt = TextView(act); vt.setTextColor(cAc2); vt.textSize = 12f; vt.typeface = Typeface.DEFAULT_BOLD; vt.gravity = Gravity.END
+                  row.addView(lb, LinearLayout.LayoutParams(0, -2, 1f))
+                  row.addView(vt, LinearLayout.LayoutParams(-2, -2))
+                  list.addView(row, LinearLayout.LayoutParams(-1, px(44f)))
+                  val cur = r.cfg.getK(item.key)
+                  if (isToggle(item)) {
+                      vt.text = if (cur > .5) "ON" else "OFF"
+                      row.setOnClickListener {
+                          val nv = if (r.cfg.getK(item.key) > .5) 0.0 else 1.0
+                          vt.text = if (nv > .5) "ON" else "OFF"
+                          apply(item, nv, true)
+                      }
+                      return
+                  }
+                  vt.text = fmt(item, cur)
+                  val sl = LinearLayout(act)
+                  sl.orientation = LinearLayout.HORIZONTAL; sl.gravity = Gravity.CENTER_VERTICAL
+                  sl.visibility = if (openKey == item.key) View.VISIBLE else View.GONE
+                  val stp = max(item.step, (item.max - item.min) / 2000000.0)
+                  val n = max(1, ((item.max - item.min) / stp).roundToInt())
+                  val sb = SeekBar(act)
+                  sb.max = n
+                  sb.progress = ((cur - item.min) / stp).roundToInt().coerceIn(0, n)
+                  fun vOf(p: Int): Double = Math.round((item.min + p * stp) * 1e6) / 1e6
+                  val mn = btn("\u2212", 38); val pl = btn("+", 38)
+                  fun nudge(dir: Int) {
+                      val p = (sb.progress + dir).coerceIn(0, n)
+                      sb.progress = p
+                      val v = vOf(p); vt.text = fmt(item, v); apply(item, v, true)
+                  }
+                  mn.setOnClickListener { nudge(-1) }; pl.setOnClickListener { nudge(1) }
+                  sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, p: Int, user: Boolean) {
+                          if (!user) return
+                          val v = vOf(p); vt.text = fmt(item, v); pv.text = item.label + "   " + fmt(item, v)
+                          apply(item, v, false)
+                      }
+                      override fun onStartTrackingTouch(s: SeekBar?) { pv.text = item.label + "   " + fmt(item, r.cfg.getK(item.key)); peek(true) }
+                      override fun onStopTrackingTouch(s: SeekBar?) { peek(false); apply(item, vOf(sb.progress), true) }
+                  })
+                  sl.addView(mn); sl.addView(sb, LinearLayout.LayoutParams(0, px(40f), 1f)); sl.addView(pl)
+                  list.addView(sl, LinearLayout.LayoutParams(-1, -2))
+                  row.setOnClickListener {
+                      val was = sl.visibility == View.VISIBLE
+                      openKey = if (was) null else item.key
+                      showCat(ci)
+                  }
+              }
+
+              /** final=true: simpan ke prefs + (bila setting dunia) regenerasi segera; false: hanya terapkan, regen ditunda 400 ms. */
+              private fun apply(item: Schema.Item, v: Double, final: Boolean) {
+                  r.setSetting(item.key, v, final)
+                  if (!item.regen) return
+                  regenRun?.let { h.removeCallbacks(it) }
+                  if (final) { regenRun = null; r.requestRegen() }
+                  else { val run = Runnable { r.requestRegen() }; regenRun = run; h.postDelayed(run, 400) }
+              }
+
+              private fun resetCat() {
+                  var rg = false
+                  for (item in Schema.CATS[ci].items) { r.resetSetting(item.key); if (item.regen) rg = true }
+                  if (rg) r.requestRegen()
+                  openKey = null; showCat(ci)
+              }
           }
           EOF
 
