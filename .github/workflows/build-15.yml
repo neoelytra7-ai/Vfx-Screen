@@ -599,9 +599,9 @@ jobs:
                       val c = Cfg()
                       if (q <= 1) c.applyLow()
                       when (q) {
-                          0 -> { c.rd = 8.0; c.lodScale = .6; c.spp = 6.0; c.bounce = 2.0 }
-                          1 -> { c.rd = 10.0; c.lodScale = .5; c.spp = 8.0; c.bounce = 2.0 }
-                          else -> { c.rd = 13.0; c.lodScale = .32; c.spp = 12.0; c.bounce = 3.0 }
+                          0 -> { c.scale = .75; c.rd = 8.0; c.lodScale = .6; c.spp = 6.0; c.bounce = 2.0 }
+                          1 -> { c.scale = 1.0; c.rd = 10.0; c.lodScale = .5; c.spp = 8.0; c.bounce = 2.0 }
+                          else -> { c.scale = 1.0; c.rd = 13.0; c.lodScale = .32; c.spp = 12.0; c.bounce = 3.0 }
                       }
                       return c
                   }
@@ -750,6 +750,8 @@ jobs:
                       pT = prog(Shaders.vt(false), Shaders.fs(false)); pF = prog(Shaders.vt(true), Shaders.fs(true))
                       pWA = prog(Shaders.VW, Shaders.fw(false)); pWB = prog(Shaders.VW, Shaders.fw(true))
                       pSky = prog(Shaders.VQ, Shaders.FSKY); pFade = prog(Shaders.VQ, Shaders.FFADE); pVig = prog(Shaders.VQ, Shaders.FVIG); pUw = prog(Shaders.VQ, Shaders.FUW); pFa = prog(Shaders.VFA, Shaders.FFA); pFl = prog(Shaders.VQ, Shaders.FFL)
+            pBr = prog(Shaders.VQ, Shaders.FBR); pBl = prog(Shaders.VQ, Shaders.FBL); pCo = prog(Shaders.VQ, Shaders.FCO); pEx = prog(Shaders.VQ, Shaders.FEX)
+            fbo = 0; rw = 0; rh = 0; fboFail = false; havePrev = false
                       broken = false
                   } catch (e: Throwable) {
                       broken = true
@@ -983,7 +985,7 @@ jobs:
 
 
               private fun applyQuality(q: Int) {
-                  quality = q; Store.remove(act, "rd", "lodScale", "spp", "bounce"); cfg = Store.apply(act, makeCfg(q))
+                  quality = q; Store.remove(act, "rd", "lodScale", "spp", "bounce", "scale"); cfg = Store.apply(act, makeCfg(q))
                   genId++
                   exec.shutdownNow(); exec = newPool(); tlEng = ThreadLocal()
                   done.clear(); inflight = 0
@@ -1187,7 +1189,9 @@ jobs:
                   val mdx = (Math.cos(mEl) * Math.sin(mAz)).toFloat(); val mdy = Math.sin(mEl).toFloat(); val mdz = (Math.cos(mEl) * Math.cos(mAz)).toFloat()
 
 
-                  G.glViewport(0, 0, sw, sh)
+                  val fboOn = ensureFbo()
+                  if (fboOn) { G.glBindFramebuffer(G.GL_FRAMEBUFFER, fbo); G.glViewport(0, 0, rw, rh) }
+                  else { G.glBindFramebuffer(G.GL_FRAMEBUFFER, 0); G.glViewport(0, 0, sw, sh); havePrev = false }
                   G.glClearColor(.3f, .5f, .9f, 1f)
                   G.glClear(G.GL_COLOR_BUFFER_BIT or G.GL_DEPTH_BUFFER_BIT)
                   fun common(p: Prog) {
@@ -1300,7 +1304,7 @@ jobs:
                           G.glUseProgram(pFa.id)
                           G.glUniformMatrix4fv(pFa.u("m"), 1, false, mvp, 0); G.glUniform3f(pFa.u("cp"), px, py, pz)
                           G.glUniform1f(pFa.u("tm"), tm); G.glUniform1f(pFa.u("gy"), gyy); G.glUniform1f(pFa.u("dayf"), dayf)
-                          G.glUniform1f(pFa.u("ps"), sh / (2f * tan(fovE / 2f)))
+                          G.glUniform1f(pFa.u("ps"), (if (fboOn) rh else sh) / (2f * tan(fovE / 2f)))
                           G.glUniform4f(pFa.u("cn"), nFF.toFloat(), nDu.toFloat(), nBu.toFloat(), nDr.toFloat())
                           G.glUniform4f(pFa.u("fa1"), kf("ffSpd"), kf("ffAlt"), kf("ffWander"), kf("ffBlink"))
                           G.glUniform4f(pFa.u("fa2"), kf("butSpd"), kf("butFlap"), kf("butErr"), kf("butSize"))
@@ -1328,6 +1332,7 @@ jobs:
                               tgt = if (occ) 0f else ((1.7f - e) / .9f).coerceIn(0f, 1f) * ((sdy + .05f) / .2f).coerceIn(0f, 1f)
                           }
                           flareVis += (tgt - flareVis) * min(1f, dt * 8f)
+                          sunNx = nx; sunNy = ny
                           if (flareVis > .003f) {
                               G.glDisable(G.GL_DEPTH_TEST); G.glEnable(G.GL_BLEND); G.glBlendFunc(G.GL_ONE, G.GL_ONE)
                               G.glUseProgram(pFl.id)
@@ -1360,6 +1365,10 @@ jobs:
                       G.glUniform1f(pUw.u("caus"), kf("uwCaus")); G.glUniform1f(pUw.u("sdy"), sdy)
                       G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
                   }
+                  if (fboOn) {
+                      if (kf("dof") > 0f && pf > 0f) focusProbe(px, py, pz, fw, rv, uv, tan(fovE / 2f), asp, dt)
+                      postFx(tm, dt, asp)
+                  }
                   // vignette (kali layar)
                   G.glDisable(G.GL_DEPTH_TEST)
                   G.glBlendFunc(G.GL_ZERO, G.GL_SRC_COLOR)
@@ -1391,6 +1400,178 @@ jobs:
                       act.setHud(fps.toInt().toString() + " fps · " + mode + " · chunk " + vis.size + "/" + have + " · antre " + (tasks.size + inflight) +
                           " · Q" + quality + " · y " + py.toInt())
                   }
+              }
+
+              // ---------- pipeline post-proses (FBO) ----------
+              private var fbo = 0; private var texS = 0; private var texD = 0; private var rw = 0; private var rh = 0
+              private var fboFail = false
+              private val bTex = IntArray(5); private val bFbo = IntArray(5); private val bW = IntArray(5); private val bH = IntArray(5)
+              private val exTex = IntArray(2); private val exFbo = IntArray(2); private var exI = 0
+              private lateinit var pBr: Prog
+              private lateinit var pBl: Prog
+              private lateinit var pCo: Prog
+              private lateinit var pEx: Prog
+              private val prevM = FloatArray(16); private val invM = FloatArray(16); private var havePrev = false
+              private var sunNx = 0f; private var sunNy = 0f
+              private var focus = 8f; private var focusT = 8f; private var afT = 0
+              private val cvId = floatArrayOf(0f, .125f, .25f, .5f, .75f, .875f, 1f)
+
+              private fun mkTex(w: Int, h: Int, ifmt: Int, fmt: Int, type: Int, filt: Int): Int {
+                  val t = IntArray(1); G.glGenTextures(1, t, 0)
+                  G.glBindTexture(G.GL_TEXTURE_2D, t[0])
+                  G.glTexImage2D(G.GL_TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, null)
+                  G.glTexParameteri(G.GL_TEXTURE_2D, G.GL_TEXTURE_MIN_FILTER, filt); G.glTexParameteri(G.GL_TEXTURE_2D, G.GL_TEXTURE_MAG_FILTER, filt)
+                  G.glTexParameteri(G.GL_TEXTURE_2D, G.GL_TEXTURE_WRAP_S, G.GL_CLAMP_TO_EDGE); G.glTexParameteri(G.GL_TEXTURE_2D, G.GL_TEXTURE_WRAP_T, G.GL_CLAMP_TO_EDGE)
+                  return t[0]
+              }
+
+              private fun mkFbo(tex: Int, depth: Int): Int {
+                  val f = IntArray(1); G.glGenFramebuffers(1, f, 0)
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, f[0])
+                  G.glFramebufferTexture2D(G.GL_FRAMEBUFFER, G.GL_COLOR_ATTACHMENT0, G.GL_TEXTURE_2D, tex, 0)
+                  if (depth != 0) G.glFramebufferTexture2D(G.GL_FRAMEBUFFER, G.GL_DEPTH_ATTACHMENT, G.GL_TEXTURE_2D, depth, 0)
+                  return f[0]
+              }
+
+              private fun freeFbo() {
+                  if (fbo != 0) {
+                      G.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+                      G.glDeleteTextures(2, intArrayOf(texS, texD), 0)
+                      for (i in 0 until 5) { G.glDeleteFramebuffers(1, intArrayOf(bFbo[i]), 0); G.glDeleteTextures(1, intArrayOf(bTex[i]), 0) }
+                      for (i in 0 until 2) { G.glDeleteFramebuffers(1, intArrayOf(exFbo[i]), 0); G.glDeleteTextures(1, intArrayOf(exTex[i]), 0) }
+                  }
+                  fbo = 0; rw = 0; rh = 0; havePrev = false
+              }
+
+              /** true bila frame dirender lewat FBO (post-proses aktif atau skala resolusi != 1). */
+              private fun ensureFbo(): Boolean {
+                  if (fboFail) return false
+                  val sc = cfg.getK("scale").toFloat().coerceIn(.4f, 1.5f)
+                  val need = cfg.getK("post") > .5 || Math.abs(sc - 1f) > .001f
+                  if (!need) return false
+                  val nw = Math.max(64, (sw * sc).toInt()); val nh = Math.max(64, (sh * sc).toInt())
+                  if (fbo != 0 && nw == rw && nh == rh) return true
+                  freeFbo()
+                  rw = nw; rh = nh
+                  texS = mkTex(rw, rh, G.GL_RGBA8, G.GL_RGBA, G.GL_UNSIGNED_BYTE, G.GL_LINEAR)
+                  texD = mkTex(rw, rh, G.GL_DEPTH_COMPONENT24, G.GL_DEPTH_COMPONENT, G.GL_UNSIGNED_INT, G.GL_NEAREST)
+                  fbo = mkFbo(texS, texD)
+                  if (G.glCheckFramebufferStatus(G.GL_FRAMEBUFFER) != G.GL_FRAMEBUFFER_COMPLETE) {
+                      fboFail = true; G.glBindFramebuffer(G.GL_FRAMEBUFFER, 0); freeFbo(); return false
+                  }
+                  for (i in 0 until 5) {
+                      val dv = if (i == 0) 2 else if (i <= 2) 4 else 8
+                      bW[i] = Math.max(2, rw / dv); bH[i] = Math.max(2, rh / dv)
+                      bTex[i] = mkTex(bW[i], bH[i], G.GL_RGBA8, G.GL_RGBA, G.GL_UNSIGNED_BYTE, G.GL_LINEAR)
+                      bFbo[i] = mkFbo(bTex[i], 0)
+                  }
+                  for (i in 0 until 2) {
+                      exTex[i] = mkTex(1, 1, G.GL_RGBA8, G.GL_RGBA, G.GL_UNSIGNED_BYTE, G.GL_NEAREST)
+                      exFbo[i] = mkFbo(exTex[i], 0)
+                      G.glClearColor(.2470588f, .75f, 0f, 1f); G.glClear(G.GL_COLOR_BUFFER_BIT)
+                  }
+                  exI = 0
+                  G.glBindFramebuffer(G.GL_FRAMEBUFFER, 0)
+                  return true
+              }
+
+              private fun bindT(unit: Int, tex: Int) { G.glActiveTexture(G.GL_TEXTURE0 + unit); G.glBindTexture(G.GL_TEXTURE_2D, tex) }
+              private fun target(fb: Int, w: Int, h: Int) { G.glBindFramebuffer(G.GL_FRAMEBUFFER, fb); G.glViewport(0, 0, w, h) }
+
+              private fun rayDist(ox: Float, oy: Float, oz: Float, dx: Float, dy: Float, dz: Float, maxD: Float): Float {
+                  var d = .4f
+                  while (d < maxD) {
+                      if (main.getP((ox + dx * d).toDouble(), (oy + dy * d).toDouble(), (oz + dz * d).toDouble()) != 0) return d
+                      d += Math.max(.25f, d * .05f)
+                  }
+                  return -1f
+              }
+
+              private fun focusProbe(px: Float, py: Float, pz: Float, f: FloatArray, r: FloatArray, u: FloatArray, tanH: Float, asp: Float, dt: Float) {
+                  fun k(s: String): Float = cfg.getK(s).toFloat()
+                  if (k("dofAF") > .5f) {
+                      if (afT++ % 2 == 0) {
+                          val rr = k("dofRad") * 2f
+                          val offs = arrayOf(floatArrayOf(0f, 0f), floatArrayOf(rr, 0f), floatArrayOf(-rr, 0f), floatArrayOf(0f, rr), floatArrayOf(0f, -rr))
+                          val ds = ArrayList<Float>()
+                          for (o in offs) {
+                              var dx = f[0] + r[0] * o[0] * tanH * asp + u[0] * o[1] * tanH
+                              var dy = f[1] + r[1] * o[0] * tanH * asp + u[1] * o[1] * tanH
+                              var dz = f[2] + r[2] * o[0] * tanH * asp + u[2] * o[1] * tanH
+                              val l = Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat(); dx /= l; dy /= l; dz /= l
+                              val h = rayDist(px, py, pz, dx, dy, dz, 160f)
+                              ds.add(if (h < 0f) k("dofSky") else h)
+                          }
+                          ds.sort()
+                          focusT = Math.max(ds[2], k("dofMin"))
+                      }
+                  } else focusT = Math.max(k("dofDist"), k("dofMin"))
+                  focus += (focusT - focus) * Math.min(1f, dt * k("dofSpd"))
+              }
+
+              private fun postFx(tm: Float, dt: Float, asp: Float) {
+                  fun k(s: String): Float = cfg.getK(s).toFloat()
+                  G.glDisable(G.GL_DEPTH_TEST); G.glDisable(G.GL_BLEND)
+                  val pf = if (k("post") > .5f) 1f else 0f
+                  val ae = pf > 0f && k("aeOn") > .5f
+                  if (ae) {
+                      val dst = 1 - exI
+                      target(exFbo[dst], 1, 1)
+                      G.glUseProgram(pEx.id)
+                      bindT(0, texS); bindT(1, exTex[exI])
+                      G.glUniform1i(pEx.u("s"), 0); G.glUniform1i(pEx.u("ex"), 1)
+                      G.glUniform4f(pEx.u("ae"), Math.pow(k("aeKey").toDouble(), .4545).toFloat(), k("aeStr") * .5f, k("aeMin"), k("aeMax"))
+                      G.glUniform2f(pEx.u("ud"), k("aeUp"), k("aeDown")); G.glUniform1f(pEx.u("dt"), dt)
+                      G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
+                      exI = dst
+                  }
+                  val blm = k("bloom") * pf; val pm = k("pmist") * pf
+                  if (blm > 0f || pm > 0f) {
+                      bindT(0, texS)
+                      target(bFbo[0], bW[0], bH[0]); G.glUseProgram(pBr.id)
+                      G.glUniform1i(pBr.u("s"), 0)
+                      G.glUniform1f(pBr.u("th"), 1f - Math.exp(-k("bloomTh").toDouble() * .9).toFloat())
+                      G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
+                      G.glUseProgram(pBl.id); G.glUniform1i(pBl.u("s"), 0)
+                      for (i in 1..4) {
+                          bindT(0, bTex[i - 1]); target(bFbo[i], bW[i], bH[i])
+                          if (i % 2 == 1) G.glUniform2f(pBl.u("dir"), 1f / bW[i - 1], 0f) else G.glUniform2f(pBl.u("dir"), 0f, 1f / bH[i - 1])
+                          G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
+                      }
+                  }
+                  target(0, sw, sh)
+                  G.glUseProgram(pCo.id)
+                  bindT(0, texS); bindT(1, texD); bindT(2, bTex[2]); bindT(3, bTex[4]); bindT(4, exTex[exI])
+                  G.glUniform1i(pCo.u("s"), 0); G.glUniform1i(pCo.u("d"), 1); G.glUniform1i(pCo.u("b1"), 2); G.glUniform1i(pCo.u("b2"), 3); G.glUniform1i(pCo.u("ex"), 4)
+                  Matrix.invertM(invM, 0, mvp, 0)
+                  G.glUniformMatrix4fv(pCo.u("ivp"), 1, false, invM, 0)
+                  G.glUniformMatrix4fv(pCo.u("pvp"), 1, false, if (havePrev) prevM else mvp, 0)
+                  G.glUniform2f(pCo.u("px"), 1f / rw, 1f / rh); G.glUniform2f(pCo.u("nf"), .1f, 1500f)
+                  G.glUniform1f(pCo.u("tm"), tm); G.glUniform1f(pCo.u("asp"), asp)
+                  G.glUniform4f(pCo.u("bl"), blm, pm, k("dirt") * pf, k("leak") * pf)
+                  G.glUniform4f(pCo.u("sn"), sunNx, sunNy, flareVis, k("shaft") * pf)
+                  val dofS = k("dof") * pf
+                  G.glUniform4f(pCo.u("df"), focus, dofS, k("dofMax"), k("dofSky"))
+                  G.glUniform4f(pCo.u("fx"), k("mblur") * pf, k("sharp") * pf, k("ca") * pf, k("lens") * pf)
+                  G.glUniform4f(pCo.u("ab"), if (ae) 1f else 0f, 0f, 0f, 0f)
+                  val cm = FloatArray(7) { k("cvM" + it) }; val cr = FloatArray(7) { k("cvR" + it) }
+                  val cg = FloatArray(7) { k("cvG" + it) }; val cb = FloatArray(7) { k("cvB" + it) }
+                  var cvOn = false
+                  for (i in 0 until 7) if (Math.abs(cm[i] - cvId[i]) > .004f || Math.abs(cr[i] - cvId[i]) > .004f || Math.abs(cg[i] - cvId[i]) > .004f || Math.abs(cb[i] - cvId[i]) > .004f) cvOn = true
+                  G.glUniform1f(pCo.u("cvOn"), if (cvOn && pf > 0f) 1f else 0f)
+                  G.glUniform1fv(pCo.u("cm"), 7, cm, 0); G.glUniform1fv(pCo.u("cr"), 7, cr, 0)
+                  G.glUniform1fv(pCo.u("cg"), 7, cg, 0); G.glUniform1fv(pCo.u("cb"), 7, cb, 0)
+                  val hsl = FloatArray(24); var hsOn = false
+                  for (b in 0 until 8) {
+                      hsl[b * 3] = k("hH" + b); hsl[b * 3 + 1] = k("hS" + b); hsl[b * 3 + 2] = k("hL" + b)
+                      if (hsl[b * 3] != 0f || hsl[b * 3 + 1] != 0f || hsl[b * 3 + 2] != 0f) hsOn = true
+                  }
+                  G.glUniform1f(pCo.u("hsOn"), if (hsOn && pf > 0f) 1f else 0f)
+                  G.glUniform3fv(pCo.u("hs"), 8, hsl, 0)
+                  G.glDrawArrays(G.GL_TRIANGLES, 0, 3)
+                  System.arraycopy(mvp, 0, prevM, 0, 16); havePrev = true
+                  G.glActiveTexture(G.GL_TEXTURE0)
+                  G.glEnable(G.GL_BLEND)
               }
 
               fun destroy() { exec.shutdownNow(); planExec.shutdownNow() }
@@ -5218,6 +5399,112 @@ jobs:
           }
           """
 
+
+              const val FBR = """#version 300 es
+          precision mediump float;
+          in vec2 nd;uniform sampler2D s;uniform float th;out vec4 o;
+          void main(){vec3 c=texture(s,nd*.5+.5).rgb;float l=max(c.r,max(c.g,c.b));o=vec4(c*smoothstep(th,th+.3,l),1.);}
+          """
+
+              const val FBL = """#version 300 es
+          precision mediump float;
+          in vec2 nd;uniform sampler2D s;uniform vec2 dir;out vec4 o;
+          void main(){vec2 uv=nd*.5+.5;vec3 c=texture(s,uv).rgb*.2270270;
+           c+=(texture(s,uv+dir*1.3846154).rgb+texture(s,uv-dir*1.3846154).rgb)*.3162162;
+           c+=(texture(s,uv+dir*3.2307692).rgb+texture(s,uv-dir*3.2307692).rgb)*.0702703;
+           o=vec4(c,1.);}
+          """
+
+              const val FEX = """#version 300 es
+          precision highp float;
+          in vec2 nd;uniform sampler2D s,ex;uniform vec4 ae;uniform vec2 ud;uniform float dt;out vec4 o;
+          void main(){
+           float sum=0.;
+           for(int i=0;i<12;i++)for(int j=0;j<12;j++){vec3 c=texture(s,(vec2(float(i),float(j))+.5)/12.).rgb;sum+=dot(c,vec3(.2126,.7152,.0722));}
+           float avg=sum/144.;
+           float want=clamp(pow(ae.x/max(avg,.02),ae.y),ae.z,ae.w);
+           vec4 e=texture(ex,vec2(.5));float prev=(e.r+e.g/255.)*4.;
+           float rate=1.-exp(-dt/max((want>prev)?ud.x:ud.y,.05));
+           float nw=clamp(mix(prev,want,rate),0.,3.99);
+           float x=nw/4.;float hi=floor(x*255.)/255.;float lo=fract(x*255.);
+           o=vec4(hi,lo,0.,1.);
+          }
+          """
+
+              const val FCO = """#version 300 es
+          precision highp float;
+          in vec2 nd;uniform sampler2D s,d,b1,b2,ex;
+          uniform mat4 ivp,pvp;uniform vec2 px,nf;uniform vec4 bl,sn,df,fx,ab;uniform float tm,asp,cvOn,hsOn;
+          uniform float cm[7],cr[7],cg[7],cb[7];uniform vec3 hs[8];
+          out vec4 o;
+          const float bc[8]=float[8](0.,.0833,.1667,.3333,.5,.6667,.75,.875);
+          float lin(float z){float n=nf.x,f=nf.y;return 2.*n*f/(f+n-(z*2.-1.)*(f-n));}
+          float crv(float x,float v[7]){x=clamp(x,0.,1.)*6.;int i=int(min(floor(x),5.));return mix(v[i],v[i+1],x-float(i));}
+          float h21(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+          float vn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y);}
+          vec3 rgb2hsv(vec3 c){vec4 K=vec4(0.,-1./3.,2./3.,-1.);vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));float dd=q.x-min(q.w,q.y);float e=1e-10;return vec3(abs(q.z+(q.w-q.y)/(6.*dd+e)),dd/(q.x+e),q.x);}
+          vec3 hsv2rgb(vec3 c){vec4 K=vec4(1.,2./3.,1./3.,3.);vec3 p=abs(fract(c.xxx+K.xyz)*6.-K.www);return c.z*mix(K.xxx,clamp(p-K.xxx,0.,1.),c.y);}
+          void main(){
+           vec2 uv0=nd*.5+.5;
+           vec2 cc=uv0-.5;vec2 ca2=cc*vec2(asp,1.);
+           vec2 uv=.5+cc*(1.+fx.w*dot(ca2,ca2)*.8);
+           vec2 uvc=clamp(uv,px*.5,1.-px*.5);
+           float z=texture(d,uvc).r;
+           float dist=lin(z);
+           vec3 c=texture(s,uvc).rgb;
+           if(df.y>0.){
+            float coc=clamp(abs(dist-df.x)/max(dist,.05)*df.y*1.2,0.,1.)*df.z;
+            if(coc/px.y>1.){
+             vec3 acc=c;float ws=1.;
+             for(int i=0;i<12;i++){float a=float(i)*2.39996,rr=sqrt((float(i)+.5)/12.);
+              vec2 off=vec2(cos(a),sin(a))*rr*coc*vec2(1./asp,1.);
+              vec3 t=texture(s,uvc+off).rgb;float w=1.+pow(dot(t,vec3(.333)),2.)*2.;acc+=t*w;ws+=w;}
+             c=acc/ws;
+            }
+           }
+           if(fx.x>0.){
+            vec4 wp=ivp*vec4(nd,z*2.-1.,1.);wp/=wp.w;
+            vec4 pc=pvp*wp;vec2 pn=pc.xy/pc.w;
+            vec2 v=(nd-pn)*.25*fx.x;
+            float len=length(v/px);
+            if(len>.75){
+             v*=min(1.,28./len);
+             vec3 acc=c;
+             for(int i=1;i<7;i++)acc+=texture(s,uvc+v*(float(i)/6.-.5)).rgb;
+             c=acc/7.;
+            }
+           }
+           if(fx.z>0.){vec2 dv=(uv-.5)*fx.z*.02;c.r=texture(s,uvc+dv).r;c.b=texture(s,uvc-dv).b;}
+           if(fx.y>0.){
+            vec3 n4=(texture(s,uvc+vec2(px.x,0.)).rgb+texture(s,uvc-vec2(px.x,0.)).rgb+texture(s,uvc+vec2(0.,px.y)).rgb+texture(s,uvc-vec2(0.,px.y)).rgb)*.25;
+            c+=(c-n4)*fx.y*1.2;
+           }
+           if(sn.w>0.&&sn.z>.01){
+            vec2 sp=sn.xy*.5+.5;vec2 stp=(sp-uvc)/16.;vec2 p=uvc;vec3 acc=vec3(0.);float w=1.;
+            for(int i=0;i<16;i++){p+=stp;vec3 t=texture(s,p).rgb;float m=step(.99999,texture(d,p).r)*smoothstep(.55,.9,dot(t,vec3(.333)));acc+=t*m*w;w*=.94;}
+            c+=acc/16.*sn.w*sn.z*vec3(1.,.9,.72)*.9/(1.+length(sp-uvc)*1.5);
+           }
+           vec3 B1=texture(b1,uvc).rgb,B2=texture(b2,uvc).rgb;
+           float dm=smoothstep(.55,.9,vn(uv0*vec2(asp,1.)*6.));
+           c+=B1*bl.x*(1.+dm*bl.z*.5)+B2*bl.y*.8;
+           if(bl.w>0.){
+            float lk=pow(max(0.,uv0.x-.72)/.28,2.)*(.5+.5*sin(tm*.3))*(1.-uv0.y*.6);
+            c+=vec3(1.,.35,.1)*lk*bl.w*.10;
+           }
+           vec4 e=texture(ex,vec2(.5));float g=(e.r+e.g/255.)*4.;
+           c*=mix(1.,g,ab.x);
+           if(cvOn>.5){c=vec3(crv(crv(c.r,cm),cr),crv(crv(c.g,cm),cg),crv(crv(c.b,cm),cb));}
+           if(hsOn>.5){
+            vec3 hv=rgb2hsv(clamp(c,0.,1.));float dh=0.,ds=0.,dl=0.;
+            for(int i=0;i<8;i++){float dd=abs(hv.x-bc[i]);dd=min(dd,1.-dd);float w=max(0.,1.-dd/.1667);dh+=w*hs[i].x;ds+=w*hs[i].y;dl+=w*hs[i].z;}
+            float sw2=smoothstep(.04,.2,hv.y);
+            hv.x=fract(hv.x+dh/360.*sw2);hv.y=clamp(hv.y*(1.+ds*sw2),0.,1.);
+            c=hsv2rgb(hv)*(1.+dl*.6*sw2);
+           }
+           o=vec4(clamp(c,0.,1.),1.);
+          }
+          """
+
               const val FFADE = """#version 300 es
           precision mediump float;
           uniform float a;out vec4 o;
@@ -5295,6 +5582,7 @@ jobs:
                       Item("fog", "Kepadatan kabut", 0.01, 0.0, 0.05, 0.0005, false),
                       Item("fov", "FOV (rad)", 1.41725, 0.5, 2.2, 0.01, false),
                       Item("exp", "Exposure", 1.2, 0.2, 4.0, 0.05, false),
+                      Item("scale", "Skala resolusi render", 1.5, 0.4, 1.5, 0.05, false),
                   )),
                   Cat("Lighting & Sun", listOf(
                       Item("spp", "SPP bake", 12.0, 1.0, 128.0, 1.0, true),
@@ -5362,8 +5650,24 @@ jobs:
                       Item("c2Sh", "2D: self-shadow contrast", 1.0, 0.0, 2.5, 0.05, false),
                       Item("c2Hz", "2D: horizon haze", 1.0, 0.0, 2.0, 0.05, false),
                   )),
+                  Cat("Depth of Field", listOf(
+                      Item("dof", "Aperture strength (0 = off)", 0.0, 0.0, 2.0, 0.05, false),
+                      Item("dofDist", "Manual focus distance (m)", 8.0, 0.3, 300.0, 0.1, false),
+                      Item("dofRad", "Probe radius (screen fraction)", 0.03, 0.005, 0.15, 0.005, false),
+                      Item("dofSpd", "Focus transition speed", 5.0, 0.5, 20.0, 0.5, false),
+                      Item("dofMax", "Max blur radius", 0.016, 0.004, 0.05, 0.001, false),
+                      Item("dofMin", "Minimum focus distance (m)", 0.4, 0.1, 5.0, 0.05, false),
+                      Item("dofSky", "Focus distance when looking at sky (m)", 300.0, 20.0, 1500.0, 10.0, false),
+                      Item("dofAF", "Autofocus ON (0 = manual distance)", 1.0, 0.0, 1.0, 1.0, false),
+                  )),
                   Cat("Post FX", listOf(
                       Item("post", "Post-processing (0/1)", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("bloom", "Bloom", 0.6, 0.0, 3.0, 0.05, false),
+                      Item("bloomTh", "Ambang bloom", 1.0, 0.3, 4.0, 0.05, false),
+                      Item("shaft", "God rays (sinar matahari)", 0.5, 0.0, 2.0, 0.05, false),
+                      Item("mblur", "Motion blur kamera", 0.432, 0.0, 1.5, 0.05, false),
+                      Item("sharp", "Sharpen", 0.3, 0.0, 1.0, 0.05, false),
+                      Item("ca", "Chromatic aberration", 0.1, 0.0, 1.0, 0.05, false),
                       Item("grade", "Color grade sinematik (teal/orange)", 0.4, 0.0, 1.0, 0.05, false),
                       Item("sat", "Saturasi", 1.08, 0.0, 2.0, 0.02, false),
                       Item("con", "Kontras", 1.06, 0.6, 1.6, 0.02, false),
@@ -5371,13 +5675,26 @@ jobs:
                       Item("vig", "Vignette", 0.2, 0.0, 1.0, 0.02, false),
                       Item("grain", "Film grain", 0.02, 0.0, 0.2, 0.005, false),
                   )),
+                  Cat("Auto Exposure", listOf(
+                      Item("aeOn", "Auto-eksposur (0/1)", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("aeStr", "Kekuatan adaptasi", 1.2, 0.0, 1.2, 0.01, false),
+                      Item("aeKey", "Kecerahan acuan", 0.03, 0.03, 0.8, 0.005, false),
+                      Item("aeUp", "Waktu terang kembali (detik)", 1.4, 0.1, 6.0, 0.05, false),
+                      Item("aeDown", "Waktu meredup (detik)", 0.45, 0.1, 6.0, 0.05, false),
+                      Item("aeMin", "Batas bawah", 0.7, 0.3, 1.0, 0.01, false),
+                      Item("aeMax", "Batas atas", 3.0, 1.0, 3.0, 0.01, false),
+                  )),
                   Cat("Lens & Film", listOf(
                       Item("flare", "Lens flare matahari", 0.4, 0.0, 2.0, 0.05, false),
                       Item("streak", "Streak anamorfik biru", 0.35, 0.0, 2.0, 0.05, false),
                       Item("glare", "Glare / veil sekitar matahari", 0.35, 0.0, 2.0, 0.05, false),
                       Item("halat", "Halation (glow oranye di highlight)", 0.3, 0.0, 1.5, 0.05, false),
+                      Item("dirt", "Kotoran lensa (kena bloom & flare)", 1.5, 0.0, 1.5, 0.05, false),
+                      Item("leak", "Light leak film", 2.0, 0.0, 2.0, 0.05, false),
                       Item("bleach", "Bleach bypass", 0.0, 0.0, 1.0, 0.05, false),
                       Item("matte", "Hitam matte / fade film", 0.03, 0.0, 0.3, 0.01, false),
+                      Item("lens", "Distorsi lensa (barrel)", 0.05, 0.0, 0.5, 0.01, false),
+                      Item("pmist", "Diffusion / Pro-Mist", 0.25, 0.0, 2.0, 0.05, false),
                   )),
                   Cat("Grade: Basics", listOf(
                       Item("gOn", "Grading aktif (0/1)", 1.0, 0.0, 1.0, 1.0, false),
@@ -5391,6 +5708,36 @@ jobs:
                       Item("gVib", "Vibrance", 0.0, -1.0, 1.0, 0.01, false),
                       Item("gBlk", "Titik hitam (angkat bayangan)", 0.0, -0.1, 0.2, 0.001, false),
                       Item("gWht", "Titik putih", 1.1, 0.6, 1.1, 0.005, false),
+                  )),
+                  Cat("Grade: Curves", listOf(
+                      Item("cvM0", "Master @0%", 0.0, -0.1, 1.1, 0.005, false),
+                      Item("cvM1", "Master @12.5%", 0.125, -0.1, 1.1, 0.005, false),
+                      Item("cvM2", "Master @25%", 0.25, -0.1, 1.1, 0.005, false),
+                      Item("cvM3", "Master @50%", 0.5, -0.1, 1.1, 0.005, false),
+                      Item("cvM4", "Master @75%", 0.75, -0.1, 1.1, 0.005, false),
+                      Item("cvM5", "Master @87.5%", 0.875, -0.1, 1.1, 0.005, false),
+                      Item("cvM6", "Master @100%", 1.0, -0.1, 1.1, 0.005, false),
+                      Item("cvR0", "Merah @0%", 0.0, -0.1, 1.1, 0.005, false),
+                      Item("cvR1", "Merah @12.5%", 0.125, -0.1, 1.1, 0.005, false),
+                      Item("cvR2", "Merah @25%", 0.25, -0.1, 1.1, 0.005, false),
+                      Item("cvR3", "Merah @50%", 0.5, -0.1, 1.1, 0.005, false),
+                      Item("cvR4", "Merah @75%", 0.75, -0.1, 1.1, 0.005, false),
+                      Item("cvR5", "Merah @87.5%", 0.875, -0.1, 1.1, 0.005, false),
+                      Item("cvR6", "Merah @100%", 1.0, -0.1, 1.1, 0.005, false),
+                      Item("cvG0", "Hijau @0%", 0.0, -0.1, 1.1, 0.005, false),
+                      Item("cvG1", "Hijau @12.5%", 0.125, -0.1, 1.1, 0.005, false),
+                      Item("cvG2", "Hijau @25%", 0.25, -0.1, 1.1, 0.005, false),
+                      Item("cvG3", "Hijau @50%", 0.5, -0.1, 1.1, 0.005, false),
+                      Item("cvG4", "Hijau @75%", 0.75, -0.1, 1.1, 0.005, false),
+                      Item("cvG5", "Hijau @87.5%", 0.875, -0.1, 1.1, 0.005, false),
+                      Item("cvG6", "Hijau @100%", 1.0, -0.1, 1.1, 0.005, false),
+                      Item("cvB0", "Biru @0%", 0.0, -0.1, 1.1, 0.005, false),
+                      Item("cvB1", "Biru @12.5%", 0.125, -0.1, 1.1, 0.005, false),
+                      Item("cvB2", "Biru @25%", 0.25, -0.1, 1.1, 0.005, false),
+                      Item("cvB3", "Biru @50%", 0.5, -0.1, 1.1, 0.005, false),
+                      Item("cvB4", "Biru @75%", 0.75, -0.1, 1.1, 0.005, false),
+                      Item("cvB5", "Biru @87.5%", 0.875, -0.1, 1.1, 0.005, false),
+                      Item("cvB6", "Biru @100%", 1.0, -0.1, 1.1, 0.005, false),
                   )),
                   Cat("Grade: Wheels", listOf(
                       Item("glR", "Lift R (bayangan)", 0.0, -0.2, 0.2, 0.002, false),
@@ -5406,6 +5753,32 @@ jobs:
                       Item("stSS", "Split-tone bayangan: kekuatan", 0.0, 0.0, 1.0, 0.01, false),
                       Item("stHH", "Split-tone highlight: hue", 0.1, 0.0, 1.0, 0.01, false),
                       Item("stHS", "Split-tone highlight: kekuatan", 0.0, 0.0, 1.0, 0.01, false),
+                  )),
+                  Cat("Grade: HSL", listOf(
+                      Item("hH0", "Merah: hue (derajat)", 0.0, -60.0, 60.0, 0.5, false),
+                      Item("hS0", "Merah: saturasi", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("hL0", "Merah: luminans", 0.0, -0.6, 0.6, 0.01, false),
+                      Item("hH1", "Jingga: hue (derajat)", 0.0, -60.0, 60.0, 0.5, false),
+                      Item("hS1", "Jingga: saturasi", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("hL1", "Jingga: luminans", 0.0, -0.6, 0.6, 0.01, false),
+                      Item("hH2", "Kuning: hue (derajat)", 0.0, -60.0, 60.0, 0.5, false),
+                      Item("hS2", "Kuning: saturasi", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("hL2", "Kuning: luminans", 0.0, -0.6, 0.6, 0.01, false),
+                      Item("hH3", "Hijau: hue (derajat)", 0.0, -60.0, 60.0, 0.5, false),
+                      Item("hS3", "Hijau: saturasi", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("hL3", "Hijau: luminans", 0.0, -0.6, 0.6, 0.01, false),
+                      Item("hH4", "Aqua: hue (derajat)", 0.0, -60.0, 60.0, 0.5, false),
+                      Item("hS4", "Aqua: saturasi", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("hL4", "Aqua: luminans", 0.0, -0.6, 0.6, 0.01, false),
+                      Item("hH5", "Biru: hue (derajat)", 0.0, -60.0, 60.0, 0.5, false),
+                      Item("hS5", "Biru: saturasi", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("hL5", "Biru: luminans", 0.0, -0.6, 0.6, 0.01, false),
+                      Item("hH6", "Ungu: hue (derajat)", 0.0, -60.0, 60.0, 0.5, false),
+                      Item("hS6", "Ungu: saturasi", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("hL6", "Ungu: luminans", 0.0, -0.6, 0.6, 0.01, false),
+                      Item("hH7", "Magenta: hue (derajat)", 0.0, -60.0, 60.0, 0.5, false),
+                      Item("hS7", "Magenta: saturasi", 0.0, -1.0, 1.0, 0.01, false),
+                      Item("hL7", "Magenta: luminans", 0.0, -0.6, 0.6, 0.01, false),
                   )),
                   Cat("Terrain & Seed", listOf(
                       Item("seed", "Seed", 1.0, 0.0, 999999999.0, 1.0, true),
