@@ -2024,12 +2024,12 @@ jobs:
           window.VM=VM;
           /* ---------- latar belakang: grid + partikel techy, ikut jari ---------- */
           const cv=$('#wd'),X=cv.getContext('2d');
-          let W,H,DPR=1,pt=null,F=[],CM=[],MAXF=220;
+          let W,H,DPR=1,pt=null,F=[],CM=[],MAXF=260;
           const NEON=['rgba(47,227,255,','rgba(138,92,255,','rgba(255,61,110,','rgba(47,255,176,','rgba(255,178,61,'];
           function size(){DPR=Math.min(2,devicePixelRatio||1);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+'px';cv.style.height=H+'px';X.setTransform(DPR,0,0,DPR,0,0);
-           const n=Math.min(MAXF,Math.round(W*H/6200));F=Array.from({length:n},()=>mk())}
-          function mk(){const z=.35+Math.random()*.65;return{x:Math.random()*W,y:Math.random()*H,z,
-           vx:(Math.random()-.5)*.3*z,vy:(Math.random()-.5)*.3*z,c:NEON[Math.random()*NEON.length|0],r:(.8+Math.random()*1.8)*z,
+           const n=Math.min(MAXF,Math.round(W*H/3800));F=Array.from({length:n},()=>mk())}
+          function mk(){const z=.65+Math.random()*.55;return{x:Math.random()*W,y:Math.random()*H,z,
+           vx:(Math.random()-.5)*.3*z,vy:(Math.random()-.5)*.3*z,c:NEON[Math.random()*NEON.length|0],r:(1.6+Math.random()*2.2)*z,
            ph:Math.random()*6.28,tw:.6+Math.random()*1.1,born:performance.now()}}
           function comet(){const side=Math.random()<.5;const x0=side?-40:W+40,y0=Math.random()*H*.6;
            CM.push({x:x0,y:y0,vx:(side?1:-1)*(9+Math.random()*5),vy:2+Math.random()*3,life:1,c:NEON[Math.random()*NEON.length|0]})}
@@ -2047,13 +2047,13 @@ jobs:
            const R2=120*120;
            for(let i=0;i<F.length;i++)for(let j=i+1;j<F.length;j++){
             const a=F[i],b=F[j],dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy;
-            if(d2<R2){const d=Math.sqrt(d2),op=.14*(1-d/120)*Math.min(a.z,b.z);
+            if(d2<R2){const d=Math.sqrt(d2),op=.2*(1-d/120)*Math.min(a.z,b.z);
              const lg=X.createLinearGradient(a.x,a.y,b.x,b.y);lg.addColorStop(0,a.c+op+')');lg.addColorStop(1,b.c+op+')');
              X.strokeStyle=lg;X.lineWidth=1;X.beginPath();X.moveTo(a.x,a.y);X.lineTo(b.x,b.y);X.stroke()}
            }
            for(const f of F){
-            const age=n-f.born,grow=age<420?age/420:1,twk=.55+.45*Math.sin(t*f.tw+f.ph),a=twk*grow;
-            X.fillStyle=f.c+(.75*a)+')';X.shadowColor=f.c+(.9*a)+')';X.shadowBlur=6*f.z+2;
+            const age=n-f.born,grow=age<420?age/420:1,twk=.65+.35*Math.sin(t*f.tw+f.ph),a=twk*grow;
+            X.fillStyle=f.c+(.95*a)+')';X.shadowColor=f.c+'1)';X.shadowBlur=9*f.z+3;
             X.beginPath();X.arc(f.x,f.y,f.r*grow,0,7);X.fill();X.shadowBlur=0;
            }
            nextCm-=dt;if(nextCm<=0){comet();nextCm=2600+Math.random()*3800}
