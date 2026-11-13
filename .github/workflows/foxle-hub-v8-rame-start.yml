@@ -2024,11 +2024,11 @@ jobs:
           window.VM=VM;
           /* ---------- latar belakang: grid + partikel techy, ikut jari ---------- */
           const cv=$('#wd'),X=cv.getContext('2d');
-          let W,H,DPR=1,pt=null,F=[],MAXF=170;
+          let W,H,DPR=1,pt=null,F=[],MAXF=260,INITCAP=260;
           const NEON=['rgba(47,227,255,','rgba(138,92,255,','rgba(255,61,110,','rgba(47,255,176,'];
           function size(){DPR=Math.min(2,devicePixelRatio||1);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+'px';cv.style.height=H+'px';X.setTransform(DPR,0,0,DPR,0,0);
-           const n=Math.min(MAXF,Math.round(W*H/8500));F=Array.from({length:n},()=>mk())}
-          function mk(){return{x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.25,vy:(Math.random()-.5)*.25,c:NEON[Math.random()*NEON.length|0],r:1+Math.random()*1.6}}
+           const n=Math.min(INITCAP,Math.round(W*H/3000));F=Array.from({length:n},()=>mk())}
+          function mk(){return{x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.25,vy:(Math.random()-.5)*.25,c:NEON[Math.random()*NEON.length|0],r:2.6+Math.random()*3.4}}
           let last=0;
           function frame(n){requestAnimationFrame(frame);if(document.hidden||n-last<33)return;last=n;const t=n/1000;
            X.clearRect(0,0,W,H);
@@ -2040,12 +2040,12 @@ jobs:
             f.vx*=.985;f.vy*=.985;f.x+=f.vx;f.y+=f.vy;
             if(f.x<-20)f.x=W+20;if(f.x>W+20)f.x=-20;if(f.y<-20)f.y=H+20;if(f.y>H+20)f.y=-20;
            }
-           const R2=120*120;
+           const LR=220,R2=LR*LR;
            for(let i=0;i<F.length;i++)for(let j=i+1;j<F.length;j++){
             const a=F[i],b=F[j],dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy;
-            if(d2<R2){const d=Math.sqrt(d2);X.strokeStyle=a.c+(.12*(1-d/120))+')';X.lineWidth=1;X.beginPath();X.moveTo(a.x,a.y);X.lineTo(b.x,b.y);X.stroke()}
+            if(d2<R2){const d=Math.sqrt(d2);X.strokeStyle=a.c+(.22*(1-d/LR))+')';X.lineWidth=1.2;X.beginPath();X.moveTo(a.x,a.y);X.lineTo(b.x,b.y);X.stroke()}
            }
-           for(const f of F){X.fillStyle=f.c+'.9)';X.shadowColor=f.c+'.9)';X.shadowBlur=6;X.beginPath();X.arc(f.x,f.y,f.r,0,7);X.fill();X.shadowBlur=0}
+           for(const f of F){X.fillStyle=f.c+'.95)';X.shadowColor=f.c+'1)';X.shadowBlur=9;X.beginPath();X.arc(f.x,f.y,f.r,0,7);X.fill();X.shadowBlur=0}
           }
           const pp=e=>{pt={x:e.clientX,y:e.clientY}};
           document.addEventListener('pointermove',pp,{passive:true});
