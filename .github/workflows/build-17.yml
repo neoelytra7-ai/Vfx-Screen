@@ -5213,7 +5213,7 @@ jobs:
           uniform vec3 R,U,F;uniform vec2 th;out vec3 rd;
           void main(){vec2 q=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2))*2.-1.;rd=F+R*q.x*th.x+U*q.y*th.y;gl_Position=vec4(q,1.,1.);}"""
 
-              val PKF: String = """#version 300 es
+              val PKF: String get() = """#version 300 es
           precision highp float;precision highp sampler2D;precision highp sampler3D;in vec3 rd;uniform float tm,cld;uniform sampler2D ct;
           """ + "\n" + SKYF + "\n" + FIN + "\nuniform float tmo,hs;\n" + """
           out vec4 o;
@@ -5322,7 +5322,7 @@ jobs:
           if(cq>0&&cld>0.&&d.y>.012){float tf,rn=fract(sin(dot(gl_FragCoord.xy+tm*13.,vec2(12.9898,78.233)))*43758.5453);vec3 hzc=skyc(normalize(vec3(d.x,.02,d.z)))*1.05+.04;vec4 r=CL(cpk,d,rn,tm,hzc,tf);c=mix(c,c*r.a+r.rgb,smoothstep(.012,.03,d.y));}
           o=(tmo>.5)?vec4(fin(c*hs),1.):vec4(c,1.);}"""
 
-              val SCF: String = "#version 300 es\nprecision highp float;\nin vec3 rd;uniform samplerCube cb;uniform float hs;out vec4 o;\n" + FIN + "\nvoid main(){o=vec4(fin(textureLod(cb,normalize(rd),0.).rgb*hs),1.);}\n"
+              val SCF: String get() = "#version 300 es\nprecision highp float;\nin vec3 rd;uniform samplerCube cb;uniform float hs;out vec4 o;\n" + FIN + "\nvoid main(){o=vec4(fin(textureLod(cb,normalize(rd),0.).rgb*hs),1.);}\n"
 
               const val FIN = """
           uniform float cex,sat,con;uniform vec4 g1,g2,g3,g4,g5;uniform vec3 gLi,gGa,gGn;
