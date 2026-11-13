@@ -503,8 +503,8 @@ jobs:
                   val np = min(8, max(5, ceil(pa.len / 45f).toInt()))
                   val px = FloatArray(np); val pz = FloatArray(np); val o = FloatArray(3)
                   for (k in 0 until np) { pa.at(k / (np - 1).toFloat(), o); px[k] = o[0]; pz[k] = o[2] }
-                  val dur = 9f * (.85f + rf() * .3f) * dk
-                  return Shot(pa, T, sp, fov, dur, ease, bank, shake, camR, dolly, z0, z1, dtc, ev, tag.toString(),
+                  val dur = CinCfg.len * (.85f + rf() * .3f) * dk
+                  return Shot(pa, T, sp, fov, dur, ease, bank, shake * CinCfg.shake, camR, dolly, z0, z1, dtc, ev, tag.toString(),
                       names1[r.nextInt(10)] + " " + names2[r.nextInt(8)], X, Z, px, pz)
               }
           }
@@ -1111,7 +1111,7 @@ jobs:
                       return
                   }
                   ct += dt
-                  fade = max(0f, fade - dt / 1.2f)
+                  fade = max(0f, fade - dt / CinCfg.fade)
                   val u = min(1f, ct / c.dur)
                   rig.pose(c, rig.ease(u, c.ease), ct, dt, pose); apply()
                   val n = nx
@@ -1426,7 +1426,7 @@ jobs:
                   }
                   G.glDisable(G.GL_BLEND); G.glEnable(G.GL_DEPTH_TEST)
                   // letterbox 2.39:1
-                  if (cin) {
+                  if (cin && cfg.getK("specLb") > .5) {
                       val bh = ((sh - sw / 2.39f) / 2f).toInt()
                       if (bh > 0) {
                           G.glEnable(G.GL_SCISSOR_TEST); G.glClearColor(0f, 0f, 0f, 1f)
@@ -1699,10 +1699,11 @@ jobs:
                   doubleArrayOf(1.05, NN, .25, NN, NN, NN, NN, NN, NN, NN))
               private fun fv(f: DoubleArray?, i: Int, def: Double): Double { if (f == null) return def; val x = f[i]; return if (x.isNaN()) def else x }
 
-              fun setPhoto(on: Boolean) { photo = on }
+              fun photoMode(on: Boolean) { photo = on }
 
               /** Mode foto: turunkan efek dari parameter kamera (port derive() HTML), pulihkan nilai asli saat keluar. */
               private fun photoStep() {
+                  CinCfg.len = cfg.getK("specLen").toFloat(); CinCfg.shake = cfg.getK("specShake").toFloat() / 3f; CinCfg.fade = Math.max(.2f, cfg.getK("specFade").toFloat() * 2f)
                   if (photo != photoWas) {
                       photoWas = photo
                       if (photo) { photoSaved.clear(); for (k in pdk) photoSaved[k] = cfg.getK(k) }
@@ -1847,8 +1848,16 @@ jobs:
                   shb.text = "\u25C9"; shb.textSize = 26f; shb.visibility = View.GONE
                   root.addView(shb, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.setMargins(0, 0, 0, 40) })
                   shb.setOnClickListener { r.shotReq = true }
+                  val xh = TextView(this)
+                  xh.text = "+"; xh.setTextColor(0xCCFFFFFF.toInt()); xh.textSize = 22f
+                  root.addView(xh, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+                  val xhH = android.os.Handler(android.os.Looper.getMainLooper())
+                  val xhR = object : Runnable {
+                      override fun run() { xh.visibility = if (r.cfg.getK("cross") > .5 && !menu.isOpen()) View.VISIBLE else View.GONE; xhH.postDelayed(this, 500) }
+                  }
+                  xhH.post(xhR)
                   pb.setOnClickListener {
-                      r.setPhoto(!r.photo)
+                      r.photoMode(!r.photo)
                       val on = r.photo
                       pov.visibility = if (on) View.VISIBLE else View.GONE
                       shb.visibility = if (on) View.VISIBLE else View.GONE
@@ -5937,6 +5946,7 @@ jobs:
                       Item("stMW", "Milky Way", 1.0, 0.0, 3.0, 0.05, false),
                       Item("stMWTilt", "Milky Way tilt (rad)", 0.9, 0.0, 3.14, 0.01, false),
                       Item("stDark", "Night sky darkness", 0.85, 0.0, 1.0, 0.01, false),
+                      Item("stShoot", "Shooting stars rate", 0.35, 0.0, 3.0, 0.05, false),
                   )),
                   Cat("Moon", listOf(
                       Item("mnOn", "Moon enabled", 1.0, 0.0, 1.0, 1.0, false),
@@ -5986,6 +5996,7 @@ jobs:
                       Item("c2Soft", "2D: edge softness", 1.0, 0.3, 3.0, 0.05, false),
                       Item("c2Sh", "2D: self-shadow contrast", 1.0, 0.0, 2.5, 0.05, false),
                       Item("c2Hz", "2D: horizon haze", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("c2Warp", "2D: anti-tiling warp", 1.0, 0.0, 3.0, 0.05, false),
                       Item("cvDen", "Volumetric: density", 0.85, 0.2, 4.0, 0.05, false),
                       Item("cvSp", "Volumetric: drift speed", 0.0, 0.0, 6.0, 0.05, false),
                       Item("cvDir", "Volumetric: drift direction (rad)", 1.09, 0.0, 6.283, 0.01, false),
@@ -6384,6 +6395,7 @@ jobs:
                       Item("sndOn", "Sound enabled", 1.0, 0.0, 1.0, 1.0, false),
                       Item("sndMaster", "Master volume", 0.8, 0.0, 1.5, 0.01, false),
                       Item("sndAmb", "Ambience bed", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndLim", "Limiter / auto-gain", 1.0, 0.0, 1.0, 1.0, false),
                       Item("sndTod", "Day / night variation", 1.0, 0.0, 1.5, 0.05, false),
                   )),
                   Cat("Wind & Foliage", listOf(
@@ -6393,19 +6405,29 @@ jobs:
                       Item("sndFol", "Foliage rustle (overall)", 1.0, 0.0, 2.0, 0.05, false),
                       Item("sndGrass", "Grass swish", 1.0, 0.0, 2.0, 0.05, false),
                       Item("sndLeaf", "Leaf canopy rustle", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndCreak", "Tree creaks in strong wind", 1.0, 0.0, 2.0, 0.05, false),
                   )),
                   Cat("Water", listOf(
                       Item("sndWater", "Rivers & streams", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndWave", "Ocean waves & shore", 1.0, 0.0, 2.0, 0.05, false),
                       Item("sndUnder", "Underwater audio", 1.0, 0.0, 2.0, 0.05, false),
                   )),
                   Cat("Creatures", listOf(
                       Item("sndBird", "Birdsong", 1.0, 0.0, 2.0, 0.05, false),
                       Item("sndInsect", "Insects (crickets, cicadas)", 1.0, 0.0, 2.0, 0.05, false),
                       Item("sndFrog", "Frogs", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndGull", "Seagulls", 1.0, 0.0, 2.0, 0.05, false),
                   )),
                   Cat("Player & Space", listOf(
                       Item("sndFoot", "Footsteps", 1.0, 0.0, 2.0, 0.05, false),
+                      Item("sndReverb", "Reverb amount", 1.0, 0.0, 2.0, 0.05, false),
                       Item("sndHP", "High-frequency damping", 0.5, 0.0, 1.0, 0.05, false),
+                  )),
+                  Cat("Spectator & Drone", listOf(
+                      Item("specLen", "Durasi shot (detik)", 7.0, 4.0, 40.0, 0.5, false),
+                      Item("specLb", "Letterbox otomatis (0/1)", 1.0, 0.0, 1.0, 1.0, false),
+                      Item("specFade", "Durasi fade antar shot (detik)", 0.6, 0.1, 2.0, 0.05, false),
+                      Item("specShake", "Handheld sinema", 3.0, 0.0, 3.0, 0.05, false),
                   )),
                   Cat("Camera Feel", listOf(
                       Item("camSmooth", "Kekakuan ikut tanah (0=tanpa smoothing)", 40.0, 0.0, 40.0, 0.5, false),
@@ -6436,6 +6458,9 @@ jobs:
                       Item("camGrid", "Grid (0 off 1 thirds 2 golden 3 diagonal 4 cross)", 1.0, 0.0, 4.0, 1.0, false),
                       Item("camFocusM", "Focus (0 auto-probe 1 manual 2 tap)", 0.0, 0.0, 2.0, 1.0, false),
                       Item("camFocusD", "Manual focus distance (m)", 8.0, 0.3, 300.0, 0.1, false),
+                  )),
+                  Cat("Interface", listOf(
+                      Item("cross", "Crosshair (0/1)", 1.0, 0.0, 1.0, 1.0, false),
                   )),
                   Cat("Performance", listOf(
                       Item("lowRam", "Low-RAM mode flag (use the buttons below)", 1.0, 0.0, 1.0, 1.0, true),
@@ -6711,6 +6736,13 @@ jobs:
                   if (visibility == VISIBLE) postInvalidateDelayed(250)
               }
           }
+
+          /** Parameter sinema yang diatur lewat menu (dibaca Cinematic.kt / Renderer). */
+          object CinCfg {
+              @JvmField @Volatile var len = 9f
+              @JvmField @Volatile var shake = 1f
+              @JvmField @Volatile var fade = 1.2f
+          }
           EOF
 
           cat > $P/java/com/infinitepath/app/Audio.kt <<'EOF'
@@ -6770,6 +6802,8 @@ jobs:
                   var chL = 0; var chN = 1; var chF0 = 3000f; var chF1 = 3500f; var chPh = 0f
                   var crPh = 0f; var crPh2 = 0f; var frPh = 0f; var frPh2 = 0f
                   var stepIn = 0; var fL = 0
+                  var w4 = 0f; var guL = 0; var guT = 1; var guPh = 0f; var crL = 0; var crT = 1; var crPh2 = 0f
+                  val rb1 = FloatArray(1031); val rb2 = FloatArray(1327); val rb3 = FloatArray(1613); var i1 = 0; var i2 = 0; var i3 = 0
                   while (run) {
                       val c = cfg()
                       val on = c.getK("sndOn") > .5
@@ -6788,6 +6822,11 @@ jobs:
                       val crG = c.getK("sndInsect").toFloat() * .035f * nt * tod * amb
                       val frG = c.getK("sndFrog").toFloat() * .09f * nt * min(1f, water * 3f) * tod * amb
                       val footG = c.getK("sndFoot").toFloat() * .55f
+                      val waveG = water * c.getK("sndWave").toFloat() * .22f * amb
+                      val gullRate = .5f * c.getK("sndGull").toFloat() * dy * min(1f, water * 4f) * amb * (if (under) 0f else 1f)
+                      val creakRate = .25f * c.getK("sndCreak").toFloat() * max(0f, wv - 1f) * amb * (if (under) 0f else 1f)
+                      val revMix = c.getK("sndReverb").toFloat() * .22f
+                      val limOn = c.getK("sndLim") > .5
                       val hpd = c.getK("sndHP").toFloat() * .4f
                       val un = under
                       val underG = c.getK("sndUnder").toFloat()
@@ -6828,6 +6867,32 @@ jobs:
                               val g = max(0f, sin(frPh2)) * max(0f, sin(frPh2 * .27f))
                               s += sin(frPh + sin(frPh * .5f) * 2f) * g * frG
                           }
+                          // gelombang pantai
+                          if (waveG > 0f) {
+                              w4 += (n - w4) * .05f
+                              val sw = .5f + .5f * sin(t * .45).toFloat()
+                              s += w4 * waveG * sw * sw * 9f
+                          }
+                          // camar
+                          if (guL <= 0) {
+                              if (gullRate > 0f && rnd.nextFloat() < gullRate / SR) { guT = (SR * (.35f + rnd.nextFloat() * .3f)).toInt(); guL = guT }
+                          } else {
+                              val pr = 1f - guL / guT.toFloat()
+                              val fr = 900f + 500f * sin(PI.toFloat() * pr) + 40f * sin(pr * 40f)
+                              guPh += 2f * PI.toFloat() * fr / SR
+                              s += sin(guPh) * sin(PI.toFloat() * pr) * .07f * c.getK("sndGull").toFloat() * dy
+                              guL--
+                          }
+                          // derit pohon/kayu saat angin kencang
+                          if (crL <= 0) {
+                              if (creakRate > 0f && rnd.nextFloat() < creakRate / SR) { crT = (SR * (.4f + rnd.nextFloat() * .5f)).toInt(); crL = crT }
+                          } else {
+                              val pr = 1f - crL / crT.toFloat()
+                              val fr = 170f - 60f * pr
+                              crPh2 += 2f * PI.toFloat() * fr / SR
+                              s += sin(crPh2 + 3f * sin(crPh2 * .07f)) * sin(PI.toFloat() * pr) * .04f * c.getK("sndCreak").toFloat()
+                              crL--
+                          }
                           // langkah
                           if (sp > .5f && gr && !un) {
                               stepIn--
@@ -6838,10 +6903,16 @@ jobs:
                               s += ft * (fL / (SR * .09f)) * footG
                               fL--
                           }
+                          if (revMix > 0f) {
+                              val d1 = rb1[i1]; val d2 = rb2[i2]; val d3 = rb3[i3]
+                              rb1[i1] = s + d1 * .55f; rb2[i2] = s + d2 * .5f; rb3[i3] = s + d3 * .45f
+                              if (++i1 >= rb1.size) i1 = 0; if (++i2 >= rb2.size) i2 = 0; if (++i3 >= rb3.size) i3 = 0
+                              s += (d1 + d2 + d3) * revMix
+                          }
                           if (un) { u1 += (s - u1) * .035f; s = u1 * (1.8f + underG) * .9f + w1 * .15f * underG }
                           hp += (s - hp) * .25f
                           s = s * (1f - hpd) + hp * hpd
-                          val o = tanh((s * master * 1.6f).toDouble()).toFloat()
+                          val o = if (limOn) tanh((s * master * 1.6f).toDouble()).toFloat() else (s * master * 1.6f).coerceIn(-1f, 1f)
                           buf[i] = (o * 28000f).toInt().coerceIn(-32768, 32767).toShort()
                           t += 1.0 / SR
                       }
