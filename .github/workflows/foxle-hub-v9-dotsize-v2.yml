@@ -2028,7 +2028,7 @@ jobs:
           const NEON=['rgba(47,227,255,','rgba(138,92,255,','rgba(255,61,110,','rgba(47,255,176,'];
           function size(){DPR=Math.min(2,devicePixelRatio||1);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+'px';cv.style.height=H+'px';X.setTransform(DPR,0,0,DPR,0,0);
            const n=Math.min(INITCAP,Math.round(W*H/3000));F=Array.from({length:n},()=>mk())}
-          function mk(){return{x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.25,vy:(Math.random()-.5)*.25,c:NEON[Math.random()*NEON.length|0],r:2.6+Math.random()*3.4}}
+          function mk(){return{x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.25,vy:(Math.random()-.5)*.25,c:NEON[Math.random()*NEON.length|0],r:1+Math.random()*1.6}}
           let last=0;
           function frame(n){requestAnimationFrame(frame);if(document.hidden||n-last<33)return;last=n;const t=n/1000;
            X.clearRect(0,0,W,H);
