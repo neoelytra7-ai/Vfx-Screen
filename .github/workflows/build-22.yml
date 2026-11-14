@@ -1,4 +1,4 @@
-# Sonara - builds the Android app from the heredocs below, signs it with a persistent key,
+# Sonara - builds the Android app from the heredocs below, signs it with a persistent key (kept in the 'signing-key' release),
 # publishes the APK as a GitHub Release, and the app updates itself from that release.
 #
 # Setup: put this file at .github/workflows/build.yml and push. That is all.
@@ -19,14 +19,14 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -3355,6 +3355,8 @@ jobs:
 
       - name: Prepare signing key
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
           KS_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KS_ALIAS_SECRET: ${{ secrets.KEY_ALIAS }}
@@ -3370,14 +3372,21 @@ jobs:
               echo "KS_ALIAS=${KS_ALIAS_SECRET:-sonara}"
             } >> "$GITHUB_ENV"
           else
-            if [ ! -f signing/app.jks ]; then
+            if gh release view signing-key > /dev/null 2>&1; then
+              echo "Re-using the signing key stored in the signing-key release"
+              gh release download signing-key --pattern app.jks --dir signing --clobber
+            else
               echo "First run: generating a persistent signing key"
               keytool -genkeypair -noprompt -keystore signing/app.jks -storetype PKCS12 \
                 -storepass sonara-ci-key -keypass sonara-ci-key -alias sonara \
                 -keyalg RSA -keysize 3072 -validity 36500 \
                 -dname "CN=Sonara, O=Sonara, C=ID"
-              echo "NEW_KEY=1" >> "$GITHUB_ENV"
+              gh release create signing-key signing/app.jks \
+                --title "Signing key (do not delete)" \
+                --notes "Key used by CI so every APK installs over the previous one. Deleting this release breaks in-place updates." \
+                --latest=false
             fi
+            keytool -list -keystore signing/app.jks -storepass sonara-ci-key > /dev/null
             {
               echo "KS_PATH=$GITHUB_WORKSPACE/signing/app.jks"
               echo "KS_PASS=sonara-ci-key"
@@ -3385,15 +3394,6 @@ jobs:
               echo "KS_ALIAS=sonara"
             } >> "$GITHUB_ENV"
           fi
-
-      - name: Save signing key to the repo (first run only)
-        if: env.NEW_KEY == '1'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add signing/app.jks
-          git commit -m "chore: persistent signing key so updates install in place [skip ci]"
-          git push
 
       - name: Build release APK
         working-directory: android
